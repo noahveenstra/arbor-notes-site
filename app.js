@@ -4,6 +4,7 @@
   const { parseMarkdownListItem, markdownHTML, serializeMarkdownList } = window.ArborMarkdown;
   const { field } = window.ArborCloudKitFields;
   const noteSorting = window.ArborNoteSorting;
+  const noteSync = window.ArborNoteSync;
   const proofreadingDictionary = window.ArborPersonalProofreadingDictionary;
   const proofreadingDictionarySync = window.ArborProofreadingDictionarySync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
@@ -42,6 +43,9 @@
     skipNextListTransition: false,
     editor: null,
     saveTimer: null,
+    realtimeSyncTimer: null,
+    realtimeSyncPromise: null,
+    realtimeNotificationListenerAdded: false,
     savePromise: Promise.resolve(),
     noteStyleSavePromise: Promise.resolve(),
     saveFlightCount: 0,
@@ -68,6 +72,8 @@
     dictionarySyncStatus: "Sign in to sync your dictionary.",
     dictionarySyncError: null,
     syncToken: null,
+    syncBaselines: new Map(),
+    pendingRemoteRecords: new Map(),
     cacheDBPromise: null,
     bodyCache: new Map(),
     previewCache: new Map(),
@@ -372,6 +378,9 @@
   }
 
   function discardInMemoryLibrary() {
+    window.clearInterval(state.realtimeSyncTimer);
+    state.realtimeSyncTimer = null;
+    state.realtimeSyncPromise = null;
     window.clearTimeout(state.saveTimer);
     state.saveTimer = null;
     state.dirty = false;
@@ -393,6 +402,8 @@
     state.notes = [];
     state.folders = [];
     state.syncToken = null;
+    state.syncBaselines.clear();
+    state.pendingRemoteRecords.clear();
     state.nativeZoneID = null;
     state.nativeZoneExists = false;
     state.selectedFolder = "";
@@ -950,8 +961,20 @@
     const text = error.reason || error.message || error.description || String(error);
     if (/NOT_AUTHENTICATED|AUTHENTICATION_FAILED/i.test(text)) return "Your iCloud session expired. Sign in again to continue.";
     if (/ZONE_NOT_FOUND|UNKNOWN_ITEM/i.test(text)) return "The Arbor notes zone is not available in this CloudKit environment yet.";
+    if (/OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED/i.test(text)) return "This note changed on another device. Arbor kept your local draft and is refreshing the newer iCloud version.";
     if (/SERVER_RECORD_CHANGED|CONFLICT/i.test(text)) return "This note changed in another place. Reload the note before saving more changes.";
     return text;
+  }
+
+  function cloudKitErrorText(error) {
+    if (!error) return "";
+    const values = [error.reason, error.message, error.description, error.serverErrorCode, error.code, error.errorCode];
+    if (Array.isArray(error.errors)) values.push(error.errors.map(cloudKitErrorText).join(" "));
+    return values.filter(Boolean).join(" ");
+  }
+
+  function isCloudKitRecordConflict(error) {
+    return noteSync.isRecordConflict(error);
   }
 
   function assertResponse(response) {
@@ -3335,6 +3358,16 @@
     container.appendChild(body);
     state.editor = {
       getMarkdown: function () { return bodyMarkdown(body); },
+      replaceMarkdown: function (markdown) {
+        const selection = captureEditorSelection(body);
+        const wasFocused = document.activeElement === body || body.contains(document.activeElement);
+        const scrollTop = body.scrollTop;
+        body.innerHTML = markdownHTML(markdown || "");
+        if (wasFocused) body.focus({ preventScroll: true });
+        if (selection) restoreEditorTextSelection(body, selection);
+        body.scrollTop = scrollTop;
+        scheduleProofreading(body, 120);
+      },
       destroy: function () {
         body.removeEventListener("input", onInput);
         body.removeEventListener("pointerover", onCorrectionPointerOver);
@@ -5121,6 +5154,7 @@
         if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
         state.selectedRecord = note.record;
         $("note-title").value = note.title === "Untitled" && !note.body ? "" : note.title;
+        rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
         createEditor(note.editorBody);
         if (!revealRecoveredDraft(note)) setSaveState("Saved", "saved");
         renderNotes();
@@ -5134,6 +5168,7 @@
         message.append(label, retry); $("rich-editor").replaceChildren(message); setSaveState("Load failed", "error");
       });
     } else {
+      rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
       createEditor(note.editorBody);
       if (!revealRecoveredDraft(note)) setSaveState(state.demo ? "Preview only" : "Saved", "saved");
       if (state.nativeSchema && state.bodyCache.has(note.recordName) &&
@@ -5291,6 +5326,203 @@
     scheduleLibraryCacheWrite();
   }
 
+  function sameSyncDocument(left, right) {
+    return Boolean(left && right && left.title === right.title && left.body === right.body);
+  }
+
+  function replaceActiveEditorDocument(recordName, documentValue) {
+    if (state.selectedRecordName !== recordName || !state.editor) return false;
+    const note = state.notes.find(function (item) { return item.recordName === recordName; });
+    if (!note) return false;
+    const record = state.records.get(recordName) || state.selectedRecord;
+    if (record) state.selectedRecord = record;
+    note.title = documentValue.title;
+    note.editorBody = documentValue.body;
+    note.body = isNativeModelRecord(record, "CapturedNote")
+      ? documentValue.body
+      : documentValue.title + "\n\n" + documentValue.body;
+    note.preview = previewText(documentValue.body);
+    note.previewUnavailable = false;
+    const titleInput = $("note-title");
+    if (titleInput && document.activeElement !== titleInput) {
+      titleInput.value = documentValue.title === "Untitled" && !documentValue.body ? "" : documentValue.title;
+      fitTitle();
+    }
+    if (state.editor.getMarkdown() !== documentValue.body) state.editor.replaceMarkdown(documentValue.body);
+    return true;
+  }
+
+  function applyRemoteDocumentToActiveEditor(record, documentValue) {
+    const recordName = record.recordName;
+    if (state.selectedRecordName !== recordName || state.dirty || state.saveFlightCount > 0 || !state.editor) return false;
+    state.selectedRecord = record;
+    if (!replaceActiveEditorDocument(recordName, documentValue)) return false;
+    const note = state.notes.find(function (item) { return item.recordName === recordName; });
+    state.bodyDirty = false;
+    state.dirty = false;
+    state.draftBaseline = null;
+    clearDraft(recordName);
+    rememberSyncBaseline(recordName, documentValue);
+    state.editorHistoryBaseline = captureEditorHistorySnapshot({ editorBodyChanged: true });
+    hideDraftBanner();
+    setSaveState("Saved", "saved");
+    if (note) renderNoteDate(note);
+    renderAboutPanel();
+    return true;
+  }
+
+  async function refreshZoneRecords(session) {
+    if (!accountSessionCurrent(session) || !state.nativeSchema || !state.nativeZoneID || document.visibilityState === "hidden") return;
+    if (state.realtimeSyncPromise) return state.realtimeSyncPromise;
+    const database = state.database;
+    const zoneID = state.nativeZoneID;
+    state.realtimeSyncPromise = (async function () {
+      let token = state.syncToken;
+      let more = true;
+      let safety = 0;
+      const changedNames = new Set();
+      const deletedNames = new Set();
+      while (more && safety < 1000) {
+        if (!accountSessionCurrent(session) || database !== state.database || zoneID !== state.nativeZoneID) return;
+        const options = {
+          zoneID: zoneID,
+          desiredRecordTypes: ["CD_CapturedNote", "CD_NoteFolder"],
+          desiredKeys: [
+            "CD_entityName", "CD_id", "CD_noteUUID", "CD_userTitle", "CD_generatedTitle",
+            "CD_modifiedAt", "CD_createdAt", "CD_archivedAt", "CD_folderID",
+            "CD_name", "CD_parentID", "CD_isStarred", "CD_headerFontStyle", "CD_bodyFontStyle"
+          ]
+        };
+        if (token) options.syncToken = token;
+        let response;
+        try { response = assertResponse(await database.fetchRecordZoneChanges(options)); }
+        catch (error) {
+          const message = cloudKitErrorText(error);
+          if (token && /CHANGE.?TOKEN|SYNC.?TOKEN|TOKEN.*EXPIRED|EXPIRED.*TOKEN/i.test(message)) {
+            token = null;
+            state.syncToken = null;
+            more = true;
+            continue;
+          }
+          throw error;
+        }
+        if (!accountSessionCurrent(session)) return;
+        const zones = response.zones || [];
+        const changes = zones.find(function (zone) {
+          const id = zone.zoneID || {};
+          return id.zoneName === (zoneID.zoneName || "com.apple.coredata.cloudkit.zone");
+        }) || zones[0];
+        if (!changes) break;
+        (changes.records || []).forEach(function (record) {
+          if (record.recordType !== "CD_CapturedNote" && record.recordType !== "CD_NoteFolder") return;
+          changedNames.add(record.recordName);
+          if (record.recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
+            state.pendingRemoteRecords.set(record.recordName, record);
+            return;
+          }
+          state.records.set(record.recordName, record);
+          state.bodyCache.delete(record.recordName);
+          state.previewCache.delete(record.recordName);
+          state.previewLoadErrors.delete(record.recordName);
+        });
+        (changes.deletedRecords || []).forEach(function (record) {
+          const recordName = record.recordName;
+          deletedNames.add(recordName);
+          if (recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
+            state.pendingRemoteRecords.set(recordName, null);
+            return;
+          }
+          state.records.delete(recordName);
+          state.bodyCache.delete(recordName);
+          state.previewCache.delete(recordName);
+          state.previewLoadErrors.delete(recordName);
+        });
+        token = changes.syncToken || token;
+        state.syncToken = token;
+        more = Boolean(changes.moreComing);
+        safety += 1;
+      }
+      if (!accountSessionCurrent(session)) return;
+      const selectedName = state.selectedRecordName;
+      const selectedChanged = selectedName &&
+        (changedNames.has(selectedName) || state.pendingRemoteRecords.has(selectedName)) &&
+        !state.dirty && state.saveFlightCount === 0;
+      let selectedDocument = null;
+      let selectedRecord = null;
+      if (selectedChanged) {
+        const fullResponse = assertResponse(await database.fetchRecords([selectedName], { zoneID: zoneID }));
+        selectedRecord = (fullResponse.records || []).find(function (record) { return record.recordName === selectedName; });
+        if (selectedRecord) {
+          selectedDocument = await documentFromCloudKitRecord(selectedRecord, session, database, zoneID);
+          if (!accountSessionCurrent(session)) return;
+          if (state.dirty || state.saveFlightCount > 0) {
+            state.pendingRemoteRecords.set(selectedName, selectedRecord);
+          } else {
+            state.records.set(selectedName, selectedRecord);
+            if (isNativeModelRecord(selectedRecord, "CapturedNote")) {
+              state.bodyCache.set(selectedName, selectedDocument.body);
+              state.previewCache.set(selectedName, previewText(selectedDocument.body));
+            }
+            state.pendingRemoteRecords.delete(selectedName);
+          }
+        }
+      }
+      if (changedNames.size || deletedNames.size || selectedRecord) {
+        syncDerivedCollections();
+        if (selectedRecord && selectedDocument && !state.dirty && state.saveFlightCount === 0) {
+          applyRemoteDocumentToActiveEditor(selectedRecord, selectedDocument);
+        }
+        renderAll();
+        scheduleLibraryCacheWrite();
+      }
+      if (accountSessionCurrent(session)) setConnection("Using your Apple Account.", true);
+    })().catch(function (error) {
+      if (accountSessionCurrent(session)) {
+        const message = readableError(error);
+        setConnection("Connected · waiting to sync", false);
+        console.warn("Arbor could not refresh notes from iCloud.", message);
+      }
+    }).finally(function () { state.realtimeSyncPromise = null; });
+    return state.realtimeSyncPromise;
+  }
+
+  function startRealtimeSync(session) {
+    window.clearInterval(state.realtimeSyncTimer);
+    state.realtimeSyncTimer = null;
+    if (!accountSessionCurrent(session) || !state.nativeSchema || !state.nativeZoneID) return;
+    refreshZoneRecords(session);
+    state.realtimeSyncTimer = window.setInterval(function () { refreshZoneRecords(session); }, 1500);
+  }
+
+  async function configureRealtimeNotifications(session) {
+    const container = state.container;
+    const database = state.database;
+    if (!container || !database || typeof database.saveSubscriptions !== "function" ||
+        typeof container.addNotificationListener !== "function" || typeof container.registerForNotifications !== "function") return;
+    try {
+      if (!state.realtimeNotificationListenerAdded) {
+        container.addNotificationListener(function () {
+          if (state.database && !state.accountCacheSuspended) refreshZoneRecords(state.accountSession);
+        });
+        state.realtimeNotificationListenerAdded = true;
+      }
+      const zone = state.nativeZoneID;
+      if (!zone || !accountSessionCurrent(session)) return;
+      const subscription = {
+        subscriptionType: "zone",
+        subscriptionID: "arbor-active-note-sync-v1",
+        zoneID: { zoneName: zone.zoneName, ownerName: zone.ownerName }
+      };
+      assertResponse(await database.saveSubscriptions(subscription));
+      if (!accountSessionCurrent(session)) return;
+      await container.registerForNotifications();
+    } catch (error) {
+      // CloudKit notifications improve latency but are not required for sync;
+      // the foreground change-token refresh remains the reliable fallback.
+      console.info("Arbor is using foreground iCloud refresh for live updates.", readableError(error));
+    }
+  }
+
   function ensureFullNativeRecord(note) {
     if (typeof fieldValue(note.record, "text") === "string" || fieldValue(note.record, "text_ckAsset")) return Promise.resolve(note.record);
     if (note.recordPromise) return note.recordPromise;
@@ -5432,6 +5664,8 @@
       if (session !== state.accountSession) return;
       if (!(await loadZoneRecordsWithFeedback(session))) return;
       if (session !== state.accountSession) return;
+      startRealtimeSync(session);
+      configureRealtimeNotifications(session);
       await syncPersonalDictionary(session);
       if (session !== state.accountSession) return;
       setConnection("Using your Apple Account.", true);
@@ -5544,12 +5778,19 @@
         });
       });
       window.addEventListener("online", function () {
-        if (state.database && !state.accountCacheSuspended) syncPersonalDictionary(state.accountSession);
+        if (state.database && !state.accountCacheSuspended) {
+          refreshZoneRecords(state.accountSession);
+          syncPersonalDictionary(state.accountSession);
+        }
       });
       document.addEventListener("visibilitychange", function () {
         if (document.visibilityState === "visible" && state.database && !state.accountCacheSuspended) {
+          refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
         }
+      });
+      window.addEventListener("focus", function () {
+        if (state.database && !state.accountCacheSuspended) refreshZoneRecords(state.accountSession);
       });
     } catch (error) {
       showSetup("CloudKit could not be configured: " + readableError(error));
@@ -5689,6 +5930,92 @@
   function normalizedTitle(value) {
     const text = String(value || "").trim();
     return text || "Untitled";
+  }
+
+  function documentForSaveBody(body, record) {
+    if (isNativeModelRecord(record, "CapturedNote")) {
+      const source = body && typeof body === "object" ? body : splitDocument(body);
+      return { title: normalizedTitle(source.title), body: String(source.body || "") };
+    }
+    return splitDocument(typeof body === "string" ? body : String(body && body.body || ""));
+  }
+
+  function saveBodyForDocument(document, record) {
+    if (isNativeModelRecord(record, "CapturedNote")) return { title: document.title, body: document.body };
+    return document.title + "\n\n" + document.body;
+  }
+
+  function rememberSyncBaseline(recordName, document) {
+    if (!recordName || !document || typeof document.title !== "string" || typeof document.body !== "string") return;
+    state.syncBaselines.set(recordName, { title: document.title, body: document.body });
+  }
+
+  async function documentFromCloudKitRecord(record, session, database, zoneID) {
+    if (!record) throw new Error("CloudKit returned no current note version.");
+    if (isNativeModelRecord(record, "CapturedNote")) {
+      let body = fieldValue(record, "text");
+      if (typeof body !== "string") {
+        const asset = fieldValue(record, "text_ckAsset");
+        const url = asset && (asset.downloadURL || asset.url);
+        if (!url) throw new Error("The newer iCloud note text could not be loaded safely.");
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("The newer iCloud note text could not be downloaded safely.");
+        body = await (await response.blob()).text();
+      }
+      return {
+        title: normalizedTitle(fieldValue(record, "userTitle") || fieldValue(record, "generatedTitle") || firstLineTitle(body)),
+        body: body
+      };
+    }
+    let body = fieldValue(record, "body");
+    if (typeof body !== "string") {
+      try { body = await loadAssetBody(record); }
+      catch (_) { throw new Error("The newer iCloud note text could not be loaded safely."); }
+    }
+    return splitDocument(body);
+  }
+
+  async function fetchCurrentNoteRecord(record, historyContext) {
+    const database = historyContext ? historyContext.database : state.database;
+    const nativeSchema = historyContext ? historyContext.nativeSchema : state.nativeSchema;
+    const zoneID = nativeSchema
+      ? (historyContext ? historyContext.nativeZoneID : state.nativeZoneID)
+      : { zoneName: "ArborNotes" };
+    const response = assertResponse(await database.fetchRecords([record.recordName], { zoneID: zoneID }));
+    const current = (response.records || []).find(function (item) { return item.recordName === record.recordName; });
+    if (!current) throw new Error("CloudKit could not find the newer version of this note.");
+    return current;
+  }
+
+  async function retryConflictedNoteSave(record, body, options, historyContext, attempt, originalError) {
+    if (attempt >= 2 || !isCloudKitRecordConflict(originalError)) throw originalError;
+    const session = historyContext ? historyContext.session : state.accountSession;
+    const current = await fetchCurrentNoteRecord(record, historyContext);
+    const currentDocument = await documentFromCloudKitRecord(current, session,
+      historyContext ? historyContext.database : state.database,
+      historyContext ? historyContext.nativeZoneID : state.nativeZoneID);
+    if (historyContext ? !historyContextCurrent(historyContext) : !accountSessionCurrent(session)) return current;
+    const baseline = state.syncBaselines.get(record.recordName) || await documentFromCloudKitRecord(record, session,
+      historyContext ? historyContext.database : state.database,
+      historyContext ? historyContext.nativeZoneID : state.nativeZoneID);
+    const localDocument = documentForSaveBody(body, record);
+    const merged = noteSync.mergeDocument(baseline, localDocument, currentDocument);
+    if (merged.conflict) {
+      state.pendingRemoteRecords.set(record.recordName, current);
+      const error = new Error("This note has overlapping edits on two devices. Arbor kept the newer iCloud copy and saved your edits as a local draft on this device.");
+      error.arborPreservedDraft = true;
+      throw error;
+    }
+    if (merged.merged.title === currentDocument.title && merged.merged.body === currentDocument.body) {
+      if (!historyContext && accountSessionCurrent(session)) {
+        state.records.set(record.recordName, current);
+        if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(record.recordName);
+        rememberSyncBaseline(record.recordName, currentDocument);
+        syncDerivedCollections();
+      }
+      return current;
+    }
+    return saveRecord(current, saveBodyForDocument(merged.merged, current), options, historyContext, attempt + 1);
   }
 
   function draftAccountKey() {
@@ -5897,7 +6224,7 @@
     persistCurrentDraft();
     setSaveState("Unsaved", "dirty");
     window.clearTimeout(state.saveTimer);
-    state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 850);
+    state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
     if (pendingCreation) renderNotes();
   }
 
@@ -5973,8 +6300,9 @@
     return stem + "-" + Date.now() + ".md";
   }
 
-  async function saveRecord(record, body, options, historyContext) {
+  async function saveRecord(record, body, options, historyContext, mergeAttempt) {
     const opts = options || {};
+    const attempt = Number(mergeAttempt) || 0;
     const session = historyContext ? historyContext.session : state.accountSession;
     const isCurrent = function () { return historyContext ? historyContextCurrent(historyContext) : accountSessionCurrent(session); };
     const next = cloneRecord(record);
@@ -5990,10 +6318,14 @@
       setField(next, "modifiedAt", now);
       if (Object.prototype.hasOwnProperty.call(opts, "folderID")) setNullableField(next, "folderID", opts.folderID);
       if (historyContext) assertHistoryContext(historyContext);
-      const response = assertResponse(await saveToDatabase(next, historyContext));
+      let response;
+      try { response = assertResponse(await saveToDatabase(next, historyContext)); }
+      catch (error) { return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error); }
       const saved = response.records && response.records[0] ? response.records[0] : next;
       if (!isCurrent()) return saved;
       state.records.set(saved.recordName, saved);
+      if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(saved.recordName);
+      rememberSyncBaseline(saved.recordName, documentForSaveBody(body, saved));
       syncDerivedCollections();
       return saved;
     }
@@ -6028,10 +6360,14 @@
     }
 
     if (historyContext) assertHistoryContext(historyContext);
-    const response = assertResponse(await saveToDatabase(next, historyContext));
+    let response;
+    try { response = assertResponse(await saveToDatabase(next, historyContext)); }
+    catch (error) { return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error); }
     const saved = response.records && response.records[0] ? response.records[0] : next;
     if (!isCurrent()) return saved;
     state.records.set(saved.recordName, saved);
+    if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(saved.recordName);
+    rememberSyncBaseline(saved.recordName, documentForSaveBody(body, saved));
     syncDerivedCollections();
     return saved;
   }
@@ -6057,10 +6393,36 @@
         if (state.nativeSchema && selectedNote) await ensureFullNativeRecord(selectedNote);
         if (superseded()) return;
         const latest = state.records.get(recordName) || recordSnapshot;
+        const submittedDocument = documentForSaveBody(body, latest);
         const saved = await saveRecord(latest, body);
         if (superseded()) return;
-        if (state.nativeSchema && body && typeof body === "object") rememberNativeBody(recordName, String(body.body || ""), session);
-        const newerEdit = state.selectedRecordName === recordName && state.dirty;
+        const savedDocument = state.syncBaselines.get(recordName) || submittedDocument;
+        if (state.nativeSchema && body && typeof body === "object") rememberNativeBody(recordName, savedDocument.body, session);
+        let newerEdit = state.selectedRecordName === recordName && state.dirty;
+        if (state.selectedRecordName === recordName && !newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
+          replaceActiveEditorDocument(recordName, savedDocument);
+        } else if (newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
+          const currentDocument = editorDraftParts();
+          const combined = noteSync.mergeDocument(submittedDocument, currentDocument, savedDocument);
+          if (!combined.conflict) {
+            replaceActiveEditorDocument(recordName, combined.merged);
+            state.dirty = true;
+            state.bodyDirty = combined.merged.body !== savedDocument.body;
+            state.editorHistoryBaseline = captureEditorHistorySnapshot({ editorBodyChanged: true });
+            rememberSyncBaseline(recordName, savedDocument);
+            persistCurrentDraft();
+            setSaveState("Unsaved", "dirty");
+            window.clearTimeout(state.saveTimer);
+            state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
+          } else {
+            rememberSyncBaseline(recordName, submittedDocument);
+            state.pendingRemoteRecords.set(recordName, saved);
+            persistCurrentDraft();
+            showToast("A later edit overlaps with a change from another device. Arbor saved the earlier merge to iCloud and kept your latest text as a local draft.", true);
+            setSaveState("Needs attention", "error");
+          }
+          newerEdit = true;
+        }
         if (isFirstSaveForNewNote) {
           state.pendingNewNoteRecords.delete(recordName);
           const pendingNavigation = state.pendingNewNoteNavigation.get(recordName) || {};
@@ -6115,6 +6477,9 @@
         throw error;
       } finally {
         state.saveFlightCount = Math.max(0, state.saveFlightCount - 1);
+        if (state.saveFlightCount === 0 && state.pendingRemoteRecords.has(recordName) && accountSessionCurrent(session)) {
+          window.setTimeout(function () { refreshZoneRecords(session); }, 0);
+        }
       }
     });
     try { await state.savePromise; } catch (_) {}

@@ -1,0 +1,17 @@
+:root {
+  color-scheme: dark;
+  font: 16px/1.5 system-ui, sans-serif;
+  background: #141414;
+  color: #f5f5f5;
+}
+
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; }
+main { width: min(44rem, calc(100% - 3rem)); }
+a { color: #00c0e8; }
+h1 { margin: 2rem 0 0.75rem; }
+p { color: #b7b7b7; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 1.5rem 0; }
+button { border: 0; border-radius: 0.75rem; padding: 0.75rem 1rem; background: #2a2a2a; color: inherit; font: inherit; cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: default; }
+#run-probe { background: #00c0e8; color: #101010; font-weight: 650; }
+#probe-status { min-height: 3rem; }

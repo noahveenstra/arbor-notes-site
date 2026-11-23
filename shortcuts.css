@@ -1,0 +1,276 @@
+/* ARB-63 shortcuts and accessibility.
+   Kept in this file so it can rebase over the mockup restore.
+   Keyboard focus uses Arbor's teal focus token with a soft halo. */
+
+.shortcut-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+dialog.shortcut-sheet {
+  width: min(440px, calc(100vw - 32px));
+  max-height: none;
+  height: fit-content;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  background: transparent;
+  color: #f3f3f3;
+}
+
+dialog.shortcut-sheet::backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+dialog.shortcut-sheet[open] .shortcut-sheet-card {
+  animation: arbor-shortcut-sheet-enter var(--motion-fade-duration) var(--ease-standard) both;
+}
+
+dialog.shortcut-sheet[open]::backdrop {
+  animation: arbor-shortcut-backdrop-enter var(--motion-fade-duration) ease both;
+}
+
+dialog.shortcut-sheet.is-closing .shortcut-sheet-card {
+  animation: arbor-shortcut-sheet-exit var(--motion-fade-duration) var(--ease-standard) both;
+}
+
+dialog.shortcut-sheet.is-closing::backdrop {
+  animation: arbor-shortcut-backdrop-exit var(--motion-fade-duration) ease both;
+}
+
+@keyframes arbor-shortcut-sheet-enter {
+  from { opacity: 0; transform: translateY(7px) scale(.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes arbor-shortcut-sheet-exit {
+  from { opacity: 1; transform: none; }
+  to { opacity: 0; transform: translateY(5px) scale(.99); }
+}
+
+@keyframes arbor-shortcut-backdrop-enter {
+  from { background-color: transparent; }
+  to { background-color: rgba(0, 0, 0, .62); }
+}
+
+@keyframes arbor-shortcut-backdrop-exit {
+  from { background-color: rgba(0, 0, 0, .62); }
+  to { background-color: transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  dialog.shortcut-sheet[open] .shortcut-sheet-card {
+    animation-name: arbor-shortcut-sheet-fade-in;
+    transform: none;
+  }
+
+  dialog.shortcut-sheet.is-closing .shortcut-sheet-card {
+    animation-name: arbor-shortcut-sheet-fade-out;
+    transform: none;
+  }
+
+  @keyframes arbor-shortcut-sheet-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+
+  @keyframes arbor-shortcut-sheet-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+  }
+}
+
+.shortcut-sheet-card {
+  display: flex;
+  max-height: min(640px, calc(100vh - 48px));
+  flex-direction: column;
+  background: #242424;
+  border: 1px solid #333333;
+  border-radius: 8px;
+  padding: 16px 16px 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+  font-family: "Geist Mono", ui-monospace, monospace;
+}
+
+.shortcut-table-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.shortcut-history-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 0 10px;
+}
+
+.shortcut-history-actions button {
+  min-height: 30px;
+  padding: 5px 10px;
+  border: 1px solid #3a3a3a;
+  border-radius: 5px;
+  background: #303030;
+  color: #f3f3f3;
+  font: 500 11px/1.2 "Geist Mono", ui-monospace, monospace;
+}
+
+.shortcut-history-actions button:not(:disabled) { cursor: pointer; }
+.shortcut-history-actions button:disabled { opacity: .45; }
+
+.shortcut-sheet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.shortcut-sheet-header h2 {
+  margin: 0;
+  color: #f3f3f3;
+  font: 600 13px/1.3 "Geist Mono", ui-monospace, monospace;
+}
+
+.shortcut-sheet-header button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  color: #f3f3f3;
+  background: transparent;
+  cursor: pointer;
+  font: 500 18px/1 "Geist Mono", ui-monospace, monospace;
+}
+
+.shortcut-sheet-note {
+  margin: 0 0 12px;
+  color: #9b9b9b;
+  font: 400 11px/1.45 "Geist Mono", ui-monospace, monospace;
+}
+
+.shortcut-table {
+  width: 100%;
+  border-collapse: collapse;
+  font: 400 12px/1.4 "Geist Mono", ui-monospace, monospace;
+}
+
+.shortcut-table th,
+.shortcut-table td {
+  padding: 6px 0;
+  border-top: 1px solid #333333;
+  font-weight: 400;
+  vertical-align: baseline;
+}
+
+.shortcut-table thead th {
+  border-top: 0;
+  color: #9b9b9b;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.shortcut-table tbody th {
+  color: #f3f3f3;
+  text-align: left;
+}
+
+.shortcut-table td {
+  color: #f3f3f3;
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* Keep writing fields visually quiet: the caret identifies the active
+   surface. Text fields inside a control surface move their keyboard ring to
+   that surface, avoiding a box nested inside another box. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):focus-visible,
+textarea:focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: 0;
+  box-shadow: none;
+}
+
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+select:focus-visible,
+[role="button"]:focus-visible,
+[role="option"]:focus-visible,
+[role="treeitem"]:focus-visible,
+[tabindex]:focus-visible,
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible,
+input[type="range"]:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--cyan, #078ba5));
+  outline-offset: 2px;
+  transition: outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;
+}
+
+.pane-resizer:focus-visible {
+  outline: 0;
+}
+
+.note-title:focus-visible,
+.note-body:focus-visible,
+.rich-editor .ProseMirror:focus-visible,
+.editor-fallback-input:focus-visible {
+  outline: 0;
+  box-shadow: none;
+}
+
+.editor-date:focus-visible {
+  outline: 2px solid var(--focus-ring, var(--cyan, #078ba5));
+  outline-offset: 3px;
+  transition: outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;
+}
+
+html.keyboard-navigation .search-field:focus-within,
+html.keyboard-navigation .quick-dialog-bar:focus-within,
+html.keyboard-navigation .search-page-form:focus-within {
+  border-color: var(--focus-ring, var(--cyan, #078ba5));
+  outline: 2px solid var(--focus-ring, var(--cyan, #078ba5));
+  outline-offset: 3px;
+  transition: border-color var(--motion-fade-duration) ease, outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;
+}
+
+html.keyboard-navigation .search-field:focus-within,
+html.keyboard-navigation .search-page-form:focus-within,
+html.keyboard-navigation .settings-field:has(input:not([type="range"]):focus-visible) {
+  box-shadow: 0 0 0 4px var(--focus-ring-halo);
+}
+
+html.keyboard-navigation .quick-dialog-bar:focus-within {
+  box-shadow: 0 26px 80px #0009, 0 0 0 4px var(--focus-ring-halo);
+}
+
+html.keyboard-navigation .folder-dialog:focus-within,
+html.keyboard-navigation .settings-field:has(input:not([type="range"]):focus-visible) {
+  outline: 2px solid var(--focus-ring, var(--cyan, #078ba5));
+  outline-offset: 3px;
+  transition: outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;
+}
+
+html.keyboard-navigation .folder-dialog:focus-within {
+  box-shadow: 0 24px 80px #000b, 0 0 0 4px var(--focus-ring-halo);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

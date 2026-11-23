@@ -1,0 +1,528 @@
+<!doctype html>
+<html lang="en" class="is-preparing-shell">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.apple-cloudkit.com 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self' https://api.apple-cloudkit.com https://feedbackws.apple-cloudkit.com https://feedbackws.icloud.com https://feedbackws.icloud.com.cn; worker-src 'self' blob:; media-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+  <meta id="theme-color-light" name="theme-color" content="#ececec" media="(prefers-color-scheme: light)">
+  <meta id="theme-color-dark" name="theme-color" content="#141414" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Arbor">
+  <title>Arbor — Notes</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" sizes="180x180">
+  <link rel="icon" href="./icons/favicon.ico" sizes="any">
+  <link rel="icon" href="./icons/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="icon" href="./icons/favicon-16.png" type="image/png" sizes="16x16">
+  <script src="./theme-bootstrap.js?v=arb-29-csp-1"></script>
+  <style>
+    /* First paint matches the notes mockup: canvas #141414, editor card #1c1c1c.
+       Light is the same canvas role, so a light setting does not flash dark. */
+    html { color-scheme: light dark; background: #141414; }
+    @media (prefers-color-scheme: light) {
+      html:not([data-theme="dark"]) { color-scheme: light; background: #ececec; }
+    }
+    @media (prefers-color-scheme: dark) {
+      html:not([data-theme="light"]) { color-scheme: dark; background: #141414; }
+    }
+    html[data-theme="dark"] { color-scheme: dark; background: #141414; }
+    html[data-theme="light"] { color-scheme: light; background: #ececec; }
+  </style>
+  <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
+  <link rel="stylesheet" href="./styles.css?v=arb-130-signed-out-welcome-20261122-a">
+  <link rel="stylesheet" href="./ui.css?v=arb-141-strikethrough-color-20261123-a">
+  <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
+  <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
+  <script src="./cloudkit-config.js?v=cloudkit-20261120-d"></script>
+  <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
+  <script type="module" src="./shortcuts.js?v=arb-100-global-undo-20261119-a"></script>
+  <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" defer></script>
+  <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
+  <script src="./proofreading-dictionary-sync.js?v=arb-112-dictionary-sync-20261120-a" defer></script>
+  <script src="./proofreading.js?v=arb-128-grammar-toggle-20261121-b" defer></script>
+  <script src="./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b" defer></script>
+  <script src="./note-history.js?v=arb-136-restore-20261123-a" defer></script>
+  <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
+  <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
+  <script src="./app-bootstrap.js?v=arb-140-capitalization-word-20261123-a" defer></script>
+</head>
+<body>
+  <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
+    <p>Arbor could not verify a complete app update. Reload to try again.</p>
+    <button id="shell-boot-retry" type="button">Reload Arbor</button>
+  </div>
+  <div id="app-status" class="shortcut-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <main class="welcome-screen" id="welcome-screen" aria-labelledby="welcome-title">
+    <div class="welcome-content">
+      <img class="welcome-mark" src="./icons/icon-monochrome-192.png" alt="">
+      <h1 id="welcome-title">Capture thoughts.<br>Find them later.</h1>
+      <p class="welcome-description">Sign in with the Apple Account connected to your Arbor notes.</p>
+      <p class="welcome-status" id="welcome-status" role="status" aria-live="polite">Checking your Apple Account…</p>
+      <div class="welcome-auth" id="welcome-auth" hidden>
+        <div id="apple-sign-in-button"></div>
+        <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. This browser keeps a local cache for faster reopening; signing out clears the cache, not your iCloud notes.</p>
+      </div>
+      <button class="welcome-retry" id="welcome-retry" type="button" hidden>Reload Arbor</button>
+    </div>
+  </main>
+  <div class="app-frame app-shell" id="app-frame" hidden>
+    <button class="mobile-sidebar-scrim" id="mobile-sidebar-scrim" type="button" aria-label="Close navigation" aria-hidden="true" tabindex="-1" inert></button>
+    <aside class="sidebar" id="sidebar" aria-label="Arbor navigation">
+      <header class="sidebar-header">
+        <span class="sidebar-brand" id="sidebar-brand"><img src="./icons/icon-monochrome-192.png" alt="Arbor"></span>
+        <button class="sidebar-collapse-button" id="collapse-sidebar-button" type="button" aria-label="Collapse navigation" title="Collapse navigation" aria-controls="sidebar" aria-expanded="true">
+          <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true"><rect x="2.75" y="2.75" width="14.5" height="14.5" rx="2.25"></rect><path d="M7.25 3.25v13.5"></path></svg>
+        </button>
+      </header>
+      <div class="side-top">
+        <button class="all-notes all-notes-link nav-row is-selected" id="all-notes-button" type="button" title="All Notes">
+          <img src="./icons/notes-on-top-of-each-other.svg" alt="">
+          <span>All Notes</span>
+        </button>
+        <button class="all-notes-link search-nav-button nav-row" id="search-nav-button" type="button" aria-label="Search notes" title="Search">
+          <svg class="search-nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.7"></circle><path d="m13 13 4 4"></path></svg>
+          <span>Search</span>
+        </button>
+
+        <div class="section-label-row folders-heading">
+          <span>Folders</span>
+          <button id="new-folder-button" type="button" aria-label="Create folder" title="Create folder">+</button>
+        </div>
+        <nav class="folder-tree folder-list" id="folder-tree" aria-label="Folders"></nav>
+      </div>
+
+      <div class="sidebar-bottom">
+        <button class="all-notes-link archive-notes nav-row" id="archive-notes-button" type="button" aria-label="Open Archive" title="Archive">
+          <span>Archive</span>
+        </button>
+        <button class="settings-link" id="settings-open" type="button" title="Settings"><span>Settings</span></button>
+      </div>
+    </aside>
+    <div class="pane-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize folders sidebar" aria-valuemin="150" aria-valuemax="360" aria-valuenow="195" tabindex="0"></div>
+
+    <section class="list-panel" id="list-panel" aria-labelledby="list-heading">
+      <header class="list-header">
+        <div class="mobile-header">
+          <button class="icon-button mobile-menu-button" id="mobile-menu-button" type="button" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M3 5h14M3 10h14M3 15h14"></path></svg>
+          </button>
+          <span class="mobile-brand">Arbor</span>
+        </div>
+        <div class="list-heading-row">
+          <h1 id="list-heading">All Notes</h1>
+          <span class="demo-badge" id="demo-badge" hidden>Sample data · resets on reload</span>
+          <span class="note-count list-total" id="note-count">0</span>
+          <button class="list-create-note-button" id="new-note-button" type="button" aria-label="New note" title="New note">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14"></path></svg>
+          </button>
+        </div>
+      </header>
+      <div class="note-list" id="note-list" role="listbox" aria-label="Notes"></div>
+      <div class="list-message list-empty" id="list-message" role="status" aria-live="polite" hidden><span id="list-message-text"></span></div>
+    </section>
+    <div class="pane-resizer list-resizer" id="list-resizer" role="separator" aria-orientation="vertical" aria-label="Resize note list" aria-valuemin="240" aria-valuemax="620" aria-valuenow="340" tabindex="0"></div>
+
+    <main class="editor-panel" id="note-pane">
+      <div class="note-editor-column" id="note-editor-column">
+      <div class="note-tab-strip" id="note-tab-strip" role="group" aria-label="Open notes" hidden></div>
+      <div class="editor-empty" id="empty-state">
+        <span>Choose a note to read it.</span>
+        <button id="empty-new-note-button" type="button" hidden>New note</button>
+      </div>
+
+      <div class="note-workspace editor-view" id="note-workspace" hidden>
+        <header class="editor-header">
+          <button class="back-button back-to-list" id="back-to-list-button" type="button" aria-label="Back to notes">‹</button>
+          <div class="editor-date" id="modified-at" tabindex="0" aria-label="Note dates" title="Hover to show creation date"></div>
+          <button class="note-actions-button" id="note-actions-button" type="button" aria-label="About this note" title="About this note" aria-controls="about-note-panel" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.75" y="2.75" width="14.5" height="14.5" rx="2.25"></rect><path d="M7.25 3.25v13.5"></path></svg></button>
+        </header>
+        <div class="editor-scroll">
+          <article class="note-page" id="note-page">
+            <div class="draft-banner" id="draft-banner" role="status" hidden>
+              <p>Recovered an unsaved edit from this browser.</p>
+              <button type="button" id="draft-discard">Discard</button>
+            </div>
+            <textarea class="note-title" id="note-title" rows="1" maxlength="180" aria-label="Note title" placeholder="Untitled note"></textarea>
+            <div id="rich-editor"></div>
+          </article>
+        </div>
+        <div class="editor-formatting-tools" id="editor-formatting-tools" role="toolbar" aria-label="Text formatting">
+          <button type="button" data-rich-format="bold" aria-label="Bold selected text" title="Bold (⌘B)"><strong>B</strong></button>
+          <button type="button" data-rich-format="italic" aria-label="Italicize selected text" title="Italic (⌘I)"><em>I</em></button>
+          <button type="button" data-rich-format="code" aria-label="Format selected text as code" title="Code"><code>&lt;/&gt;</code></button>
+          <button type="button" data-rich-format="strikeThrough" aria-label="Strikethrough selected text" title="Strikethrough"><s>S</s></button>
+          <span class="format-divider" aria-hidden="true"></span>
+          <button type="button" data-rich-format="insertUnorderedList" aria-label="Bulleted list" title="Bulleted list">•</button>
+          <button type="button" data-rich-format="insertOrderedList" aria-label="Numbered list" title="Numbered list">1.</button>
+          <button type="button" data-rich-format="checklist" aria-label="Checklist" title="Checklist">☑</button>
+        </div>
+        <section class="search-page-view" id="search-page-view" hidden aria-label="Search results">
+          <button class="search-page-new-note" id="search-page-new-note" type="button" aria-label="New note" title="New note">
+            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14"></path></svg>
+          </button>
+          <div class="search-page-content">
+            <form class="search-page-form" id="expanded-search-form">
+              <span class="search-page-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3"></path></svg></span>
+              <label class="sr-only" for="expanded-search-input">Search all notes</label>
+              <span class="search-page-input-shell"><input id="expanded-search-input" type="text" placeholder="Search for an idea…" autocomplete="off"></span>
+            </form>
+            <p class="search-page-count" id="expanded-search-count" aria-live="polite"></p>
+            <div class="search-page-results" id="expanded-search-results" role="listbox" aria-label="Search results"></div>
+          </div>
+        </section>
+      </div>
+      </div>
+      <aside class="about-note-panel" id="about-note-panel" aria-label="About this note" aria-hidden="true" hidden>
+        <header class="about-note-header">
+          <h2>About this Note</h2>
+        </header>
+        <div class="about-note-content">
+          <div class="about-note-tabs" id="about-note-tabs" role="tablist" aria-label="Note details">
+            <button id="about-tab-information" type="button" role="tab" aria-selected="true" aria-controls="about-information">Information</button>
+            <button id="about-tab-style" type="button" role="tab" aria-selected="false" aria-controls="about-style" tabindex="-1">Style</button>
+          </div>
+          <section id="about-information" class="about-note-section" role="tabpanel" aria-labelledby="about-tab-information">
+            <dl class="about-note-metrics">
+              <div><dt>Created</dt><dd id="about-created"></dd></div>
+              <div><dt>Last Edited</dt><dd id="about-modified"></dd></div>
+              <div><dt>Word Count</dt><dd id="about-word-count"></dd></div>
+              <div><dt>Read Time</dt><dd id="about-read-time"></dd></div>
+            </dl>
+            <section class="about-note-data-section" aria-labelledby="about-attachments-heading">
+              <h3 id="about-attachments-heading">Attachments</h3>
+              <div id="about-attachments"></div>
+            </section>
+            <section class="about-note-data-section" aria-labelledby="about-location-heading">
+              <h3 id="about-location-heading">Location</h3>
+              <div class="about-note-empty" id="about-location">No location is saved with this note.</div>
+            </section>
+          </section>
+          <section id="about-style" class="about-note-section" role="tabpanel" aria-labelledby="about-tab-style" hidden>
+            <fieldset class="about-style-field">
+              <legend>Header Font</legend>
+              <div class="about-font-options" id="about-header-font" role="radiogroup" aria-label="Header Font"></div>
+            </fieldset>
+            <fieldset class="about-style-field">
+              <legend>Body Font</legend>
+              <div class="about-font-options" id="about-body-font" role="radiogroup" aria-label="Body Font"></div>
+            </fieldset>
+            <div class="about-style-actions" id="about-style-actions" hidden>
+              <button class="about-make-default" id="about-make-default" type="button">Make default</button>
+              <button class="about-style-undo" id="about-style-undo" type="button">Undo</button>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </main>
+    <div class="note-action-menu" id="note-action-menu" role="dialog" aria-label="Note actions" aria-modal="false" hidden>
+      <button id="note-open-button" type="button">Open note</button>
+      <label id="folder-action">Move to folder<select id="folder-select" aria-label="Move note to folder"></select></label>
+      <button id="star-button" type="button">Star note</button>
+      <button id="archive-note-button" type="button">Move to Archive</button>
+    </div>
+    <div class="note-context-menu" id="note-context-menu" role="menu" aria-label="Note actions" aria-hidden="true" hidden inert>
+      <button class="context-menu-item" id="context-open-note" type="button" role="menuitem" tabindex="-1">
+        <span>Open Note</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 5h6v6M19 5 9 15"></path></svg>
+      </button>
+      <button class="context-menu-item" id="context-move-folder" type="button" role="menuitem" tabindex="-1" aria-haspopup="menu" aria-controls="note-folder-submenu" aria-expanded="false">
+        <span>Move to Folder</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+      </button>
+      <button class="context-menu-item" id="context-archive-note" type="button" role="menuitem" tabindex="-1" aria-label="Move note to Archive">
+        <span>Move to Archive</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M6 13l6 6 6-6"></path></svg>
+      </button>
+    </div>
+    <div class="note-folder-submenu" id="note-folder-submenu" role="menu" aria-label="Folders" aria-hidden="true" hidden inert></div>
+    <div class="note-context-menu folder-context-menu" id="folder-context-menu" role="menu" aria-label="Folder actions" aria-hidden="true" hidden inert>
+      <button class="context-menu-item" id="folder-context-create" type="button" role="menuitem" tabindex="-1"><span>Create Folder</span></button>
+      <button class="context-menu-item" id="folder-context-subfolder" type="button" role="menuitem" tabindex="-1"><span>Create Subfolder</span></button>
+      <button class="context-menu-item" id="folder-context-rename" type="button" role="menuitem" tabindex="-1"><span>Rename Folder</span></button>
+      <button class="context-menu-item" id="folder-context-move" type="button" role="menuitem" tabindex="-1" aria-haspopup="menu" aria-controls="folder-move-submenu" aria-expanded="false">
+        <span>Move Folder</span>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+      </button>
+      <button class="context-menu-item" id="folder-context-archive" type="button" role="menuitem" tabindex="-1"><span>Archive Folder</span></button>
+    </div>
+    <div class="note-folder-submenu folder-move-submenu" id="folder-move-submenu" role="menu" aria-label="Move folder to" aria-hidden="true" hidden inert></div>
+  </div>
+  <div class="correction-popover" id="correction-popover" role="group" aria-label="Writing suggestions" hidden>
+    <div class="correction-copy">
+      <strong class="correction-term" id="correction-term"></strong>
+      <span class="correction-message" id="correction-message"></span>
+    </div>
+    <div class="correction-options" id="correction-options"></div>
+    <div class="correction-actions" id="correction-actions">
+      <button class="correction-ignore" id="correction-ignore" type="button">Ignore</button>
+      <button class="correction-add-dictionary" id="correction-add-dictionary" type="button" hidden>Add to Dictionary</button>
+    </div>
+    <span class="shortcut-visually-hidden" id="correction-announcement" aria-live="polite" aria-atomic="true"></span>
+  </div>
+  <div class="selection-review-surface" id="selection-review-surface">
+    <button class="selection-review-action" id="selection-review-action" type="button" aria-haspopup="dialog" aria-controls="selection-review-panel" hidden>Review selection</button>
+    <section class="selection-review-panel" id="selection-review-panel" role="dialog" aria-labelledby="selection-review-title" aria-describedby="selection-review-status" aria-hidden="true" hidden>
+      <header class="selection-review-header">
+        <h2 id="selection-review-title">Writing suggestions</h2>
+        <button class="selection-review-close" id="selection-review-close" type="button" aria-label="Close writing suggestions">×</button>
+      </header>
+      <p class="selection-review-status" id="selection-review-status" role="status" aria-live="polite">Choose Review selection to check this text.</p>
+      <div class="selection-review-results" id="selection-review-results"></div>
+      <footer class="selection-review-actions" id="selection-review-actions" hidden>
+        <button class="selection-review-accept-all" id="selection-review-accept-all" type="button" hidden>Accept All</button>
+      </footer>
+    </section>
+  </div>
+
+  <dialog class="folder-dialog folder-archive-dialog" id="folder-archive-dialog" aria-labelledby="folder-archive-title">
+    <form id="folder-archive-form">
+      <h2 id="folder-archive-title">Archive folder?</h2>
+      <p class="folder-archive-copy">This archives this folder and all folders inside it. Notes aren’t deleted; they’ll be available in Archive. The folder organization will be removed.</p>
+      <label class="folder-archive-skip"><input id="folder-archive-skip" type="checkbox"> Don’t ask me again</label>
+      <div class="folder-archive-actions">
+        <button class="folder-dialog-cancel" id="folder-archive-cancel" type="button">Cancel</button>
+        <button class="dialog-submit" id="folder-archive-confirm" type="submit">Archive Folder</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog class="quick-dialog capture-dialog" id="capture-dialog" aria-label="Capture a thought">
+    <form class="quick-dialog-bar" id="capture-form"><label class="sr-only" for="capture-input">Capture a thought</label><textarea id="capture-input" rows="1" placeholder="Capture a thought…" autocomplete="off" maxlength="2000"></textarea></form>
+  </dialog>
+  <dialog class="quick-dialog search-dialog" id="search-dialog" aria-label="Search notes">
+    <form class="quick-dialog-bar search-dialog-bar" id="search-form">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3"></path></svg>
+      <label class="sr-only" for="global-search-input">Search all notes</label>
+      <span class="search-prompt" id="search-prompt" aria-hidden="true">Search for a word…</span>
+      <input id="global-search-input" type="search" placeholder=" " autocomplete="off" aria-controls="search-suggestions" aria-autocomplete="list">
+    </form>
+    <div class="search-suggestions" id="search-suggestions" role="listbox" aria-label="Matching notes" hidden></div>
+  </dialog>
+
+  <div class="settings-backdrop" id="settings-modal" hidden>
+    <section class="settings-window" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <aside class="settings-navigation">
+        <div class="settings-heading-row">
+          <h2 id="settings-title">Settings</h2>
+          <button class="settings-close" id="settings-close" type="button" aria-label="Close settings">×</button>
+        </div>
+        <nav class="settings-sections" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
+          <button class="is-selected" id="settings-tab-account" type="button" role="tab" aria-selected="true" aria-controls="settings-page-account" data-settings-section="account">Account</button>
+          <button id="settings-tab-appearance" type="button" role="tab" aria-selected="false" aria-controls="settings-page-appearance" tabindex="-1" data-settings-section="appearance">Appearance</button>
+          <button id="settings-tab-preferences" type="button" role="tab" aria-selected="false" aria-controls="settings-page-preferences" tabindex="-1" data-settings-section="preferences">Preferences</button>
+        </nav>
+        <button class="settings-shortcut-link" id="shortcut-help-open" type="button" aria-haspopup="dialog" aria-controls="shortcut-help">Keyboard shortcuts</button>
+      </aside>
+      <div class="settings-content">
+        <section id="settings-page-account" role="tabpanel" aria-labelledby="settings-tab-account" data-settings-page="account">
+          <div class="settings-group">
+            <h3>Profile</h3>
+          <div class="settings-field">
+            <label for="settings-display-name">Name</label>
+            <input id="settings-display-name" type="text" value="Noah" autocomplete="name" maxlength="80">
+          </div>
+          <div class="settings-field">
+            <div class="settings-field-label">Account</div>
+            <div class="settings-auth-row">
+              <span class="connection-line" id="settings-connection-line">
+                <span class="connection-dot"></span>
+                <span id="settings-connection-label" aria-live="polite">Not connected</span>
+              </span>
+              <div class="auth-buttons">
+                <div id="apple-sign-out-button"></div>
+              </div>
+            </div>
+          </div>
+          </div>
+          <div class="settings-group">
+            <h3>Plan</h3>
+          <div class="settings-field">
+            <div class="settings-field-label">Billing</div>
+            <p class="settings-description settings-billing-copy">You’re currently on the <span class="settings-plan">Free</span> plan. <span class="settings-inline-link" aria-disabled="true" title="Billing is not available in the web client yet.">Upgrade</span> to get more.</p>
+          </div>
+          </div>
+          <details class="settings-data-disclosure">
+            <summary>Data &amp; privacy</summary>
+            <p>Arbor reads and writes notes and proofreading dictionary entries in the Apple account you sign in with. Signing out of this browser removes notes, metadata, dictionary entries, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
+            <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
+          </details>
+        </section>
+        <section id="settings-page-appearance" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-page="appearance" hidden>
+          <div class="settings-group">
+            <h3>Interface</h3>
+          <fieldset class="settings-field settings-choice-field">
+            <legend>Color Theme</legend>
+            <div class="settings-segment" role="radiogroup" aria-label="Color Theme">
+              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="theme" data-setting-value="system">System</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="theme" data-setting-value="dark">Dark</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="theme" data-setting-value="light">Light</button>
+            </div>
+          </fieldset>
+          </div>
+          <div class="settings-group">
+            <h3>Reading</h3>
+          <fieldset class="settings-field settings-choice-field">
+            <legend>Header Font</legend>
+            <div class="settings-segment" role="radiogroup" aria-label="Header Font">
+              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="headerFont" data-setting-value="sans">Sans</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="serif">Serif</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="mono">Mono</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="pixel">Pixel</button>
+            </div>
+          </fieldset>
+          <fieldset class="settings-field settings-choice-field">
+            <legend>Body Font</legend>
+            <div class="settings-segment" role="radiogroup" aria-label="Body Font">
+              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="bodyFont" data-setting-value="sans">Sans</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="serif">Serif</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="mono">Mono</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="pixel">Pixel</button>
+            </div>
+          </fieldset>
+          <fieldset class="settings-field settings-choice-field">
+            <legend>Note Text Size</legend>
+            <div class="settings-segment" role="radiogroup" aria-label="Note Text Size">
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="xsmall">XSmall</button>
+              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="textSize" data-setting-value="small">Small</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="medium">Medium</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="large">Large</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="xlarge">XLarge</button>
+            </div>
+          </fieldset>
+          <fieldset class="settings-field settings-choice-field">
+            <legend>Margins</legend>
+            <div class="settings-segment" role="radiogroup" aria-label="Margins">
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="condensed">Condensed</button>
+              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="margins" data-setting-value="compact">Compact</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="normal">Normal</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="roomy">Roomy</button>
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="spacious">Spacious</button>
+            </div>
+          </fieldset>
+          </div>
+          <div class="settings-group">
+            <h3>Preview</h3>
+          <div class="settings-preview-field">
+            <div class="settings-note-preview" id="settings-note-preview" aria-label="Note appearance preview">
+              <h3>Title</h3>
+              <p>The quick brown fox jumps over the lazy dog and runs away.</p>
+            </div>
+          </div>
+          </div>
+        </section>
+        <section id="settings-page-preferences" role="tabpanel" aria-labelledby="settings-tab-preferences" data-settings-page="preferences" hidden>
+          <div class="settings-group">
+            <h3>Tabs</h3>
+          <fieldset class="settings-field settings-choice-field">
+            <legend class="sr-only">Tabs</legend>
+            <div class="settings-segment" role="radiogroup" aria-label="Tabs">
+              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="tabs" data-setting-value="enabled">Enabled</button>
+              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="tabs" data-setting-value="disabled">Disabled</button>
+            </div>
+          </fieldset>
+          </div>
+          <div class="settings-group">
+            <h3>Note list</h3>
+            <div class="settings-field">
+              <label for="note-sort-order">Sort notes by</label>
+              <select id="note-sort-order" aria-label="Sort notes by">
+                <option value="created-newest">Created · newest first</option>
+                <option value="created-oldest">Created · oldest first</option>
+                <option value="modified-newest">Last modified · newest first</option>
+                <option value="modified-oldest">Last modified · oldest first</option>
+                <option value="title-ascending">Title · A to Z</option>
+                <option value="title-descending">Title · Z to A</option>
+              </select>
+              <p class="settings-description">Applies to All Notes, folders, and Archive.</p>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>Writing</h3>
+          <label class="settings-toggle-row" for="proofreading-autocorrect">
+            <span>Auto-correct high-confidence spelling as you type</span>
+            <input id="proofreading-autocorrect" type="checkbox" checked>
+          </label>
+          <label class="settings-toggle-row" for="proofreading-sentence-capitalization">
+            <span>Check first-word capitalization in each sentence</span>
+            <input id="proofreading-sentence-capitalization" type="checkbox" checked>
+          </label>
+          <label class="settings-toggle-row" for="proofreading-grammar-suggestions">
+            <span>Check grammar as I write</span>
+            <input id="proofreading-grammar-suggestions" type="checkbox" checked>
+          </label>
+          </div>
+          <div class="settings-group">
+            <h3>Personal dictionary</h3>
+          <div class="settings-field personal-dictionary-settings">
+            <p class="settings-description">Words sync through your private iCloud account. Note text stays on this device.</p>
+            <div class="personal-dictionary-add-row">
+              <input id="personal-dictionary-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="120" aria-label="Word to add to personal dictionary">
+              <button id="personal-dictionary-add" type="button">Add</button>
+            </div>
+            <p class="personal-dictionary-status" id="personal-dictionary-status" role="status" aria-live="polite">Sign in to sync your dictionary.</p>
+            <ul class="personal-dictionary-entries" id="personal-dictionary-entries" aria-label="Personal dictionary words"></ul>
+          </div>
+          </div>
+          <div class="settings-field" id="pwa-settings-field" hidden>
+            <div class="settings-field-label">Install</div>
+            <p class="settings-description" id="pwa-settings-copy"></p>
+            <button type="button" id="pwa-settings-install">Install Arbor</button>
+          </div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <dialog class="shortcut-sheet" id="shortcut-help" aria-labelledby="shortcut-help-title">
+    <div class="shortcut-sheet-card">
+      <header class="shortcut-sheet-header">
+        <h2 id="shortcut-help-title">Keyboard shortcuts</h2>
+        <button type="button" id="shortcut-help-close" aria-label="Close keyboard shortcuts">×</button>
+      </header>
+      <p class="shortcut-sheet-note">Shortcuts use extra modifiers where needed to avoid common browser commands. Browser and system settings can still vary.</p>
+      <div class="shortcut-table-scroll">
+      <div class="shortcut-history-actions" aria-label="Undo and redo">
+        <button type="button" id="undo-action-button" disabled>Undo</button>
+        <button type="button" id="redo-action-button" disabled>Redo</button>
+      </div>
+      <table class="shortcut-table">
+        <thead>
+          <tr><th scope="col">Action</th><th scope="col">Keys</th></tr>
+        </thead>
+        <tbody id="shortcut-help-rows"></tbody>
+      </table>
+      </div>
+    </div>
+  </dialog>
+
+  <div class="pwa-notice pwa-update" id="pwa-update" hidden role="status">
+    <p id="pwa-update-copy"></p>
+    <button id="pwa-update-apply" type="button">Reload to update</button>
+    <button class="pwa-text-button" id="pwa-update-dismiss" type="button">Dismiss</button>
+  </div>
+  <div class="pwa-notice" id="pwa-notice" hidden>
+    <p id="pwa-notice-copy"></p>
+    <button id="pwa-notice-action" type="button">Install Arbor</button>
+    <button class="pwa-text-button" id="pwa-notice-dismiss" type="button">Dismiss</button>
+  </div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="setup-screen" id="setup-screen" hidden>
+    <div class="setup-card">
+      <div class="setup-mark" aria-hidden="true">A</div>
+      <p class="eyebrow">Arbor for web</p>
+      <h1>Connect Arbor to iCloud</h1>
+      <p class="setup-copy" id="setup-copy">Add your CloudKit API token to app/cloudkit-config.js to connect this page to the signed-in iCloud account’s private Arbor database.</p>
+      <div class="setup-steps">
+        <div><span>1</span><p>Open app/cloudkit-config.js in the arbor-site repository.</p></div>
+        <div><span>2</span><p>Replace the placeholder token and choose the environment your Arbor app syncs to.</p></div>
+        <div><span>3</span><p>Save the file and reload this page, then choose Sign in with Apple.</p></div>
+      </div>
+      <a href="https://icloud.developer.apple.com/dashboard/" target="_blank" rel="noreferrer">Open CloudKit Dashboard <span aria-hidden="true">↗</span></a>
+      <p class="setup-footnote">This client uses Apple’s CloudKit JS library. Your notes stay in your iCloud private database.</p>
+    </div>
+  </div>
+</body>
+</html>

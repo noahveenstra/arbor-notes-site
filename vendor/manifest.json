@@ -1,0 +1,246 @@
+{
+  "transformers": {
+    "name": "@huggingface/transformers",
+    "version": "4.3.2",
+    "upstreamFile": "dist/transformers.min.js",
+    "upstreamSha384": "xFDNfwR3J/vPYzGjMr1VSM8LHIcA+ii2Ha4x+6WAuISKpT9I0dxgF/mVQW+I0kSd",
+    "patches": [
+      "allowRemoteModels default set to false",
+      "remoteHost default set to ./",
+      "onnxruntime wasm prefix set to ./vendor/ort/ instead of cdn.jsdelivr.net",
+      "model-id regex allows @ so the revision-pinned local directory is a valid model id",
+      "documentation links and the Node token host check no longer name huggingface.co or hf.co",
+      "ONNX Runtime API is exported from the existing bundle for the local T5 proofreading runner"
+    ]
+  },
+  "onnxruntime": {
+    "name": "onnxruntime-web",
+    "version": "1.31.0-dev.20260911-2a43ec07e",
+    "note": "This is the version string embedded in the Transformers.js 4.3.2 browser bundle. package.json depends on onnxruntime-web 1.31.0-dev.20260914-8d85527a0; the wasm files must match the bundled glue."
+  },
+  "model": {
+    "id": "Snowflake/snowflake-arctic-embed-s",
+    "revision": "e596f507467533e48a2e17c007f0e1dacc837b33",
+    "dtype": "q8",
+    "license": "apache-2.0"
+  },
+  "files": [
+    {
+      "path": "vendor/transformers/transformers.min.js",
+      "bytes": 587784,
+      "sha384": "O0vVPUpXkdEdLI8y1EB3UW/xUKfECbd8L4qo9GpIsQzz9RO9kTqZN3MxXrT2CgZ+"
+    },
+    {
+      "path": "vendor/transformers/LICENSE",
+      "bytes": 11358,
+      "sha384": "II9e1ieUDl5AxyiVq3/FflTua1Sr0kMJ25e6imG7rXg7SiAsA2VemsvEqVsLqM7/"
+    },
+    {
+      "path": "vendor/ort/ort-wasm-simd-threaded.asyncify.mjs",
+      "bytes": 53057,
+      "sha384": "LsoXcdvqvj+hHcKdudNnaDjaOj3sGcNhl47veWm3pDQMYjQIJgGRvTu8MFc2P/8H"
+    },
+    {
+      "path": "vendor/ort/ort-wasm-simd-threaded.asyncify.wasm",
+      "bytes": 26820463,
+      "sha384": "m/Pr+BSLX70mO9n2abMHbnqEiSoz4fEQYoE7NIkwf6vl+JhGMvW7RHVSH94F6LH4"
+    },
+    {
+      "path": "vendor/ort/ort-wasm-simd-threaded.mjs",
+      "bytes": 24381,
+      "sha384": "XcXA/MtAf0WpB8e023xQH9CM7RIjiugakT7x99DIwpFf7k56BIFFcAPerIF7FDad"
+    },
+    {
+      "path": "vendor/ort/ort-wasm-simd-threaded.wasm",
+      "bytes": 14239897,
+      "sha384": "NoUu0eZR3P/jiILxFBPl1jFK2mPCvKMBq9wSuM2uhmlcvGgeWZj49PLygYG5eoMi"
+    },
+    {
+      "path": "vendor/ort/LICENSE",
+      "bytes": 1344,
+      "sha384": "m09W4YqQ+ytu9/5CVPV00vfXVuX0NLVcSoXU8Do7uMEIlmFd0DHjkODxx8DGqLSO"
+    },
+    {
+      "path": "models/snowflake-arctic-embed-s@e596f507467533e48a2e17c007f0e1dacc837b33/config.json",
+      "bytes": 703,
+      "sha384": "ZtNgHU2NUB+yxdECiol5dcUyvLuwr5/eUJkYgKt1nTWocU+2DbXzWmf7otd5HmwM"
+    },
+    {
+      "path": "models/snowflake-arctic-embed-s@e596f507467533e48a2e17c007f0e1dacc837b33/tokenizer.json",
+      "bytes": 711649,
+      "sha384": "TVOSSfPmXNKj0K+qIqiOePB5LHnA3Fbd8bc78kD1HOaPJ+2PIq+9B5znWxSCgaJn"
+    },
+    {
+      "path": "models/snowflake-arctic-embed-s@e596f507467533e48a2e17c007f0e1dacc837b33/tokenizer_config.json",
+      "bytes": 1433,
+      "sha384": "Vvas8KvREJIcnwtOl/gNzGNlkg7KgnOqWKlDHNUYuulXs2pCERneVd8UyV7ESFT4"
+    },
+    {
+      "path": "models/snowflake-arctic-embed-s@e596f507467533e48a2e17c007f0e1dacc837b33/special_tokens_map.json",
+      "bytes": 695,
+      "sha384": "8FGW3iVUkRV2zwCjPEZKsiNZ6j3TVDxoT4UtvRPAkpLUZT97o+yPhwnKaWwuGmq+"
+    },
+    {
+      "path": "models/snowflake-arctic-embed-s@e596f507467533e48a2e17c007f0e1dacc837b33/onnx/model_quantized.onnx",
+      "bytes": 34015111,
+      "sha384": "g/Tl++1ddif5Zp5zjtZwydV+7tVKR5rWZYSfgWiPlMo/uEVNAGH7w9jrOuS8R9Sy"
+    },
+    {
+      "path": "vendor/fonts/Geist-Variable.woff2",
+      "bytes": 69488,
+      "sha384": "64CkhoivO5Ko9obQ6LD3zQCbs5XBAUovEno+JkZy5xW8FjBg47oOksPrs4oV4zzY",
+      "family": "Geist",
+      "style": "normal",
+      "weight": "100 900",
+      "preload": true,
+      "source": {
+        "repository": "https://github.com/vercel/geist-font",
+        "release": "v1.9.2",
+        "archive": "geist-font-v1.9.2.zip",
+        "archiveSha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+        "path": "geist-font/Geist/webfonts/Geist[wght].woff2"
+      },
+      "license": "OFL-1.1",
+      "licenseFile": "vendor/fonts/OFL.txt"
+    },
+    {
+      "path": "vendor/fonts/Geist-Italic-Variable.woff2",
+      "bytes": 73044,
+      "sha384": "daOBTJ7NrVpr8JidUCcwd3rBUWpO6v9T+WHsTGNrrL97RxVj/csdGbtJTS9ZmQnY",
+      "family": "Geist",
+      "style": "italic",
+      "weight": "100 900",
+      "preload": false,
+      "source": {
+        "repository": "https://github.com/vercel/geist-font",
+        "release": "v1.9.2",
+        "archive": "geist-font-v1.9.2.zip",
+        "archiveSha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+        "path": "geist-font/Geist/webfonts/Geist-Italic[wght].woff2"
+      },
+      "license": "OFL-1.1",
+      "licenseFile": "vendor/fonts/OFL.txt"
+    },
+    {
+      "path": "vendor/fonts/GeistMono-Variable.woff2",
+      "bytes": 71212,
+      "sha384": "1XseCWIukPjTGt7Vz+/StBEa6kEmNGKdNC8PezwKvv11NgOmaCvE+zdntV74+E7C",
+      "family": "Geist Mono",
+      "style": "normal",
+      "weight": "100 900",
+      "preload": false,
+      "source": {
+        "repository": "https://github.com/vercel/geist-font",
+        "release": "v1.9.2",
+        "archive": "geist-font-v1.9.2.zip",
+        "archiveSha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+        "path": "geist-font/GeistMono/webfonts/GeistMono[wght].woff2"
+      },
+      "license": "OFL-1.1",
+      "licenseFile": "vendor/fonts/OFL.txt"
+    },
+    {
+      "path": "vendor/fonts/GeistMono-Italic-Variable.woff2",
+      "bytes": 79172,
+      "sha384": "x+bmH0/+mqz5h90DOfCJZb7iQdjXNC4+kPXHZ1CBBzKGBNzyyPyN/BoS9nUAmpwF",
+      "family": "Geist Mono",
+      "style": "italic",
+      "weight": "100 900",
+      "preload": false,
+      "source": {
+        "repository": "https://github.com/vercel/geist-font",
+        "release": "v1.9.2",
+        "archive": "geist-font-v1.9.2.zip",
+        "archiveSha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+        "path": "geist-font/GeistMono/webfonts/GeistMono-Italic[wght].woff2"
+      },
+      "license": "OFL-1.1",
+      "licenseFile": "vendor/fonts/OFL.txt"
+    },
+    {
+      "path": "vendor/fonts/GeistSerif-Variable.woff2",
+      "bytes": 49036,
+      "sha384": "8NiR0XXwb2VMVhMuX+6gKkTFAPO+o+4Odr1PUZtj5xcWczrLDdLJbPS2nFQsMfeC",
+      "family": "Geist Serif",
+      "style": "normal",
+      "weight": "400",
+      "preload": false,
+      "source": {
+        "repository": "https://github.com/vercel/geist-font",
+        "release": "v1.9.2",
+        "archive": "geist-font-v1.9.2.zip",
+        "archiveSha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+        "path": "geist-font/GeistSerif/webfonts/GeistSerifVF.woff2"
+      },
+      "license": "OFL-1.1",
+      "licenseFile": "vendor/fonts/OFL.txt"
+    },
+    {
+      "path": "vendor/fonts/GeistPixelVF.woff2",
+      "bytes": 39224,
+      "sha384": "gE1fJf21SUW88K7z9DzClgjE4Tqt1SQlchAueVDRKB7nphjPGETBEKUG6Gl0yuw5",
+      "family": "Geist Pixel",
+      "style": "normal",
+      "weight": "400",
+      "preload": false,
+      "source": {
+        "repository": "https://github.com/vercel/geist-font",
+        "release": "v1.9.2",
+        "archive": "geist-font-v1.9.2.zip",
+        "archiveSha256": "15f066d58dcb99fb10014a49913009fdaf41e464cfb8851a44b44e593c95d3d8",
+        "path": "geist-font/GeistPixel/webfonts/GeistPixelVF.woff2"
+      },
+      "license": "OFL-1.1",
+      "licenseFile": "vendor/fonts/OFL.txt"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/LICENSE.txt",
+      "bytes": 11358,
+      "sha384": "II9e1ieUDl5AxyiVq3/FflTua1Sr0kMJ25e6imG7rXg7SiAsA2VemsvEqVsLqM7/"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/config.json",
+      "bytes": 1501,
+      "sha384": "IwrLmzYzbTK0xBsfOnabIQu9XkfBt5H2X/HuRkSRebS6MjXALvcCZ1H/3l/QdmId"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/decoder_model_int8.onnx",
+      "bytes": 58449240,
+      "sha384": "Bp7bcfXbzBOrxoHa000DEYybx8gHcw5laoV9OT4/WFL1PuGO9YdvXmfl67h40jrX"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/encoder_model_int8.onnx",
+      "bytes": 35518119,
+      "sha384": "5FFca6TYVocn4jEL48m/q+x4d8rUYXe1MnDGXbnPzNnsSOT6XJb4EoL27675r/CE"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/special_tokens_map.json",
+      "bytes": 2543,
+      "sha384": "NBLWOvJNAcxzA0VgvIrg5JQjoKblLbPF5PdaxXwIOkzuUhZRnacTX622LnBnmxh9"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/tokenizer.json",
+      "bytes": 2422434,
+      "sha384": "ytD/qMbTJ8FSlteSR+XqHBqv/q+Qipbb2JfmDAMFGuzGAvTM/y+Yqv/BaQdkV71u"
+    },
+    {
+      "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/tokenizer_config.json",
+      "bytes": 20996,
+      "sha384": "DDIgEKNp+aysATvUG2rrx5mP7LubVOT+v49mhitYqfIl24yd+w+5hNYGAwcNXXcu"
+    }
+  ],
+  "fonts": {
+    "name": "Geist",
+    "version": "v1.9.2",
+    "license": "OFL-1.1",
+    "note": "Entries in files with a family field are self-hosted Geist web fonts (website/app/fonts.css), including Geist Pixel. Paths are relative to website/app/, like every other entry."
+  },
+  "proofreadingModel": {
+    "id": "Unbabel/gec-t5_small",
+    "revision": "c958d53bfbce19c87342b69fc6bcaba7303d076f",
+    "onnxExportId": "JonaWhisper/jonawhisper-gec-t5-small-onnx",
+    "onnxExportRevision": "240e0e34d7638690212367d9ecfcd501c9327cc9",
+    "dtype": "int8",
+    "license": "apache-2.0"
+  }
+}

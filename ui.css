@@ -113,6 +113,24 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .list-empty strong { display: block; margin-bottom: 7px; color: var(--ink); font-size: 16px; }
 .list-empty p { margin: 0 0 12px; font-size: 13px; }
 .list-empty button { padding: 6px 12px; border: 1px solid var(--separator); border-radius: 4px; color: var(--label); background: var(--surface-editor); cursor: pointer; }
+.list-message-retry { margin: 10px auto 0; }
+.list-message-retry[hidden] { display: none; }
+.list-message.is-visually-hidden { position: absolute !important; width: 1px !important; height: 1px !important; margin: -1px !important; padding: 0 !important; overflow: hidden !important; border: 0 !important; clip: rect(0, 0, 0, 0) !important; clip-path: inset(50%) !important; white-space: nowrap !important; }
+.note-skeleton-row { cursor: default; pointer-events: none; }
+.note-skeleton-bar { display: block; max-width: 100%; height: .72em; border-radius: 999px; background: linear-gradient(90deg, rgba(128, 128, 128, .12) 20%, rgba(128, 128, 128, .21) 50%, rgba(128, 128, 128, .12) 80%); background-size: 220% 100%; animation: arbor-note-skeleton-shimmer 1.5s ease-in-out infinite; }
+.note-skeleton-heading { display: flex; align-items: center; }
+.note-skeleton-heading-bar { width: 74px; height: 1em; }
+.note-skeleton-title { margin-bottom: 5px; }
+.note-skeleton-title-bar { height: 1em; }
+.note-skeleton-preview { display: block; }
+.note-skeleton-preview-bar { height: .78em; }
+.note-skeleton-date { display: flex; align-items: center; }
+.note-skeleton-date-bar { height: .65em; }
+@keyframes arbor-note-skeleton-shimmer { to { background-position: -220% 0; } }
+.note-skeleton-row:nth-of-type(2) .note-skeleton-bar { animation-delay: 100ms; }
+.note-skeleton-row:nth-of-type(3) .note-skeleton-bar { animation-delay: 200ms; }
+.note-skeleton-row:nth-of-type(4) .note-skeleton-bar { animation-delay: 300ms; }
+@media (prefers-reduced-motion: reduce) { .note-skeleton-bar { animation: none; background-position: 0 0; } }
 
 .editor-panel { position: relative; display: flex; min-width: 0; height: 100%; flex-direction: column; margin: 0 0 0 0; overflow: hidden; border: 0; border-radius: 17px 17px 17px 17px; background: var(--paper); }
 .editor-empty { display: grid; height: 100%; place-items: center; color: var(--tertiary-label); font-size: 14px; }

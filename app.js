@@ -21,6 +21,7 @@
     user: null,
     demo: false,
     loadingRecords: false,
+    loadRecordsErrorMessage: "",
     records: new Map(),
     notes: [],
     folders: [],
@@ -368,6 +369,7 @@
     state.saveTimer = null;
     state.dirty = false;
     state.loadingRecords = false;
+    state.loadRecordsErrorMessage = "";
     state.records = new Map();
     state.pendingNewNoteRecords.clear();
     state.pendingNewNoteNavigation.clear();
@@ -837,11 +839,14 @@
     }, { once: true });
   }
 
-  function setListMessage(text, visible, isError) {
+  function setListMessage(text, visible, isError, canRetry, visuallyHidden) {
     const message = $("list-message");
     const label = $("list-message-text") || message;
     if (!message) return;
     message.classList.toggle("error", Boolean(isError));
+    message.classList.toggle("is-visually-hidden", Boolean(visuallyHidden));
+    const retry = $("list-message-retry");
+    if (retry) retry.hidden = !visible || !canRetry;
     fadeSwapText(label, text);
     setMotionVisibility(message, visible);
   }
@@ -1404,16 +1409,36 @@
     }
     list.replaceChildren();
     list.dataset.motionSignature = signature;
+    if (state.loadingRecords) list.setAttribute("aria-busy", "true");
+    else list.removeAttribute("aria-busy");
     syncListCursor(visible);
-    $("note-count").textContent = String(visible.length);
+    const count = $("note-count");
+    if (state.loadingRecords && state.notes.length === 0) {
+      count.textContent = "…";
+      count.setAttribute("aria-label", "Loading notes");
+    } else {
+      count.textContent = String(visible.length);
+      count.removeAttribute("aria-label");
+    }
     $("list-heading").textContent = state.showingArchive ? "Archive" : (state.selectedFolder ? state.selectedFolder.split("/").pop() : "All Notes");
     if (!visible.length) {
       list.removeAttribute("aria-activedescendant");
-      const message = state.loadingRecords ? "Loading notes…" : (state.showingArchive ? "Archive is empty." : (state.query ? "No notes match that search." : (state.selectedFolder ? "This folder is empty. Create a note or drag one here." : (state.nativeSchema ? (state.nativeZoneExists ? "This iCloud account has no notes in Arbor yet." : "No synced Arbor notes were found in this iCloud account yet. Open Arbor on an Apple device and allow its notes to finish syncing, then reload here.") : "No notes yet. Create a note to get started."))));
+      const dateField = noteSorting.dateFieldFor(state.preferences.noteSortOrder);
+      if (state.loadingRecords && state.notes.length === 0) {
+        renderNoteSkeleton(list, dateField);
+        setListMessage("Loading notes…", true, false, false, true);
+        return;
+      }
+      if (state.loadRecordsErrorMessage) {
+        setListMessage(state.loadRecordsErrorMessage, true, true, true);
+        return;
+      }
+      const message = state.showingArchive ? "Archive is empty." : (state.query ? "No notes match that search." : (state.selectedFolder ? "This folder is empty. Create a note or drag one here." : (state.nativeSchema ? (state.nativeZoneExists ? "This iCloud account has no notes in Arbor yet." : "No synced Arbor notes were found in this iCloud account yet. Open Arbor on an Apple device and allow its notes to finish syncing, then reload here.") : "No notes yet. Create a note to get started.")));
       setListMessage(message, true, false);
       return;
     }
-    setListMessage("", false, false);
+    if (state.loadRecordsErrorMessage) setListMessage(state.loadRecordsErrorMessage, true, true, true);
+    else setListMessage("", false, false);
     const dateField = noteSorting.dateFieldFor(state.preferences.noteSortOrder);
     if (!dateField) {
       visible.forEach(function (note) {
@@ -1449,6 +1474,56 @@
       noteRows.forEach(function (entry) { observeNativePreview(entry.card, entry.note); });
     });
     applyListCursor();
+  }
+
+  function renderNoteSkeleton(list, dateField) {
+    const section = dateField ? document.createElement("section") : null;
+    const target = section || list;
+    if (section) {
+      section.className = "date-group note-skeleton-group";
+      section.setAttribute("role", "presentation");
+      section.setAttribute("aria-hidden", "true");
+      const heading = document.createElement("h2");
+      heading.className = "date-group-title note-group-title note-skeleton-heading";
+      const bar = document.createElement("span");
+      bar.className = "note-skeleton-bar note-skeleton-heading-bar";
+      heading.appendChild(bar);
+      section.appendChild(heading);
+    }
+
+    function addBar(parent, className, width) {
+      const bar = document.createElement("span");
+      bar.className = "note-skeleton-bar " + className;
+      bar.style.width = width;
+      parent.appendChild(bar);
+    }
+
+    ["56%", "70%", "48%", "62%"].forEach(function (titleWidth, index) {
+      const row = document.createElement("div");
+      row.className = "note-card note-row note-skeleton-row";
+      row.setAttribute("role", "presentation");
+      row.setAttribute("aria-hidden", "true");
+      const title = document.createElement("span");
+      title.className = "note-card-title note-row-title note-skeleton-title";
+      addBar(title, "note-skeleton-title-bar", titleWidth);
+      row.appendChild(title);
+      const detail = document.createElement("span");
+      detail.className = "note-card-detail";
+      const preview = document.createElement("span");
+      preview.className = "note-card-preview note-row-excerpt note-skeleton-preview";
+      addBar(preview, "note-skeleton-preview-bar", index % 2 ? "72%" : "88%");
+      detail.appendChild(preview);
+      row.appendChild(detail);
+      const footer = document.createElement("span");
+      footer.className = "note-row-footer is-unfiled";
+      const date = document.createElement("span");
+      date.className = "note-card-date note-row-date note-skeleton-date";
+      addBar(date, "note-skeleton-date-bar", "48px");
+      footer.appendChild(date);
+      row.appendChild(footer);
+      target.appendChild(row);
+    });
+    if (section) list.appendChild(section);
   }
 
   function renderOpenNoteTabs() {
@@ -4839,7 +4914,7 @@
 
   async function loadZoneRecords(session) {
     if (!accountSessionCurrent(session)) return;
-    state.nativeSchema = true; state.loadingRecords = true; renderNotes();
+    state.nativeSchema = true; state.loadingRecords = true; state.loadRecordsErrorMessage = ""; renderNotes();
     if (!state.nativeZoneID) {
       const zoneResponse = assertResponse(await state.database.fetchAllRecordZones());
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
@@ -5055,7 +5130,7 @@
         setConnection("Connected · refreshing notes…", true);
       }
       if (session !== state.accountSession) return;
-      await loadZoneRecords(session);
+      if (!(await loadZoneRecordsWithFeedback(session))) return;
       if (session !== state.accountSession) return;
       await syncPersonalDictionary(session);
       if (session !== state.accountSession) return;
@@ -5068,6 +5143,32 @@
       }
       showToast(readableError(error), true);
     }
+  }
+
+  async function loadZoneRecordsWithFeedback(session) {
+    try {
+      await loadZoneRecords(session);
+      return true;
+    } catch (error) {
+      if (!accountSessionCurrent(session)) return false;
+      state.loadingRecords = false;
+      state.loadRecordsErrorMessage = readableError(error);
+      renderNotes();
+      setListMessage(state.loadRecordsErrorMessage, true, true, true);
+      setConnection("Connection needs attention", false);
+      showToast(readableError(error), true);
+      return false;
+    }
+  }
+
+  async function retryNoteLoad() {
+    const session = state.accountSession;
+    if (!accountSessionCurrent(session) || state.loadingRecords) return;
+    setConnection("Refreshing notes…", false);
+    if (!(await loadZoneRecordsWithFeedback(session))) return;
+    if (session !== state.accountSession) return;
+    await syncPersonalDictionary(session);
+    if (session === state.accountSession) setConnection("Using your Apple Account.", true);
   }
 
   function initializeCloudKit() {
@@ -8008,6 +8109,8 @@
 
   const welcomeRetry = $("welcome-retry");
   if (welcomeRetry) welcomeRetry.addEventListener("click", function () { window.location.reload(); });
+  const listRetry = $("list-message-retry");
+  if (listRetry) listRetry.addEventListener("click", function () { retryNoteLoad(); });
   wireEvents();
   initializeCloudKit();
   async function prepareForShellUpdate() {

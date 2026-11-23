@@ -3130,10 +3130,42 @@
     scheduleSave();
   }
 
+  function removeSelectedStrikethrough(body, selection) {
+    if (!body || !selection || selection.isCollapsed || !selection.rangeCount) return false;
+    const range = selection.getRangeAt(0);
+    const elementForNode = function (node) { return node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement); };
+    const start = elementForNode(range.startContainer);
+    const end = elementForNode(range.endContainer);
+    const startMark = start && start.closest ? start.closest("s, del, strike") : null;
+    const endMark = end && end.closest ? end.closest("s, del, strike") : null;
+    if (!startMark || startMark !== endMark || !body.contains(startMark)) return false;
+
+    const fullRange = document.createRange();
+    fullRange.selectNodeContents(startMark);
+    try {
+      if (fullRange.compareBoundaryPoints(Range.START_TO_START, range) < 0 ||
+          fullRange.compareBoundaryPoints(Range.END_TO_END, range) > 0) return false;
+    } catch (_) { return false; }
+
+    const saved = captureEditorSelection(body);
+    const parent = startMark.parentNode;
+    if (!saved || !parent) return false;
+    const contents = document.createDocumentFragment();
+    while (startMark.firstChild) contents.appendChild(startMark.firstChild);
+    startMark.replaceWith(contents);
+    parent.normalize();
+    restoreEditorTextSelection(body, saved);
+    return true;
+  }
+
   function applyRichFormat(command) {
     const body = $("note-body");
     const selection = window.getSelection();
     body.focus();
+    if (command === "strikeThrough" && removeSelectedStrikethrough(body, selection)) {
+      body.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "formatRemove", data: null }));
+      return;
+    }
     if (command === "checklist") {
       const anchor = selection && selection.anchorNode;
       const element = anchor && (anchor.nodeType === Node.ELEMENT_NODE ? anchor : anchor.parentElement);

@@ -103,14 +103,64 @@
       const missingContraction = word.toLocaleLowerCase() === "im";
       if (!missingContraction && (spell.correct(word) || spell.correct(word.toLowerCase()))) continue;
       const suggestions = missingContraction ? ["I'm"] : spell.suggest(word);
-      const candidates = (suggestions.length ? suggestions : spell.suggest(word.toLowerCase())).slice(0, 4).map(function (candidate) {
+      const allCandidates = (suggestions.length ? suggestions : spell.suggest(word.toLowerCase())).map(function (candidate) {
         const value = caseLike(word, candidate);
         return { label: value, replacement: value };
       });
-      const item = issue(match.index, match.index + word.length, "spelling", word, candidates, "Possible spelling mistake");
+      const caseOnlyValue = word[0].toLocaleUpperCase() + word.slice(1);
+      const caseOnlyCandidate = allCandidates.find(function (candidate) {
+        return candidate.replacement === caseOnlyValue && candidate.replacement !== word;
+      });
+      if (caseOnlyCandidate) {
+        const capitalization = issue(match.index, match.index + 1, "capitalization", word, [{
+          label: "Click to capitalize",
+          replacement: caseOnlyValue[0]
+        }], "Capitalization suggestion");
+        if (capitalization) result.push(capitalization);
+        continue;
+      }
+      const item = issue(match.index, match.index + word.length, "spelling", word, allCandidates.slice(0, 4), "Possible spelling mistake");
       if (item) result.push(item);
     }
     return result;
+  }
+
+  function initialCapitalizationChanges(original, replacement, offset) {
+    if (typeof original !== "string" || typeof replacement !== "string") return [];
+    const baseOffset = Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+    const pattern = new RegExp(WORD_RE.source, WORD_RE.flags);
+    const sourceWords = Array.from(original.matchAll(pattern));
+    const replacementWords = Array.from(replacement.matchAll(pattern));
+    if (!sourceWords.length || sourceWords.length !== replacementWords.length) return [];
+
+    let sourceOffset = 0;
+    let replacementOffset = 0;
+    const changes = [];
+    for (let index = 0; index < sourceWords.length; index += 1) {
+      const sourceWord = sourceWords[index];
+      const replacementWord = replacementWords[index];
+      const sourceSeparator = original.slice(sourceOffset, sourceWord.index);
+      const replacementSeparator = replacement.slice(replacementOffset, replacementWord.index);
+      if (sourceSeparator !== replacementSeparator) return [];
+
+      const expected = sourceWord[0][0].toLocaleUpperCase() + sourceWord[0].slice(1);
+      if (replacementWord[0] !== sourceWord[0] && replacementWord[0] === expected) {
+        changes.push({
+          original: sourceWord[0],
+          word: sourceWord[0],
+          replacement: expected,
+          start: baseOffset + sourceWord.index,
+          end: baseOffset + sourceWord.index + 1
+        });
+      } else if (replacementWord[0] !== sourceWord[0] && replacementWord[0] !== expected) {
+        // Non-capitalization edits are ignored independently; safe name
+        // capitalization changes elsewhere in the same sentence can remain.
+      }
+      sourceOffset = sourceWord.index + sourceWord[0].length;
+      replacementOffset = replacementWord.index + replacementWord[0].length;
+    }
+    if (original.slice(sourceOffset) !== replacement.slice(replacementOffset)) return [];
+    return changes;
   }
 
   function normalizedSpellingWord(value) {
@@ -147,5 +197,9 @@
     });
   }
 
-  return Object.freeze({ scan: scan, promoteSpellingCandidate: promoteSpellingCandidate });
+  return Object.freeze({
+    scan: scan,
+    promoteSpellingCandidate: promoteSpellingCandidate,
+    initialCapitalizationChanges: initialCapitalizationChanges
+  });
 });

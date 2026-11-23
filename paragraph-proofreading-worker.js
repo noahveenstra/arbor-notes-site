@@ -5,7 +5,9 @@ const proofreader = globalThis.ArborParagraphProofreader.createParagraphProofrea
   localRunner: createLocalProofreadingRunner({
     onProgress: function (progress) {
       if (currentRequestId === null) return;
-      const type = currentRequestType === "spelling-context-rank" ? "spelling-context-rank-progress" : "suggestion-review-progress";
+      const type = currentRequestType === "spelling-context-rank" ? "spelling-context-rank-progress"
+        : currentRequestType === "capitalization-scan" ? "capitalization-scan-progress"
+          : "suggestion-review-progress";
       self.postMessage({ type: type, requestId: currentRequestId, progress: progress });
     }
   }),
@@ -19,9 +21,10 @@ let requestQueue = Promise.resolve();
 async function handleRequest(message) {
   if (!message || !Number.isSafeInteger(message.requestId)) return;
   const isSpellingRank = message.type === "spelling-context-rank";
-  if (!isSpellingRank && message.type !== "suggestion-review") return;
-  const method = isSpellingRank ? "suggestSelection" : message.method;
-  if (!isSpellingRank && method !== "suggestSelection" && method !== "suggestSentences") {
+  const isCapitalizationScan = message.type === "capitalization-scan";
+  if (!isSpellingRank && !isCapitalizationScan && message.type !== "suggestion-review") return;
+  const method = isSpellingRank ? "suggestSelection" : isCapitalizationScan ? "suggestSentences" : message.method;
+  if (!isSpellingRank && !isCapitalizationScan && method !== "suggestSelection" && method !== "suggestSentences") {
     self.postMessage({
       type: "suggestion-review-result",
       requestId: message.requestId,
@@ -34,13 +37,15 @@ async function handleRequest(message) {
   try {
     const result = await proofreader[method](message.payload);
     self.postMessage({
-      type: isSpellingRank ? "spelling-context-rank-result" : "suggestion-review-result",
+      type: isSpellingRank ? "spelling-context-rank-result"
+        : isCapitalizationScan ? "capitalization-scan-result" : "suggestion-review-result",
       requestId: message.requestId,
       result: result
     });
   } catch (_) {
     self.postMessage({
-      type: isSpellingRank ? "spelling-context-rank-result" : "suggestion-review-result",
+      type: isSpellingRank ? "spelling-context-rank-result"
+        : isCapitalizationScan ? "capitalization-scan-result" : "suggestion-review-result",
       requestId: message.requestId,
       result: { status: "unavailable", reason: "local-model-unavailable" }
     });

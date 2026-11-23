@@ -33,7 +33,7 @@
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-130-signed-out-welcome-20261122-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-135-notes-loading-skeleton-20261123-a">
+  <link rel="stylesheet" href="./ui.css?v=arb-147-name-context-20261123-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261120-d"></script>
@@ -42,12 +42,12 @@
   <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" defer></script>
   <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
   <script src="./proofreading-dictionary-sync.js?v=arb-112-dictionary-sync-20261120-a" defer></script>
-  <script src="./proofreading.js?v=arb-128-grammar-toggle-20261121-b" defer></script>
+  <script src="./proofreading.js?v=arb-140-capitalization-whole-word-20261123-c" defer></script>
   <script src="./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b" defer></script>
   <script src="./note-history.js?v=arb-136-restore-20261123-a" defer></script>
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
-  <script src="./app-bootstrap.js?v=arb-140-capitalization-word-20261123-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-147-name-context-20261123-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -446,7 +446,9 @@
             <input id="proofreading-autocorrect" type="checkbox" checked>
           </label>
           <label class="settings-toggle-row" for="proofreading-sentence-capitalization">
-            <span>Check first-word capitalization in each sentence</span>
+            <span>Suggest sentence and name capitalization
+              <small>Name checks run in your browser on this device. The first use loads a local model from Arbor (about 97 MB); note text is not sent to an AI service.</small>
+            </span>
             <input id="proofreading-sentence-capitalization" type="checkbox" checked>
           </label>
           <label class="settings-toggle-row" for="proofreading-grammar-suggestions">

@@ -103,6 +103,13 @@
     proofreadingRequestId: 0,
     proofreadingTimer: 0,
     proofreadingPending: null,
+    capitalizationContextTimer: 0,
+    capitalizationContextRequestId: 0,
+    capitalizationContextPending: null,
+    capitalizationContextRerun: false,
+    capitalizationContextLastKey: "",
+    capitalizationContextCache: new Map(),
+    capitalizationContextTimeout: 0,
     selectionReviewWorker: null,
     selectionReviewRequestId: 0,
     selectionReviewPending: null,
@@ -3284,6 +3291,8 @@
       scheduleSave(true, autoCorrection ? { label: "Auto-correct", groupKey: null } : null);
       const trigger = autoCorrection ? null : autoCorrectionTrigger(body, event);
       scheduleProofreading(body, trigger ? 0 : undefined, trigger);
+      if (event.isComposing) window.clearTimeout(state.capitalizationContextTimer);
+      else scheduleCapitalizationContextCheck(body);
       renderAboutPanel();
     };
     body.addEventListener("input", onInput);
@@ -3343,7 +3352,7 @@
     if (state.proofreadingWorker) return state.proofreadingWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./proofreading-worker.js?v=arb-109-autocorrect-maintenance-20261123-a", { name: "arbor-local-proofreading" });
+      const worker = new Worker("./proofreading-worker.js?v=arb-147-name-context-20261123-a", { name: "arbor-local-proofreading" });
       worker.addEventListener("message", onProofreadingMessage);
       worker.addEventListener("error", function (event) {
         console.warn("Local writing suggestions could not start.", event.message || "Worker error");
@@ -3756,6 +3765,213 @@
     }, wait);
   }
 
+  function proofreadingBlockForNode(node, body) {
+    const parent = node && node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
+    const block = parent && parent.closest ? parent.closest("p, li, blockquote, h1, h2, h3, h4, h5, h6") : null;
+    return block && body.contains(block) ? block : body;
+  }
+
+  function proofreadingBlockText(block, nodes, body) {
+    return nodes.filter(function (node) { return proofreadingBlockForNode(node, body) === block; })
+      .map(function (node) { return node.nodeValue || ""; }).join("");
+  }
+
+  function proofreadingBlockPath(block, body) {
+    const path = [];
+    let current = block;
+    while (current && current !== body) {
+      const parent = current.parentElement;
+      if (!parent) return null;
+      path.unshift(Array.prototype.indexOf.call(parent.children, current));
+      current = parent;
+    }
+    return current === body ? path : null;
+  }
+
+  function proofreadingElementAtPath(body, path) {
+    let current = body;
+    for (const index of path || []) {
+      current = current && current.children ? current.children[index] : null;
+      if (!current) return null;
+    }
+    return current;
+  }
+
+  function proofreadingBlockPosition(block, offset, nodes, body) {
+    let blockOffset = 0;
+    for (let index = 0; index < nodes.length; index += 1) {
+      const node = nodes[index];
+      if (proofreadingBlockForNode(node, body) !== block) continue;
+      if (offset >= blockOffset && offset < blockOffset + node.length) {
+        return { node: node, nodeIndex: index, offset: offset - blockOffset };
+      }
+      blockOffset += node.length;
+    }
+    return null;
+  }
+
+  function proofreadingBlockOffset(block, targetNode, targetOffset, nodes, body) {
+    let offset = 0;
+    for (const node of nodes) {
+      if (proofreadingBlockForNode(node, body) !== block) continue;
+      if (node === targetNode) return offset + Math.max(0, Math.min(targetOffset, node.length));
+      offset += node.length;
+    }
+    return null;
+  }
+
+  function sentenceRangeAt(text, requestedOffset) {
+    if (!text) return null;
+    const offset = Math.max(0, Math.min(requestedOffset, text.length));
+    let segment = null;
+    if (typeof Intl.Segmenter === "function") {
+      const segments = Array.from(new Intl.Segmenter(undefined, { granularity: "sentence" }).segment(text));
+      segment = segments.find(function (item) { return offset >= item.index && offset < item.index + item.segment.length; })
+        || segments.find(function (item) { return offset === item.index + item.segment.length; })
+        || null;
+    }
+    if (segment) {
+      let start = segment.index;
+      let end = start + segment.segment.length;
+      while (start < end && /\s/u.test(text[start])) start += 1;
+      while (end > start && /\s/u.test(text[end - 1])) end -= 1;
+      return end > start ? { start: start, end: end, text: text.slice(start, end) } : null;
+    }
+
+    let start = 0;
+    const previous = /[.!?](?:["'’”)]*)\s+/gu;
+    let match;
+    while ((match = previous.exec(text.slice(0, offset)))) start = match.index + match[0].length;
+    const after = /[.!?](?:["'’”)]*)(?:\s+|$)/u.exec(text.slice(offset));
+    let end = after ? offset + after.index + after[0].length : text.length;
+    while (start < end && /\s/u.test(text[start])) start += 1;
+    while (end > start && /\s/u.test(text[end - 1])) end -= 1;
+    return end > start ? { start: start, end: end, text: text.slice(start, end) } : null;
+  }
+
+  function capitalizationContextAtCaret(body) {
+    if (!body || body !== $("note-body") || !state.selectedRecordName || !state.preferences.checkSentenceCapitalization) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.isCollapsed || !selection.anchorNode || !body.contains(selection.anchorNode)) return null;
+    const anchorNode = selection.anchorNode;
+    const anchorElement = anchorNode.nodeType === Node.ELEMENT_NODE ? anchorNode : anchorNode.parentElement;
+    if (!anchorElement || anchorElement.closest("a, code, pre, [data-proofreading-ignore]")) return null;
+    const nodes = proofreadingTextNodes(body);
+    if (anchorNode.nodeType !== Node.TEXT_NODE || !nodes.includes(anchorNode)) return null;
+    const block = proofreadingBlockForNode(anchorNode, body);
+    const blockText = proofreadingBlockText(block, nodes, body);
+    const caretOffset = proofreadingBlockOffset(block, anchorNode, selection.anchorOffset, nodes, body);
+    if (caretOffset === null) return null;
+    const sentence = sentenceRangeAt(blockText, caretOffset);
+    if (!sentence || sentence.text.length > 500) return null;
+    const blockPath = proofreadingBlockPath(block, body);
+    if (!blockPath) return null;
+    return {
+      recordName: state.selectedRecordName,
+      body: body,
+      blockPath: blockPath,
+      blockText: blockText,
+      sentenceStart: sentence.start,
+      sentence: sentence.text,
+      contextBefore: blockText.slice(Math.max(0, sentence.start - 240), sentence.start),
+      contextAfter: blockText.slice(sentence.end, sentence.end + 240)
+    };
+  }
+
+  function scheduleCapitalizationContextCheck(body, delay) {
+    window.clearTimeout(state.capitalizationContextTimer);
+    if (!state.preferences.checkSentenceCapitalization) return;
+    const wait = delay === undefined ? 1100 : delay;
+    state.capitalizationContextTimer = window.setTimeout(function () {
+      if (!state.preferences.checkSentenceCapitalization || body !== $("note-body") || !state.selectedRecordName) return;
+      const context = capitalizationContextAtCaret(body);
+      if (!context) return;
+      const key = [context.recordName, context.blockPath.join("."), context.blockText, context.sentenceStart, context.sentence].join("\u001f");
+      if (key === state.capitalizationContextLastKey) return;
+      if (state.capitalizationContextPending) {
+        state.capitalizationContextRerun = true;
+        return;
+      }
+      const worker = ensureSelectionReviewWorker();
+      if (!worker) return;
+      const requestId = ++state.capitalizationContextRequestId;
+      const pending = Object.assign({}, context, { requestId: requestId, key: key });
+      state.capitalizationContextPending = pending;
+      state.capitalizationContextRerun = false;
+      state.capitalizationContextTimeout = window.setTimeout(function () {
+        if (state.capitalizationContextPending !== pending) return;
+        state.capitalizationContextPending = null;
+        state.capitalizationContextRerun = false;
+      }, 45000);
+      try {
+        worker.postMessage({
+          type: "capitalization-scan",
+          requestId: requestId,
+          payload: { paragraph: context.sentence, contextBefore: context.contextBefore, contextAfter: context.contextAfter }
+        });
+      } catch (_) {
+        window.clearTimeout(state.capitalizationContextTimeout);
+        state.capitalizationContextPending = null;
+      }
+    }, wait);
+  }
+
+  function onCapitalizationContextMessage(event) {
+    const message = event.data || {};
+    const pending = state.capitalizationContextPending;
+    if (!pending || pending.requestId !== message.requestId) return;
+    if (message.type === "capitalization-scan-progress") return;
+    if (message.type !== "capitalization-scan-result") return;
+    window.clearTimeout(state.capitalizationContextTimeout);
+    state.capitalizationContextPending = null;
+
+    const body = $("note-body");
+    if (state.selectedRecordName === pending.recordName && body === pending.body &&
+        state.preferences.checkSentenceCapitalization && body.isConnected) {
+      const currentNodes = proofreadingTextNodes(body);
+      const currentBlock = proofreadingElementAtPath(body, pending.blockPath);
+      const sameCaretBlock = currentBlock && proofreadingBlockText(currentBlock, currentNodes, body) === pending.blockText;
+      if (sameCaretBlock) {
+        const result = message.result || {};
+        const suggestions = result.status === "suggestions" && Array.isArray(result.suggestions) ? result.suggestions
+          : result.status === "suggestion" ? [result] : [];
+        const changes = [];
+        suggestions.forEach(function (suggestion) {
+          if (!suggestion || suggestion.status !== "suggestion" || typeof suggestion.original !== "string" || typeof suggestion.replacement !== "string") return;
+          window.ArborProofreading.initialCapitalizationChanges(suggestion.original, suggestion.replacement, pending.sentenceStart)
+            .forEach(function (change) {
+              if (change.start <= pending.sentenceStart || change.original.toLocaleLowerCase() === "i") return;
+              changes.push(change);
+            });
+        });
+        changes.forEach(function (change) {
+          const cacheKey = [pending.recordName, pending.blockPath.join("."), pending.blockText].join("\u001f");
+          const cached = state.capitalizationContextCache.get(cacheKey) || {
+            recordName: pending.recordName,
+            blockPath: pending.blockPath,
+            blockText: pending.blockText,
+            items: []
+          };
+          const item = {
+            blockOffset: change.start,
+            word: change.original,
+            replacement: change.replacement
+          };
+          if (!cached.items.some(function (existing) { return existing.blockOffset === item.blockOffset && existing.word === item.word; })) {
+            cached.items.push(item);
+          }
+          state.capitalizationContextCache.set(cacheKey, cached);
+        });
+        state.capitalizationContextLastKey = pending.key;
+        if (changes.length) scheduleProofreading(body, 0);
+      }
+    }
+
+    const rerun = state.capitalizationContextRerun;
+    state.capitalizationContextRerun = false;
+    if (rerun && body && body === $("note-body")) scheduleCapitalizationContextCheck(body, 0);
+  }
+
   function onProofreadingMessage(event) {
     const result = event.data || {};
     const pending = state.proofreadingPending;
@@ -3789,6 +4005,34 @@
         const key = ignoredCorrectionKey(source, item);
         if (item.kind === "spelling" && proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), item.word)) return;
         if (!ignored.has(key)) entries.push({ nodeIndex: nodeIndex, source: source, item: item, key: key });
+      });
+    });
+    Array.from(state.capitalizationContextCache.entries()).forEach(function (pair) {
+      const cacheKey = pair[0];
+      const cached = pair[1];
+      if (cached.recordName !== pending.recordName || !state.preferences.checkSentenceCapitalization) return;
+      const block = proofreadingElementAtPath(pending.body, cached.blockPath);
+      if (!block || proofreadingBlockText(block, nodes, pending.body) !== cached.blockText) {
+        state.capitalizationContextCache.delete(cacheKey);
+        return;
+      }
+      cached.items.forEach(function (suggestion) {
+        const position = proofreadingBlockPosition(block, suggestion.blockOffset, nodes, pending.body);
+        if (!position || position.node.nodeValue.slice(position.offset, position.offset + suggestion.word.length) !== suggestion.word) return;
+        const item = {
+          start: position.offset,
+          end: position.offset + 1,
+          kind: "capitalization",
+          word: suggestion.word,
+          message: "Capitalization suggestion",
+          options: [{ label: "Click to capitalize", replacement: suggestion.replacement[0] }]
+        };
+        const overlaps = entries.some(function (entry) {
+          return entry.nodeIndex === position.nodeIndex && entry.item.start < item.end && entry.item.end > item.start;
+        });
+        if (overlaps) return;
+        const key = ignoredCorrectionKey(position.node.nodeValue, item);
+        if (!ignored.has(key)) entries.push({ nodeIndex: position.nodeIndex, source: position.node.nodeValue, item: item, key: key });
       });
     });
     entries.sort(function (left, right) { return left.nodeIndex - right.nodeIndex || right.item.start - left.item.start; });
@@ -3827,6 +4071,34 @@
     return target && $("note-body") && $("note-body").contains(target) ? target : null;
   }
 
+  function capitalizationCorrectionFromEvent(body, event) {
+    let point = null;
+    if (typeof document.caretPositionFromPoint === "function") {
+      const position = document.caretPositionFromPoint(event.clientX, event.clientY);
+      if (position) point = { node: position.offsetNode, offset: position.offset };
+    } else if (typeof document.caretRangeFromPoint === "function") {
+      const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+      if (range) point = { node: range.startContainer, offset: range.startOffset };
+    }
+    if ((!point || !body.contains(point.node)) && window.getSelection) {
+      const selection = window.getSelection();
+      if (selection && selection.anchorNode && body.contains(selection.anchorNode)) {
+        point = { node: selection.anchorNode, offset: selection.anchorOffset };
+      }
+    }
+    if (!point || !body.contains(point.node)) return null;
+
+    for (const entry of (state.proofreadingCorrections || new Map()).values()) {
+      if (entry.kind !== "capitalization" || !entry.marker || !entry.marker.isConnected) continue;
+      if (entry.marker.contains(point.node)) return entry;
+      const remainder = entry.marker.nextSibling;
+      const wordRemainder = entry.word.slice(1);
+      if (wordRemainder && remainder && remainder.nodeType === Node.TEXT_NODE && point.node === remainder &&
+          remainder.nodeValue.slice(0, wordRemainder.length) === wordRemainder && point.offset <= wordRemainder.length) return entry;
+    }
+    return null;
+  }
+
   function onCorrectionPointerOver(event) {
     if (event.pointerType !== "mouse") return;
     const mark = correctionMarkFromEvent(event);
@@ -3842,15 +4114,21 @@
 
   function onCorrectionClick(event) {
     const mark = correctionMarkFromEvent(event);
-    if (!mark) return;
-    const entry = state.proofreadingCorrections && state.proofreadingCorrections.get(mark.dataset.correctionId);
+    const body = $("note-body");
+    let entry = mark && state.proofreadingCorrections && state.proofreadingCorrections.get(mark.dataset.correctionId);
     const pointerType = event.pointerType || state.proofreadingLastPointerType;
+    if (!entry && body && event.detail > 0) entry = capitalizationCorrectionFromEvent(body, event);
     if (entry && entry.kind === "capitalization" && event.detail > 0 && pointerType === "mouse") {
       event.preventDefault();
-      applyCorrectionOption(0);
+      applyCorrectionOption(0, entry);
       return;
     }
-    openCorrectionPopover(mark, false, true);
+    if (entry && entry.kind === "capitalization" && event.detail > 0 && pointerType === "touch") {
+      event.preventDefault();
+      openCorrectionPopover(entry.marker, false, true);
+      return;
+    }
+    if (mark) openCorrectionPopover(mark, false, true);
   }
 
   function scheduleCorrectionPopoverClose(restoreFocus) {
@@ -3906,13 +4184,27 @@
     };
   }
 
-  function positionCorrectionPopover(mark, popover) {
-    const bounds = mark.getBoundingClientRect();
+  function positionCorrectionPopover(entry, popover) {
+    const mark = entry && entry.marker;
+    if (!mark) return;
+    let bounds = mark.getBoundingClientRect();
+    if (entry.kind === "capitalization") {
+      const remainder = mark.nextSibling;
+      const remainderText = entry.word.slice(1);
+      if (remainderText && remainder && remainder.nodeType === Node.TEXT_NODE && remainder.nodeValue.startsWith(remainderText)) {
+        try {
+          const range = document.createRange();
+          range.setStart(mark.firstChild || mark, 0);
+          range.setEnd(remainder, remainderText.length);
+          bounds = range.getBoundingClientRect();
+        } catch (_) {}
+      }
+    }
     const padding = 10;
     const zoom = Number.parseFloat(getComputedStyle(document.body).zoom) || 1;
     const width = popover.offsetWidth;
     const center = Math.max(padding / zoom + width / 2, Math.min(window.innerWidth / zoom - padding / zoom - width / 2, (bounds.left + bounds.width / 2) / zoom));
-    const openBelow = bounds.top < popover.offsetHeight + 18;
+    const openBelow = bounds.top / zoom < popover.offsetHeight + 18;
     popover.dataset.placement = openBelow ? "bottom" : "top";
     popover.style.left = center + "px";
     popover.style.top = (openBelow ? bounds.bottom + 8 : bounds.top - 8) / zoom + "px";
@@ -3952,7 +4244,7 @@
     message.textContent = text;
     message.dataset.state = kind || "info";
     message.hidden = false;
-    positionCorrectionPopover(entry.marker, popover);
+    positionCorrectionPopover(entry, popover);
   }
 
   function requestSpellingContextRank(entry) {
@@ -4151,7 +4443,7 @@
     popover.hidden = false;
     popover.setAttribute("aria-hidden", "false");
     popover.classList.remove("is-open");
-    positionCorrectionPopover(mark, popover);
+    positionCorrectionPopover(entry, popover);
     window.requestAnimationFrame(function () { popover.classList.add("is-open"); });
     if (focusFirst) {
       const first = popover.querySelector(".correction-option") || ignore;
@@ -4207,8 +4499,8 @@
     }
   }
 
-  function applyCorrectionOption(optionIndex) {
-    const entry = state.proofreadingActive;
+  function applyCorrectionOption(optionIndex, selectedEntry) {
+    const entry = selectedEntry || state.proofreadingActive;
     if (!entry || entry.recordName !== state.selectedRecordName || !entry.marker.isConnected) return;
     const option = entry.options[optionIndex];
     if (!option) return;
@@ -4347,13 +4639,17 @@
     if (state.selectionReviewWorker) return state.selectionReviewWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./paragraph-proofreading-worker.js?v=arb-127-local-spelling-ranker-20261121-a", {
+      const worker = new Worker("./paragraph-proofreading-worker.js?v=arb-147-name-context-20261123-a", {
         type: "module",
         name: "arbor-on-device-paragraph-proofreading"
       });
       worker.addEventListener("message", onSelectionReviewMessage);
       worker.addEventListener("message", onSpellingContextRankMessage);
+      worker.addEventListener("message", onCapitalizationContextMessage);
       worker.addEventListener("error", function () {
+        window.clearTimeout(state.capitalizationContextTimeout);
+        state.capitalizationContextPending = null;
+        state.capitalizationContextRerun = false;
         const pending = state.selectionReviewPending;
         if (pending) {
           state.selectionReviewPending = null;
@@ -4742,8 +5038,12 @@
 
   function selectNote(note) {
     window.clearTimeout(state.proofreadingTimer);
+    window.clearTimeout(state.capitalizationContextTimer);
+    window.clearTimeout(state.capitalizationContextTimeout);
     state.proofreadingRequestId += 1;
     state.proofreadingPending = null;
+    state.capitalizationContextPending = null;
+    state.capitalizationContextRerun = false;
     closeCorrectionPopover(false);
     closeSelectionReview(false, true);
     const workspace = $("note-workspace");
@@ -8061,6 +8361,15 @@
       sentenceCapitalization.addEventListener("change", function () {
         const before = capturePreferences();
         state.preferences.checkSentenceCapitalization = sentenceCapitalization.checked;
+        if (!sentenceCapitalization.checked) {
+          window.clearTimeout(state.capitalizationContextTimer);
+          window.clearTimeout(state.capitalizationContextTimeout);
+          state.capitalizationContextRequestId += 1;
+          state.capitalizationContextPending = null;
+          state.capitalizationContextRerun = false;
+          state.capitalizationContextLastKey = "";
+          state.capitalizationContextCache.clear();
+        }
         persistSettingsPreferences();
         syncSettingsControls();
         recordPreferenceChange(before, "Change sentence capitalization checking", "proofreading-sentence-capitalization");

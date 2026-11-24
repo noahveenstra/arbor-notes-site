@@ -7,7 +7,7 @@ import {
   createArborStateStore,
   normalizeArborState
 } from "./arbor-state.js";
-import { CloudKitEncryptedWebServices, createCloudKitAuthTransport } from "./cloudkit-encrypted-web-services.mjs";
+import { CloudKitEncryptedWebServices, createCloudKitAuthTransport } from "./cloudkit-encrypted-web-services.mjs?v=arb-auth-cookie-20261124-a";
 
 export const ARBOR_SYNC_ZONE = "ArborMetadataV1";
 export const ARBOR_SYNC_RECORD_TYPE = "ArborMetadataState";

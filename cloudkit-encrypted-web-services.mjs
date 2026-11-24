@@ -1,5 +1,6 @@
 const CLOUDKIT_WEB_SERVICES = "https://api.apple-cloudkit.com/database/1";
 const CLOUDKIT_API_HOST = "api.apple-cloudkit.com";
+const CLOUDKIT_SESSION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60;
 
 function deferred() {
   let resolve;
@@ -22,21 +23,31 @@ function cloudKitURL(input) {
  * CloudKit requests are serialized until the response body yields its rotated
  * one-use token, so concurrent SDK and sync requests cannot reuse a token.
  */
-export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = globalThis.fetch } = {}) {
+export function createCloudKitAuthTransport({
+  containerIdentifier,
+  fetchImpl = globalThis.fetch,
+  tokenStore: suppliedTokenStore,
+  documentRef = globalThis.document,
+  locationRef = globalThis.location
+} = {}) {
   if (typeof containerIdentifier !== "string" || !containerIdentifier) throw new TypeError("A CloudKit container identifier is required.");
   if (typeof fetchImpl !== "function") throw new TypeError("Fetch is unavailable.");
 
-  let token = null;
-  let lastConsumedToken = null;
-  let queue = Promise.resolve();
+  const tokenStore = suppliedTokenStore || createCloudKitCookieAuthTokenStore(containerIdentifier, { documentRef, locationRef });
+  if (!tokenStore || typeof tokenStore.getToken !== "function" || typeof tokenStore.putToken !== "function") {
+    throw new TypeError("A CloudKit auth token store is required.");
+  }
   const authTokenStore = Object.freeze({
     getToken(requestedContainer) {
-      return requestedContainer === containerIdentifier ? token : null;
+      return requestedContainer === containerIdentifier ? tokenStore.getToken(containerIdentifier) : null;
     },
     putToken(requestedContainer, value) {
-      if (requestedContainer === containerIdentifier) token = typeof value === "string" && value ? value : null;
+      if (requestedContainer === containerIdentifier) tokenStore.putToken(containerIdentifier, value);
     }
   });
+  let lastConsumedToken = null;
+  let queue = Promise.resolve();
+  const setToken = value => authTokenStore.putToken(containerIdentifier, typeof value === "string" && value ? value : null);
 
   function fetchSerialized(input, init) {
     const originalURL = cloudKitURL(input);
@@ -50,12 +61,13 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
     return previous.then(async () => {
       const requestURL = cloudKitURL(input);
       const urlToken = requestURL.searchParams.get("ckWebAuthToken");
-      const currentToken = token || (urlToken !== lastConsumedToken ? urlToken : null);
+      const storedToken = authTokenStore.getToken(containerIdentifier);
+      const currentToken = storedToken || (urlToken !== lastConsumedToken ? urlToken : null);
       if (!currentToken) {
         release.resolve();
         throw new Error("Sign in to CloudKit before running this request.");
       }
-      token = currentToken;
+      setToken(currentToken);
       lastConsumedToken = currentToken;
       requestURL.searchParams.set("ckWebAuthToken", currentToken);
 
@@ -66,13 +78,13 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
           : requestURL.toString();
         response = await fetchImpl(requestInput, init);
       } catch {
-        token = null;
+        setToken(null);
         release.resolve();
         throw new Error("CloudKit did not return a usable response.");
       }
 
       if (!response || !response.body || typeof ReadableStream === "undefined" || typeof Response === "undefined") {
-        token = null;
+        setToken(null);
         release.resolve();
         return response;
       }
@@ -86,7 +98,7 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
       const finish = () => {
         if (released) return;
         released = true;
-        if (!foundReplacement) token = null;
+        if (!foundReplacement) setToken(null);
         release.resolve();
       };
       const inspect = (chunk, final) => {
@@ -95,10 +107,10 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
         if (match) {
           try {
             const replacement = JSON.parse(match[1]);
-            token = typeof replacement === "string" && replacement ? replacement : null;
-            foundReplacement = Boolean(token);
+            foundReplacement = typeof replacement === "string" && Boolean(replacement);
+            setToken(foundReplacement ? replacement : null);
           } catch {
-            token = null;
+            setToken(null);
           }
         }
         if (!foundReplacement && scanBuffer.length > 1024) scanBuffer = scanBuffer.slice(-1024);
@@ -116,13 +128,13 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
             inspect(value, false);
             controller.enqueue(value);
           } catch (error) {
-            token = null;
+            setToken(null);
             controller.error(error);
             finish();
           }
         },
         cancel(reason) {
-          token = null;
+          setToken(null);
           return reader.cancel(reason).finally(finish);
         }
       });
@@ -132,7 +144,7 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
         headers: response.headers
       });
     }).catch((error) => {
-      token = null;
+      setToken(null);
       release.resolve();
       throw error;
     });
@@ -141,9 +153,73 @@ export function createCloudKitAuthTransport({ containerIdentifier, fetchImpl = g
   return Object.freeze({
     authTokenStore,
     fetch: fetchSerialized,
-    clearToken() { token = null; },
-    hasToken() { return typeof token === "string" && token.length > 0; }
+    clearToken() { setToken(null); },
+    hasToken() {
+      const current = authTokenStore.getToken(containerIdentifier);
+      return typeof current === "string" && current.length > 0;
+    }
   });
+}
+
+/**
+ * CloudKit JS calls this store for its session token. Keep the token in a
+ * first-party cookie so the same auth state survives a page reload without
+ * copying it into note storage, localStorage, IndexedDB, or Cache Storage.
+ */
+export function createCloudKitCookieAuthTokenStore(containerIdentifier, {
+  documentRef = globalThis.document,
+  locationRef = globalThis.location,
+  maxAgeSeconds = CLOUDKIT_SESSION_MAX_AGE_SECONDS
+} = {}) {
+  if (typeof containerIdentifier !== "string" || !containerIdentifier) throw new TypeError("A CloudKit container identifier is required.");
+  if (!Number.isInteger(maxAgeSeconds) || maxAgeSeconds < 1) throw new TypeError("A positive CloudKit session lifetime is required.");
+
+  const secure = Boolean(locationRef && locationRef.protocol === "https:");
+  const safeContainerSuffix = containerIdentifier.replace(/[^A-Za-z0-9_.-]/g, "_");
+  const cookieName = `${secure ? "__Host-" : ""}arbor-cloudkit-${safeContainerSuffix}`;
+  let memoryToken = null;
+
+  function readCookie() {
+    if (!documentRef) return memoryToken;
+    try {
+      const prefix = cookieName + "=";
+      const entry = String(documentRef.cookie || "").split(";").map(part => part.trim()).find(part => part.startsWith(prefix));
+      if (!entry) return null;
+      const value = entry.slice(prefix.length);
+      if (!value) return null;
+      try { return decodeURIComponent(value); }
+      catch (_) { return null; }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function getToken(requestedContainer) {
+    if (requestedContainer !== containerIdentifier) return null;
+    const stored = readCookie();
+    if (documentRef) {
+      memoryToken = typeof stored === "string" && stored ? stored : null;
+      return memoryToken;
+    }
+    return memoryToken;
+  }
+
+  function putToken(requestedContainer, value) {
+    if (requestedContainer !== containerIdentifier) return;
+    memoryToken = typeof value === "string" && value ? value : null;
+    if (!documentRef) return;
+    const encoded = memoryToken ? encodeURIComponent(memoryToken) : "";
+    const maxAge = memoryToken ? maxAgeSeconds : 0;
+    const secureAttribute = secure ? "; Secure" : "";
+    try {
+      documentRef.cookie = `${cookieName}=${encoded}; Path=/; SameSite=Lax; Max-Age=${maxAge}${secureAttribute}`;
+    } catch (_) {
+      // Without a readable first-party cookie the auth store returns no token;
+      // do not move the session into localStorage or another note-data store.
+    }
+  }
+
+  return Object.freeze({ getToken, putToken });
 }
 
 function safeErrorCode(payload) {

@@ -13,7 +13,7 @@ const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
 const PASSAGE_ANCHOR_URL = "./passage-anchor.js?v=recall-anchor-1";
 const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
-const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-1-20261124-a";
+const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-2-auth-cookie-20261124-a";
 const APP_SCRIPT_URL = "./app.js?v=arb-178-sync-20261124-5f720d7";
 const ARBOR_VIEW_URL = "./arbor-view.js?v=arb-178-voice-default-20261124-a";
 

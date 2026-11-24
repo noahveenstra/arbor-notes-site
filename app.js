@@ -317,7 +317,7 @@
   }
 
   function libraryCacheKey(userID) {
-    return [config.containerIdentifier || "arbor", config.environment || "development", userID].join("::");
+    return [config.containerIdentifier || "arbor", config.environment || "development", config.schemaMode || "auto", userID].join("::");
   }
 
   function openLibraryCacheDB() {
@@ -569,7 +569,15 @@
           state.dictionaryEntries = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryEntries);
           state.dictionaryPending = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryPending);
           state.dictionaryEntries = proofreadingDictionary.mergeSnapshotEntries(state.dictionaryEntries, state.dictionaryPending);
-          state.nativeSchema = cached.nativeSchema !== false; state.nativeZoneExists = Boolean(state.nativeZoneID); state.loadingRecords = true;
+          state.nativeSchema = config.schemaMode === "web" ? false : cached.nativeSchema !== false;
+          if (config.schemaMode === "web" && cached.nativeSchema !== false) {
+            state.nativeZoneID = null;
+            state.nativeZoneExists = false;
+            state.syncToken = null;
+          } else {
+            state.nativeZoneExists = Boolean(state.nativeZoneID);
+          }
+          state.loadingRecords = true;
           renderPersonalDictionarySettings();
           resolve(state.records.size > 0 || state.bodyCache.size > 0 || state.dictionaryEntries.length > 0 || state.dictionaryPending.length > 0);
         };
@@ -1045,7 +1053,8 @@
   function readableError(error) {
     if (!error) return "Something went wrong while connecting to CloudKit.";
     const text = error.reason || error.message || error.description || String(error);
-    if (/NOT_AUTHENTICATED|AUTHENTICATION_FAILED/i.test(text)) return "Your iCloud session expired. Sign in again to continue.";
+    if (/AUTHENTICATION_REQUIRED|NOT_AUTHENTICATED|AUTHENTICATION_FAILED|request needs authorization/i.test(text)) return "Your Apple Account session needs to be refreshed. Sign in again to continue.";
+    if (/NETWORK_ERROR|network error|did not return a usable response/i.test(text)) return "Arbor couldn’t reach iCloud. Your sign-in is kept; try again when your connection is back.";
     if (/ZONE_NOT_FOUND|UNKNOWN_ITEM/i.test(text)) return "The Arbor notes zone is not available in this CloudKit environment yet.";
     if (/OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED/i.test(text)) return "This note changed on another device. Arbor kept your local draft and is refreshing the newer iCloud version.";
     if (/SERVER_RECORD_CHANGED|CONFLICT/i.test(text)) return "This note changed in another place. Reload the note before saving more changes.";
@@ -5913,7 +5922,15 @@
   async function loadZoneRecords(session) {
     if (!accountSessionCurrent(session)) return;
     state.loadingRecords = true; state.loadRecordsErrorMessage = ""; renderNotes();
-    if (!state.nativeZoneID) {
+    if (config.schemaMode === "web") {
+      state.nativeSchema = false;
+      if (!state.arborCloudKitTransport || typeof state.arborCloudKitTransport.createClient !== "function") {
+        throw new Error("Arbor could not prepare its private notes zone in iCloud.");
+      }
+      const ensured = await state.arborCloudKitTransport.createClient().ensureRecordZone(cloudKitWebZone.ARBOR_WEB_ZONE_ID);
+      if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
+      state.nativeZoneID = ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    } else if (!state.nativeZoneID) {
       const zoneResponse = assertResponse(await state.database.fetchAllRecordZones());
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
       const zoneEntries = zoneResponse.zones || [];
@@ -6325,7 +6342,9 @@
         state.connectionUserID = userID;
         loadNoteHistory(libraryCacheKey(userID));
         state.database = state.container.privateCloudDatabase;
-        state.nativeSchema = true;
+        state.nativeSchema = config.schemaMode === "native";
+        state.nativeZoneID = null;
+        state.nativeZoneExists = false;
         ready = true;
       });
     } catch (error) {
@@ -7332,7 +7351,7 @@
 
   async function createPendingBlankNote() {
     if (!state.database) { showToast("Sign in with Apple before creating notes.", true); return; }
-    if (state.nativeSchema && !state.nativeZoneExists) { showToast("Open Arbor on an Apple device and let iCloud create the notes zone first.", true); return; }
+    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return; }
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
     try {
@@ -7376,7 +7395,7 @@
 
   async function createNote(initialBody, focusBody) {
     if (!state.database) { showToast("Sign in with Apple before creating notes.", true); return; }
-    if (state.nativeSchema && !state.nativeZoneExists) { showToast("Open Arbor on an Apple device and let iCloud create the notes zone first.", true); return; }
+    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return; }
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
     try {
@@ -7448,7 +7467,7 @@
 
   async function createFolder(parentOverride) {
     if (!state.database) { showToast("Sign in with Apple before creating folders.", true); return; }
-    if (state.nativeSchema && !state.nativeZoneExists) { showToast("Open Arbor on an Apple device and let iCloud create the notes zone first.", true); return; }
+    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return; }
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
     const parent = typeof parentOverride === "string" ? parentOverride : state.selectedFolder;

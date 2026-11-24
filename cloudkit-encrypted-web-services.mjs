@@ -78,13 +78,15 @@ export function createCloudKitAuthTransport({
           : requestURL.toString();
         response = await fetchImpl(requestInput, init);
       } catch {
-        setToken(null);
+        // A network failure does not tell us whether Apple consumed the token.
+        // Keep the last token so a request that never reached Apple does not
+        // force a new sign-in on the next page load. If Apple did consume it,
+        // its explicit authentication error will clear the stale value below.
         release.resolve();
         throw new Error("CloudKit did not return a usable response.");
       }
 
       if (!response || !response.body || typeof ReadableStream === "undefined" || typeof Response === "undefined") {
-        setToken(null);
         release.resolve();
         return response;
       }
@@ -95,10 +97,10 @@ export function createCloudKitAuthTransport({
       let scanBuffer = "";
       let foundReplacement = false;
       let released = false;
-      const finish = () => {
+      const finish = (clearUnrotatedToken = true) => {
         if (released) return;
         released = true;
-        if (!foundReplacement) setToken(null);
+        if (clearUnrotatedToken && !foundReplacement) setToken(null);
         release.resolve();
       };
       const inspect = (chunk, final) => {
@@ -128,14 +130,19 @@ export function createCloudKitAuthTransport({
             inspect(value, false);
             controller.enqueue(value);
           } catch (error) {
-            setToken(null);
             controller.error(error);
-            finish();
+            finish(false);
           }
         },
         cancel(reason) {
-          setToken(null);
-          return reader.cancel(reason).finally(finish);
+          return reader.cancel(reason).finally(function () {
+            // The response may have carried its replacement token after the
+            // unread portion. Leave validation to the next authenticated call.
+            if (!released) {
+              released = true;
+              release.resolve();
+            }
+          });
         }
       });
       return new Response(rotatedBody, {
@@ -144,7 +151,6 @@ export function createCloudKitAuthTransport({
         headers: response.headers
       });
     }).catch((error) => {
-      setToken(null);
       release.resolve();
       throw error;
     });
@@ -432,8 +438,8 @@ export class CloudKitEncryptedWebServices {
       payload = await response.json();
     } catch {
       // The server may have consumed the one-use token even if the response
-      // was lost. Never retry with a token that might already be invalid.
-      this.authTokenStore.putToken(this.containerIdentifier, null);
+      // was lost. Preserve it until Apple explicitly rejects it; the request
+      // may have failed before leaving this browser.
       throw new Error("CloudKit Web Services did not return a usable response.");
     }
 

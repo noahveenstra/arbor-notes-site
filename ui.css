@@ -1103,7 +1103,7 @@ samp,
   .app-frame.is-motion-ready .folder-count,
   .app-frame.is-motion-ready .settings-link > span { transition: opacity var(--motion-fade-duration) ease, max-width var(--motion-duration-short) var(--ease-standard); }
   .app-frame.is-sidebar-collapsed .sidebar { padding-right: 4px; padding-left: 4px; }
-  .app-frame.is-sidebar-collapsed .sidebar-header { justify-content: center; gap: 0; margin-right: 0; margin-left: 0; }
+  .app-frame.is-sidebar-collapsed .sidebar-header { position: relative; justify-content: center; gap: 0; margin-right: 0; margin-left: 0; }
   .app-frame.is-sidebar-collapsed .sidebar-brand,
   .app-frame.is-sidebar-collapsed .nav-row > span,
   .app-frame.is-sidebar-collapsed .folders-heading > span,
@@ -1116,6 +1116,28 @@ samp,
   .app-frame.is-sidebar-collapsed .folders-heading { justify-content: center; margin-right: 0; margin-left: 0; }
   .app-frame.is-sidebar-collapsed .folder-row.is-nested { width: 100%; margin-left: 0; }
   .app-frame.is-sidebar-collapsed .folder-row { padding-left: 0 !important; }
+  .app-frame.is-sidebar-collapsed .sidebar-brand { width: 34px; max-width: 34px; flex: 0 0 34px; overflow: visible; opacity: 1; }
+  .app-frame.is-sidebar-collapsed .sidebar-brand img { transition: opacity var(--motion-fade-duration) ease; }
+  .app-frame.is-sidebar-collapsed .sidebar-collapse-button {
+    position: absolute;
+    z-index: 1;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    opacity: 0;
+    color: var(--secondary-label);
+    background: transparent;
+    transition: opacity var(--motion-fade-duration) ease;
+  }
+  .app-frame.is-sidebar-collapsed .sidebar-header:hover .sidebar-brand img,
+  .app-frame.is-sidebar-collapsed .sidebar-header:has(.sidebar-collapse-button:focus-visible) .sidebar-brand img { opacity: 0; }
+  .app-frame.is-sidebar-collapsed .sidebar-header:hover .sidebar-collapse-button,
+  .app-frame.is-sidebar-collapsed .sidebar-collapse-button:focus-visible {
+    opacity: 1;
+    color: var(--secondary-label);
+    background: transparent;
+  }
+  .app-frame.is-sidebar-collapsed .sidebar-collapse-button:hover { color: var(--secondary-label); background: transparent; }
   .app-frame.is-sidebar-collapsed .archive-notes::after,
   .app-frame.is-sidebar-collapsed .settings-link::after {
     display: grid;
@@ -1446,7 +1468,7 @@ html[data-theme="light"] .sidebar-brand img { filter: none; }
 @media (prefers-color-scheme: light) {
   html:not([data-theme="dark"]) .sidebar-brand img { filter: none; }
 }
-.app-shell.is-sidebar-collapsed .sidebar-brand { width: 0; flex-basis: 0; }
+.app-shell.is-sidebar-collapsed .sidebar-brand { width: 34px; flex-basis: 34px; }
 
 /* Navigation controls stay at the strip's leading edge; + follows the last tab. */
 .note-tab-strip { gap: 9px; overflow: hidden; padding-inline: var(--space-4); }

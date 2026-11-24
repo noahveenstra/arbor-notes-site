@@ -301,9 +301,9 @@ export class CloudKitEncryptedWebServices {
     });
   }
 
-  ensureRecordZone(zoneName) {
-    if (typeof zoneName !== "string" || !zoneName) throw new TypeError("A record zone name is required.");
-    const zoneID = { zoneName };
+  ensureRecordZone(zoneNameOrID) {
+    const zoneID = typeof zoneNameOrID === "string" ? { zoneName: zoneNameOrID } : zoneNameOrID;
+    if (!zoneID || typeof zoneID.zoneName !== "string" || !zoneID.zoneName) throw new TypeError("A record zone is required.");
     return this.#request("zones/modify", {
       operations: [{ operationType: "create", zone: { zoneID } }]
     }).then((payload) => {
@@ -312,8 +312,65 @@ export class CloudKitEncryptedWebServices {
       if (error && !["ZONE_ALREADY_EXISTS", "ALREADY_EXISTS", "EXISTS"].includes(safeErrorCode(error))) {
         throw cloudKitError("CloudKit zone creation failed", error);
       }
-      if (!error && (!result || !result.zoneID || result.zoneID.zoneName !== zoneName)) throw new TypeError("CloudKit did not confirm creation of the Arbor sync zone.");
+      if (!error && (!result || !result.zoneID || result.zoneID.zoneName !== zoneID.zoneName)) throw new TypeError("CloudKit did not confirm creation of the Arbor sync zone.");
       return { zoneID, alreadyExists: Boolean(error || (result && result.serverErrorCode)), record: result || null };
+    });
+  }
+
+  listRecordZones() {
+    return this.#request("zones/list", undefined, "GET");
+  }
+
+  fetchRecordZoneChanges(zoneID, syncToken, resultsLimit = 200) {
+    if (!zoneID || typeof zoneID.zoneName !== "string" || !zoneID.zoneName || zoneID.zoneName === "_defaultZone") {
+      throw new TypeError("A custom record zone is required.");
+    }
+    const zone = { zoneID };
+    if (syncToken) zone.syncToken = syncToken;
+    return this.#request("changes/zone", { zones: [zone], resultsLimit });
+  }
+
+  lookupRecords(recordNames, zoneID, desiredKeys) {
+    if (!Array.isArray(recordNames) || recordNames.some((name) => typeof name !== "string" || !name)) {
+      throw new TypeError("Record names are required.");
+    }
+    if (recordNames.length > 200) throw new RangeError("CloudKit accepts at most 200 record lookups per request.");
+    const body = { records: recordNames.map((recordName) => ({ recordName })) };
+    if (zoneID) body.zoneID = zoneID;
+    if (Array.isArray(desiredKeys)) body.desiredKeys = desiredKeys;
+    return this.#request("records/lookup", body);
+  }
+
+  modifyRecords(operations, zoneID, atomic = true) {
+    if (!Array.isArray(operations) || !operations.length) throw new TypeError("Record operations are required.");
+    if (operations.length > 200) throw new RangeError("CloudKit accepts at most 200 record operations per request.");
+    return this.#request("records/modify", {
+      operations,
+      atomic,
+      ...(zoneID ? { zoneID } : {})
+    });
+  }
+
+  requestAssetUploads(tokens, zoneID) {
+    if (!Array.isArray(tokens) || !tokens.length) throw new TypeError("Asset upload fields are required.");
+    if (tokens.length > 200) throw new RangeError("CloudKit accepts at most 200 asset upload fields per request.");
+    return this.#request("assets/upload", { tokens, ...(zoneID ? { zoneID } : {}) });
+  }
+
+  uploadAssetData(uploadURL, data) {
+    if (typeof uploadURL !== "string" || !uploadURL || !(data instanceof Blob || data instanceof ArrayBuffer || ArrayBuffer.isView(data))) {
+      throw new TypeError("An asset upload URL and file data are required.");
+    }
+    return this.fetchImpl(uploadURL, { method: "POST", body: data }).then(async (response) => {
+      let payload;
+      try { payload = await response.json(); }
+      catch { throw new Error("CloudKit asset upload did not return a usable response."); }
+      if (!response.ok || !payload || payload.serverErrorCode) throw cloudKitError("CloudKit asset upload failed", payload || {});
+      const asset = payload.singleFile || payload;
+      if (!asset || typeof asset !== "object" || typeof asset.fileChecksum !== "string" || !asset.fileChecksum) {
+        throw new Error("CloudKit asset upload did not confirm the file.");
+      }
+      return asset;
     });
   }
 
@@ -343,14 +400,20 @@ export class CloudKitEncryptedWebServices {
     });
   }
 
-  #request(operation, body) {
-    const request = () => this.#send(operation, body);
+  request(operation, body, method = "POST") {
+    if (typeof operation !== "string" || !/^[a-z]+(?:\/[a-z]+)+$/.test(operation)) throw new TypeError("A valid CloudKit operation is required.");
+    if (method !== "GET" && method !== "POST") throw new TypeError("A valid CloudKit method is required.");
+    return this.#request(operation, body, method);
+  }
+
+  #request(operation, body, method = "POST") {
+    const request = () => this.#send(operation, body, method);
     const result = this.pending.then(request, request);
     this.pending = result.catch(() => undefined);
     return result;
   }
 
-  async #send(operation, body) {
+  async #send(operation, body, method = "POST") {
     const token = this.authTokenStore.getToken(this.containerIdentifier);
     if (typeof token !== "string" || !token) throw new Error("Sign in to CloudKit before running this request.");
 
@@ -361,7 +424,7 @@ export class CloudKitEncryptedWebServices {
     let response;
     let payload;
     try {
-      response = await this.fetchImpl(url.toString(), {
+      response = await this.fetchImpl(url.toString(), method === "GET" ? { method: "GET" } : {
         method: "POST",
         headers: { "Content-Type": "text/plain; charset=UTF-8" },
         body: JSON.stringify(body),

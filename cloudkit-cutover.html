@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.apple-cloudkit.com; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.apple-cloudkit.com https://feedbackws.apple-cloudkit.com https://feedbackws.icloud.com https://feedbackws.icloud.com.cn https://*.apple-cloudkit.com https://*.icloud-content.com; frame-src https://*.apple.com https://*.icloud.com https://*.icloud.com.cn; object-src 'none'; base-uri 'none'; form-action 'self'">
+  <title>Arbor CloudKit library transfer</title>
+  <style>
+    :root { color-scheme: dark; font: 16px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #141414; color: #f5f5f5; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px; box-sizing: border-box; }
+    main { width: min(100%, 620px); border: 1px solid #343434; border-radius: 20px; background: #1c1c1c; padding: 32px; box-sizing: border-box; }
+    h1 { margin: 0 0 12px; font-size: 25px; letter-spacing: -.02em; }
+    p { color: #aaa; margin: 10px 0; }
+    .notice { margin: 24px 0; padding: 16px; border-radius: 12px; background: #242424; color: #c5c5c5; }
+    #migration-status { min-height: 28px; color: #b9d9c4; }
+    .actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+    button { appearance: none; border: 0; border-radius: 10px; padding: 12px 16px; background: #e8e8e8; color: #171717; font: inherit; font-weight: 600; cursor: pointer; }
+    button.secondary { background: #2a2a2a; color: #f5f5f5; }
+    button:disabled { opacity: .45; cursor: default; }
+    [hidden] { display: none !important; }
+    .counts { margin-top: 14px; color: #ddd; }
+    .footnote { margin-top: 22px; font-size: 13px; color: #858585; }
+  </style>
+  <script src="./cloudkit-config.js?v=arb-23-cutover-20261124-a"></script>
+  <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
+  <script type="module" src="./cloudkit-cutover.mjs"></script>
+</head>
+<body>
+  <main>
+    <h1>Move Arbor’s library to Production</h1>
+    <p>This copies the signed-in Apple Account’s Development library into its matching Production private database. Development remains unchanged.</p>
+    <div class="notice">Pause edits on Development devices while the copy runs. Arbor will show counts only here; note titles and content stay out of the page and its logs.</div>
+    <p id="account-status" role="status">Connecting to CloudKit…</p>
+    <div class="actions">
+      <button id="apple-sign-in-button" class="secondary" type="button">Sign in with Apple</button>
+      <button id="apple-sign-out-button" class="secondary" type="button" hidden>Sign out</button>
+    </div>
+    <div class="actions">
+      <button id="preview-migration" class="secondary" type="button" disabled>Check both libraries</button>
+      <button id="copy-migration" type="button" disabled>Copy to Production</button>
+    </div>
+    <p id="migration-status" role="status" aria-live="polite"></p>
+    <p id="migration-counts" class="counts" hidden></p>
+    <p class="footnote">The transfer creates missing records and files only. It stops if Production has different or additional library records. Nothing in Development is deleted.</p>
+  </main>
+</body>
+</html>

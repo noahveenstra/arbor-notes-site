@@ -5,6 +5,7 @@
   const { field } = window.ArborCloudKitFields;
   const noteSorting = window.ArborNoteSorting;
   const noteSync = window.ArborNoteSync;
+  const cloudKitWebZone = window.ArborCloudKitWebZone;
   const proofreadingDictionary = window.ArborPersonalProofreadingDictionary;
   const proofreadingDictionarySync = window.ArborProofreadingDictionarySync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
@@ -568,7 +569,7 @@
           state.dictionaryEntries = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryEntries);
           state.dictionaryPending = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryPending);
           state.dictionaryEntries = proofreadingDictionary.mergeSnapshotEntries(state.dictionaryEntries, state.dictionaryPending);
-          state.nativeSchema = true; state.nativeZoneExists = Boolean(state.nativeZoneID); state.loadingRecords = true;
+          state.nativeSchema = cached.nativeSchema !== false; state.nativeZoneExists = Boolean(state.nativeZoneID); state.loadingRecords = true;
           renderPersonalDictionarySettings();
           resolve(state.records.size > 0 || state.bodyCache.size > 0 || state.dictionaryEntries.length > 0 || state.dictionaryPending.length > 0);
         };
@@ -582,6 +583,7 @@
     if (copy.fields) {
       delete copy.fields.CD_text; delete copy.fields.text;
       delete copy.fields.CD_text_ckAsset; delete copy.fields.text_ckAsset;
+      delete copy.fields.body; delete copy.fields.bodyAsset;
     }
     return copy;
   }
@@ -592,7 +594,7 @@
     if (state.accountCacheSuspended || !state.cacheKey || !db) return;
     const records = Array.from(state.records.values())
       .filter(function (record) {
-        return (record.recordType === "CD_CapturedNote" || record.recordType === "CD_NoteFolder") && !state.pendingNewNoteRecords.has(record.recordName);
+        return cloudKitWebZone.isNoteOrFolderRecord(record) && !state.pendingNewNoteRecords.has(record.recordName);
       })
       .map(cacheableRecord);
     const bodies = Array.from(state.bodyCache.entries());
@@ -600,7 +602,7 @@
       try {
         const tx = db.transaction("libraries", "readwrite");
         tx.objectStore("libraries").put({
-          key: state.cacheKey, nativeZoneID: state.nativeZoneID, syncToken: state.syncToken,
+          key: state.cacheKey, nativeZoneID: state.nativeZoneID, nativeSchema: state.nativeSchema, syncToken: state.syncToken,
           records: records, bodies: bodies, dictionaryEntries: state.dictionaryEntries,
           dictionaryPending: state.dictionaryPending, updatedAt: Date.now()
         });
@@ -763,7 +765,7 @@
     return session === state.accountSession && Boolean(state.database);
   }
 
-  function rememberNativeBody(recordName, body, session) {
+  function rememberRecordBody(recordName, body, session) {
     if ((session != null && session !== state.accountSession) || state.accountCacheSuspended) return;
     state.bodyCache.delete(recordName); state.bodyCache.set(recordName, body);
     while (state.bodyCache.size > 30) state.bodyCache.delete(state.bodyCache.keys().next().value);
@@ -774,6 +776,12 @@
       state.previewLoadErrors.delete(recordName);
       current.body = body; current.editorBody = body; current.preview = preview; current.previewUnavailable = false;
       if (!fieldValue(current.record, "userTitle") && !fieldValue(current.record, "generatedTitle") && (!current.title || current.title === "Untitled")) current.title = firstLineTitle(body);
+    } else if (current && current.record.recordType === "ArborNote") {
+      const parts = splitDocument(body);
+      state.previewCache.set(recordName, previewText(parts.body));
+      state.previewLoadErrors.delete(recordName);
+      current.body = body; current.title = parts.title; current.editorBody = parts.body;
+      current.preview = previewText(parts.body); current.previewUnavailable = false;
     }
     if (!state.cacheKey) return;
     scheduleLibraryCacheWrite();
@@ -810,9 +818,9 @@
       const note = state.notes.find(function (item) { return item.recordName === job.recordName; });
       if (!note || state.previewCache.has(job.recordName) || state.bodyCache.has(job.recordName)) continue;
       state.previewActiveCount += 1;
-      ensureNativeTextBody(note).then(function (body) {
+      (state.nativeSchema ? ensureNativeTextBody(note) : ensureWebTextBody(note)).then(function (body) {
         if (!accountSessionCurrent(job.session)) return;
-        rememberNativeBody(job.recordName, body, job.session);
+        rememberRecordBody(job.recordName, body, job.session);
         updatePreviewRow(job.recordName);
       }).catch(function () {
         if (!accountSessionCurrent(job.session)) return;
@@ -828,7 +836,7 @@
   }
 
   function queueNativePreview(recordName) {
-    if (!state.nativeSchema || !state.database || !recordName || state.previewCache.has(recordName) ||
+    if (!state.database || !recordName || state.previewCache.has(recordName) ||
         state.bodyCache.has(recordName) || state.previewLoadErrors.has(recordName) || state.previewQueuedNames.has(recordName)) return;
     state.previewQueuedNames.add(recordName);
     state.previewQueue.push({ recordName: recordName, session: state.accountSession });
@@ -836,7 +844,7 @@
   }
 
   function observeNativePreview(card, note) {
-    if (!state.nativeSchema || note.preview || state.previewCache.has(note.recordName) ||
+    if (note.preview || state.previewCache.has(note.recordName) ||
         state.bodyCache.has(note.recordName) || state.previewLoadErrors.has(note.recordName)) return;
     // Keep the change feed metadata-only; load each text asset as its row approaches the viewport.
     if (typeof window.IntersectionObserver !== "function") {
@@ -1131,15 +1139,18 @@
         starred: false, folderPath: "", path: ""
       };
     }
-    const bodyValue = fieldValue(record, "body");
-    const parts = splitDocument(typeof bodyValue === "string" ? bodyValue : "");
     const path = recordPath(record);
+    const bodyValue = fieldValue(record, "body");
+    const cachedBody = state.bodyCache.get(record.recordName);
+    const body = typeof bodyValue === "string" ? bodyValue : (typeof cachedBody === "string" ? cachedBody : "");
+    const parts = splitDocument(body);
+    if (!body) parts.title = path.split("/").pop().replace(/\.md$/i, "") || "Untitled";
     return {
       record: record,
       recordName: record.recordName,
       uuid: noteUUID(record),
       title: parts.title,
-      body: typeof bodyValue === "string" ? bodyValue : "",
+      body: body,
       editorBody: parts.body,
       preview: previewText(parts.body),
       modifiedAt: dateValue(fieldValue(record, "modifiedAt")),
@@ -2552,23 +2563,8 @@
 
   async function hydrateSearchBody(note) {
     if (!note || !state.database) return;
-    if (state.bodyCache.has(note.recordName)) { note.body = state.bodyCache.get(note.recordName); note.editorBody = note.body; return; }
-    if (state.nativeSchema) { await ensureNativeTextBody(note); return; }
-    if (typeof fieldValue(note.record, "body") === "string") { note.body = String(fieldValue(note.record, "body")); return; }
-    if (!note.searchBodyPromise) {
-      const session = state.accountSession;
-      note.searchBodyPromise = state.database.fetchRecords([note.recordName], { zoneID: { zoneName: "ArborNotes" } }).then(async function (response) {
-        assertResponse(response);
-        const fetched = (response.records || []).find(function (record) { return record.recordName === note.recordName; });
-        if (!fetched || !accountSessionCurrent(session)) return;
-        note.record = fetched; state.records.set(fetched.recordName, fetched);
-        const body = fieldValue(fetched, "bodyStorageRaw") === "asset" ? await loadAssetBody(fetched) : String(fieldValue(fetched, "body") || "");
-        if (!accountSessionCurrent(session)) return;
-        note.body = body; const parts = splitDocument(body); note.title = parts.title; note.editorBody = parts.body; note.preview = previewText(parts.body);
-        rememberNativeBody(note.recordName, body, session);
-      }).finally(function () { note.searchBodyPromise = null; });
-    }
-    await note.searchBodyPromise;
+    if (state.nativeSchema) await ensureNativeTextBody(note);
+    else await ensureWebTextBody(note);
   }
 
   async function hydrateSearchCorpus(request) {
@@ -5807,7 +5803,8 @@
 
     const nativeNeedsBody = state.nativeSchema && isNativeModelRecord(note.record, "CapturedNote") &&
       !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "text") !== "string";
-    const legacyNeedsBody = !state.nativeSchema && fieldValue(note.record, "bodyStorageRaw") === "asset" && !note.body;
+    const legacyNeedsBody = !state.nativeSchema && note.record.recordType === "ArborNote" &&
+      !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "body") !== "string";
     if (nativeNeedsBody || legacyNeedsBody) {
       const recordName = note.recordName;
       const session = state.accountSession;
@@ -5815,13 +5812,7 @@
       loading.className = "editor-load-state"; loading.textContent = "Opening note…";
       $("rich-editor").replaceChildren(loading);
       setSaveState("Opening", "saving");
-      const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : loadAssetBody(note.record).then(function (body) {
-        if (session !== state.accountSession) return body;
-        note.body = body;
-        const parts = splitDocument(body);
-        note.title = parts.title; note.editorBody = parts.body; note.preview = previewText(parts.body);
-        return body;
-      });
+      const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : ensureWebTextBody(note);
       bodyPromise.then(function () {
         if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
         state.selectedRecord = note.record;
@@ -5921,7 +5912,7 @@
 
   async function loadZoneRecords(session) {
     if (!accountSessionCurrent(session)) return;
-    state.nativeSchema = true; state.loadingRecords = true; state.loadRecordsErrorMessage = ""; renderNotes();
+    state.loadingRecords = true; state.loadRecordsErrorMessage = ""; renderNotes();
     if (!state.nativeZoneID) {
       const zoneResponse = assertResponse(await state.database.fetchAllRecordZones());
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
@@ -5930,13 +5921,18 @@
         const id = zone.zoneID || zone;
         return id.zoneName === "com.apple.coredata.cloudkit.zone";
       });
-      if (!nativeZone) {
-        state.loadingRecords = false; state.nativeZoneID = null; state.nativeZoneExists = false;
-        syncDerivedCollections(); renderAll();
-        setConnection("Connected · no synced Arbor notes yet", true);
-        selectNote(null); return;
+      if (nativeZone) {
+        state.nativeSchema = true;
+        state.nativeZoneID = nativeZone.zoneID || nativeZone;
+      } else {
+        state.nativeSchema = false;
+        if (!state.arborCloudKitTransport || typeof state.arborCloudKitTransport.createClient !== "function") {
+          throw new Error("Arbor could not prepare its private notes zone in iCloud.");
+        }
+        const ensured = await state.arborCloudKitTransport.createClient().ensureRecordZone(cloudKitWebZone.ARBOR_WEB_ZONE_ID);
+        if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
+        state.nativeZoneID = ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
       }
-      state.nativeZoneID = nativeZone.zoneID || nativeZone;
     }
     if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
     state.nativeZoneExists = true;
@@ -5944,26 +5940,18 @@
       let token = startToken || null; let more = true; let safety = 0;
       while (more && safety < 1000) {
         if (!accountSessionCurrent(session) || !state.nativeZoneID) return;
-        const options = {
-          zoneID: state.nativeZoneID,
-          desiredRecordTypes: ["CD_CapturedNote", "CD_NoteFolder"],
-          desiredKeys: [
-            "CD_entityName", "CD_id", "CD_noteUUID", "CD_userTitle", "CD_generatedTitle",
-            "CD_modifiedAt", "CD_createdAt", "CD_archivedAt", "CD_folderID",
-            "CD_name", "CD_parentID", "CD_isStarred", "CD_headerFontStyle", "CD_bodyFontStyle"
-          ]
-        };
+        const options = cloudKitWebZone.metadataChangeOptions(state.nativeSchema, state.nativeZoneID);
         if (token) options.syncToken = token;
         const response = assertResponse(await state.database.fetchRecordZoneChanges(options));
         if (!accountSessionCurrent(session) || !state.nativeZoneID) return;
         const zones = response.zones || [];
         const changes = zones.find(function (zone) {
           const id = zone.zoneID || {};
-          return id.zoneName === (state.nativeZoneID.zoneName || "com.apple.coredata.cloudkit.zone");
+          return id.zoneName === state.nativeZoneID.zoneName;
         }) || zones[0];
         if (!changes) break;
         (changes.records || []).forEach(function (record) {
-          if (record.recordType === "CD_CapturedNote" || record.recordType === "CD_NoteFolder") {
+          if (cloudKitWebZone.isLibraryRecord(record, state.nativeSchema)) {
             state.records.set(record.recordName, record); state.bodyCache.delete(record.recordName);
             state.previewCache.delete(record.recordName); state.previewLoadErrors.delete(record.recordName);
           }
@@ -6045,10 +6033,11 @@
   }
 
   async function refreshZoneRecords(session) {
-    if (!accountSessionCurrent(session) || !state.nativeSchema || !state.nativeZoneID || document.visibilityState === "hidden") return;
+    if (!accountSessionCurrent(session) || !state.nativeZoneID || document.visibilityState === "hidden") return;
     if (state.realtimeSyncPromise) return state.realtimeSyncPromise;
     const database = state.database;
     const zoneID = state.nativeZoneID;
+    const nativeSchema = state.nativeSchema;
     state.realtimeSyncPromise = (async function () {
       let token = state.syncToken;
       let more = true;
@@ -6057,15 +6046,7 @@
       const deletedNames = new Set();
       while (more && safety < 1000) {
         if (!accountSessionCurrent(session) || database !== state.database || zoneID !== state.nativeZoneID) return;
-        const options = {
-          zoneID: zoneID,
-          desiredRecordTypes: ["CD_CapturedNote", "CD_NoteFolder"],
-          desiredKeys: [
-            "CD_entityName", "CD_id", "CD_noteUUID", "CD_userTitle", "CD_generatedTitle",
-            "CD_modifiedAt", "CD_createdAt", "CD_archivedAt", "CD_folderID",
-            "CD_name", "CD_parentID", "CD_isStarred", "CD_headerFontStyle", "CD_bodyFontStyle"
-          ]
-        };
+        const options = cloudKitWebZone.metadataChangeOptions(nativeSchema, zoneID);
         if (token) options.syncToken = token;
         let response;
         try { response = assertResponse(await database.fetchRecordZoneChanges(options)); }
@@ -6083,11 +6064,11 @@
         const zones = response.zones || [];
         const changes = zones.find(function (zone) {
           const id = zone.zoneID || {};
-          return id.zoneName === (zoneID.zoneName || "com.apple.coredata.cloudkit.zone");
+          return id.zoneName === zoneID.zoneName;
         }) || zones[0];
         if (!changes) break;
         (changes.records || []).forEach(function (record) {
-          if (record.recordType !== "CD_CapturedNote" && record.recordType !== "CD_NoteFolder") return;
+          if (!cloudKitWebZone.isLibraryRecord(record, nativeSchema)) return;
           changedNames.add(record.recordName);
           if (record.recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
             state.pendingRemoteRecords.set(record.recordName, record);
@@ -6133,10 +6114,10 @@
             state.pendingRemoteRecords.set(selectedName, selectedRecord);
           } else {
             state.records.set(selectedName, selectedRecord);
-            if (isNativeModelRecord(selectedRecord, "CapturedNote")) {
-              state.bodyCache.set(selectedName, selectedDocument.body);
-              state.previewCache.set(selectedName, previewText(selectedDocument.body));
-            }
+            const bodyText = isNativeModelRecord(selectedRecord, "CapturedNote")
+              ? selectedDocument.body
+              : selectedDocument.title + "\n\n" + selectedDocument.body;
+            rememberRecordBody(selectedName, bodyText, session);
             state.pendingRemoteRecords.delete(selectedName);
           }
         }
@@ -6163,7 +6144,7 @@
   function startRealtimeSync(session) {
     window.clearInterval(state.realtimeSyncTimer);
     state.realtimeSyncTimer = null;
-    if (!accountSessionCurrent(session) || !state.nativeSchema || !state.nativeZoneID) return;
+    if (!accountSessionCurrent(session) || !state.nativeZoneID) return;
     refreshZoneRecords(session);
     state.realtimeSyncTimer = window.setInterval(function () { refreshZoneRecords(session); }, 1500);
   }
@@ -6243,8 +6224,41 @@
       if (!accountSessionCurrent(session)) return body;
       note.body = body; note.editorBody = body; note.preview = previewText(body);
       if (!fieldValue(note.record, "userTitle") && !fieldValue(note.record, "generatedTitle") && (!note.title || note.title === "Untitled")) note.title = firstLineTitle(body);
-      rememberNativeBody(note.recordName, body, session);
+      rememberRecordBody(note.recordName, body, session);
       if (state.selectedRecordName === note.recordName) state.selectedRecord = note.record;
+      return body;
+    }).finally(function () { note.bodyPromise = null; });
+    return note.bodyPromise;
+  }
+
+  function ensureWebTextBody(note) {
+    if (!note || !state.database) return Promise.reject(new Error("This note is not connected to iCloud."));
+    if (state.bodyCache.has(note.recordName)) {
+      const cachedBody = state.bodyCache.get(note.recordName);
+      rememberRecordBody(note.recordName, cachedBody, state.accountSession);
+      return Promise.resolve(cachedBody);
+    }
+    if (typeof fieldValue(note.record, "body") === "string") {
+      const body = String(fieldValue(note.record, "body"));
+      rememberRecordBody(note.recordName, body, state.accountSession);
+      return Promise.resolve(body);
+    }
+    if (note.bodyPromise) return note.bodyPromise;
+    const session = state.accountSession;
+    const zoneID = state.nativeZoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    note.bodyPromise = state.database.fetchRecords([note.recordName], { zoneID: zoneID }).then(async function (response) {
+      assertResponse(response);
+      const fetched = (response.records || []).find(function (record) { return record.recordName === note.recordName; });
+      if (!fetched) throw new Error("CloudKit could not find this note.");
+      if (!accountSessionCurrent(session)) return "";
+      note.record = fetched;
+      state.records.set(fetched.recordName, fetched);
+      if (state.selectedRecordName === note.recordName) state.selectedRecord = fetched;
+      const body = fieldValue(fetched, "bodyStorageRaw") === "asset"
+        ? await loadAssetBody(fetched)
+        : String(fieldValue(fetched, "body") || "");
+      if (!accountSessionCurrent(session)) return body;
+      rememberRecordBody(note.recordName, body, session);
       return body;
     }).finally(function () { note.bodyPromise = null; });
     return note.bodyPromise;
@@ -6777,7 +6791,7 @@
     const nativeSchema = historyContext ? historyContext.nativeSchema : state.nativeSchema;
     const zoneID = nativeSchema
       ? (historyContext ? historyContext.nativeZoneID : state.nativeZoneID)
-      : { zoneName: "ArborNotes" };
+      : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
     const response = assertResponse(await database.fetchRecords([record.recordName], { zoneID: zoneID }));
     const current = (response.records || []).find(function (item) { return item.recordName === record.recordName; });
     if (!current) throw new Error("CloudKit could not find the newer version of this note.");
@@ -7040,7 +7054,7 @@
   function saveToDatabase(records, historyContext) {
     const nativeSchema = historyContext ? historyContext.nativeSchema : state.nativeSchema;
     const database = historyContext ? historyContext.database : state.database;
-    const zoneID = nativeSchema ? (historyContext ? historyContext.nativeZoneID : state.nativeZoneID) : { zoneName: "ArborNotes" };
+    const zoneID = nativeSchema ? (historyContext ? historyContext.nativeZoneID : state.nativeZoneID) : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
     return database.saveRecords(records, { zoneID: zoneID });
   }
 
@@ -7197,7 +7211,9 @@
         const saved = await saveRecord(latest, body);
         if (superseded()) return;
         const savedDocument = state.syncBaselines.get(recordName) || submittedDocument;
-        if (state.nativeSchema && body && typeof body === "object") rememberNativeBody(recordName, savedDocument.body, session);
+        if (body && typeof body === "object") {
+          rememberRecordBody(recordName, state.nativeSchema ? savedDocument.body : savedDocument.title + "\n\n" + savedDocument.body, session);
+        }
         let newerEdit = state.selectedRecordName === recordName && state.dirty;
         if (state.selectedRecordName === recordName && !newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
           replaceActiveEditorDocument(recordName, savedDocument);
@@ -7307,8 +7323,6 @@
         modifiedAt: field(now),
         archivedAt: field(null),
         isStarred: field(0),
-        lockScreenPinOrder: field(null),
-        isSummaryCollapsed: field(null),
         lastModifiedDeviceID: field(state.deviceID),
         lastModifiedDeviceName: field("Arbor Web"),
         schemaEpoch: field(1)
@@ -7595,7 +7609,7 @@
       }
       if (deletedRecords && deletedRecords.length) {
         if (typeof state.database.deleteRecords !== "function") throw new Error("This CloudKit connection cannot archive folders yet.");
-        const zoneID = state.nativeSchema ? state.nativeZoneID : { zoneName: "ArborNotes" };
+        const zoneID = state.nativeSchema ? state.nativeZoneID : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
         assertResponse(await state.database.deleteRecords(deletedRecords, { zoneID: zoneID }));
         if (!accountSessionCurrent(session)) return false;
         deletedRecords.forEach(function (record) { state.records.delete(record.recordName); });
@@ -8014,7 +8028,7 @@
   }
 
   function historyZoneID(context) {
-    return context.nativeSchema ? context.nativeZoneID : { zoneName: "ArborNotes" };
+    return context.nativeSchema ? context.nativeZoneID : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
   }
 
   async function fetchLatestHistoryRecord(recordName, context) {
@@ -8113,7 +8127,9 @@
       note.body = desiredContent.body;
       note.editorBody = desiredContent.body;
       note.preview = previewText(desiredContent.body);
-      if (state.nativeSchema) state.bodyCache.set(note.recordName, String(desiredContent.body || ""));
+      state.bodyCache.set(note.recordName, state.nativeSchema
+        ? String(desiredContent.body || "")
+        : normalizedTitle(desiredContent.title) + "\n\n" + String(desiredContent.body || ""));
       writeDraft(note.recordName, { title: desiredContent.title, body: desiredContent.body });
 
       if (isSelected) {
@@ -8353,7 +8369,9 @@
       assertHistoryContext(context);
       const saved = response.records && response.records[0] ? response.records[0] : record;
       state.records.set(saved.recordName, saved);
-      if (state.nativeSchema && action.content) state.bodyCache.set(saved.recordName, String(action.content.body || ""));
+      if (action.content) state.bodyCache.set(saved.recordName, state.nativeSchema
+        ? String(action.content.body || "")
+        : normalizedTitle(action.content.title) + "\n\n" + String(action.content.body || ""));
       syncDerivedCollections();
     }
     closeNoteActions();

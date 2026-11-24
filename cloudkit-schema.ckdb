@@ -1,0 +1,40 @@
+DEFINE SCHEMA
+
+    RECORD TYPE ArborNote (
+        noteUUID STRING,
+        relativePath STRING,
+        bodyStorageRaw STRING,
+        body STRING,
+        bodyAsset ASSET,
+        contentFingerprint STRING,
+        previousContentFingerprint STRING,
+        contentVersion INT64,
+        previousContentVersion INT64,
+        createdAt TIMESTAMP,
+        modifiedAt TIMESTAMP,
+        archivedAt TIMESTAMP,
+        isStarred INT64,
+        lastModifiedDeviceID STRING,
+        lastModifiedDeviceName STRING,
+        schemaEpoch INT64,
+        headerFontStyle STRING,
+        bodyFontStyle STRING
+    );
+
+    RECORD TYPE ArborFolder (
+        folderUUID STRING,
+        relativePath STRING,
+        createdAt TIMESTAMP,
+        modifiedAt TIMESTAMP,
+        lastModifiedDeviceID STRING,
+        lastModifiedDeviceName STRING,
+        schemaEpoch INT64
+    );
+
+    RECORD TYPE ArborProofreadingDictionary (
+        entriesJSON STRING
+    );
+
+    RECORD TYPE ArborMetadataState (
+        payloadJSON ENCRYPTED STRING
+    );

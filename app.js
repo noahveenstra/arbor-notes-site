@@ -31,6 +31,7 @@
     largeDemo: false,
     loadingRecords: false,
     loadRecordsErrorMessage: "",
+    libraryLoadOperation: "",
     records: new Map(),
     notes: [],
     folders: [],
@@ -1052,13 +1053,25 @@
 
   function readableError(error) {
     if (!error) return "Something went wrong while connecting to CloudKit.";
-    const text = error.reason || error.message || error.description || String(error);
-    if (/AUTHENTICATION_REQUIRED|NOT_AUTHENTICATED|AUTHENTICATION_FAILED|request needs authorization/i.test(text)) return "Your Apple Account session needs to be refreshed. Sign in again to continue.";
-    if (/NETWORK_ERROR|network error|did not return a usable response/i.test(text)) return "Arbor couldn’t reach iCloud. Your sign-in is kept; try again when your connection is back.";
-    if (/ZONE_NOT_FOUND|UNKNOWN_ITEM/i.test(text)) return "The Arbor notes zone is not available in this CloudKit environment yet.";
-    if (/OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED/i.test(text)) return "This note changed on another device. Arbor kept your local draft and is refreshing the newer iCloud version.";
-    if (/SERVER_RECORD_CHANGED|CONFLICT/i.test(text)) return "This note changed in another place. Reload the note before saving more changes.";
-    return text;
+    const code = [error.serverErrorCode, error.code, error.errorCode]
+      .find(value => typeof value === "string" && /^[A-Z_]+$/.test(value)) || "";
+    const text = [error.reason || error.message || error.description || String(error), code].filter(Boolean).join(" ");
+    const operation = typeof error.operation === "string" && /^[a-z]+(?:\/[a-z-]+)+$/.test(error.operation) ? error.operation : "";
+    const httpStatus = [error.httpStatus, error.status, error.statusCode].find(value => Number.isInteger(value) && value >= 100 && value <= 599);
+    const status = httpStatus === undefined ? "" : `HTTP ${httpStatus}`;
+    const diagnostic = [operation, status || (code === "NETWORK_ERROR" ? "no response" : ""), code]
+      .filter(Boolean).join(" · ");
+    const withDiagnostic = message => diagnostic ? `${message} (${diagnostic})` : message;
+    if (/AUTHENTICATION_REQUIRED|NOT_AUTHENTICATED|AUTHENTICATION_FAILED|request needs authorization/i.test(text)) {
+      return withDiagnostic("Apple sign-in completed, but CloudKit rejected Arbor’s saved session. Refresh the connection to continue.");
+    }
+    if (/NETWORK_ERROR|network error|did not return a usable response/i.test(text)) {
+      return withDiagnostic("Arbor couldn’t reach iCloud. Your Apple sign-in is kept; try again when your connection is back.");
+    }
+    if (/ZONE_NOT_FOUND|UNKNOWN_ITEM/i.test(text)) return withDiagnostic("The Arbor notes zone is not available in this CloudKit environment yet.");
+    if (/OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED/i.test(text)) return withDiagnostic("This note changed on another device. Arbor kept your local draft and is refreshing the newer iCloud version.");
+    if (/SERVER_RECORD_CHANGED|CONFLICT/i.test(text)) return withDiagnostic("This note changed in another place. Reload the note before saving more changes.");
+    return withDiagnostic(text);
   }
 
   function cloudKitErrorText(error) {
@@ -1066,6 +1079,30 @@
     const values = [error.reason, error.message, error.description, error.serverErrorCode, error.code, error.errorCode];
     if (Array.isArray(error.errors)) values.push(error.errors.map(cloudKitErrorText).join(" "));
     return values.filter(Boolean).join(" ");
+  }
+
+  function withCloudKitOperation(error, operation) {
+    const source = error && typeof error === "object" ? error : {};
+    const originalText = [source.reason, source.message, source.description, String(error || "")].filter(Boolean).join(" ");
+    const existingCode = [source.serverErrorCode, source.code, source.errorCode]
+      .find(value => typeof value === "string" && /^[A-Z_]+$/.test(value));
+    const code = existingCode || (/AUTHENTICATION_REQUIRED|NOT_AUTHENTICATED|AUTHENTICATION_FAILED|request needs authorization/i.test(originalText)
+      ? "AUTHENTICATION_REQUIRED"
+      : /NETWORK_ERROR|network error|did not return a usable response|failed to fetch|load failed/i.test(originalText) ? "NETWORK_ERROR" : "");
+    const wrapped = error instanceof Error ? error : new Error(source.reason || source.message || "CloudKit request failed.");
+    const status = [source.httpStatus, source.status, source.statusCode].find(value => Number.isInteger(value) && value >= 100 && value <= 599);
+    try {
+      wrapped.operation = operation;
+      if (code) wrapped.code = code;
+      if (status !== undefined) wrapped.httpStatus = status;
+    } catch {
+      const fallback = new Error(code ? `CloudKit ${operation} failed (${code}).` : `CloudKit ${operation} failed.`);
+      fallback.operation = operation;
+      if (code) fallback.code = code;
+      if (status !== undefined) fallback.httpStatus = status;
+      return fallback;
+    }
+    return wrapped;
   }
 
   function isCloudKitRecordConflict(error) {
@@ -5921,12 +5958,13 @@
 
   async function loadZoneRecords(session) {
     if (!accountSessionCurrent(session)) return;
-    state.loadingRecords = true; state.loadRecordsErrorMessage = ""; renderNotes();
+    state.loadingRecords = true; state.loadRecordsErrorMessage = ""; state.libraryLoadOperation = ""; renderNotes();
     if (config.schemaMode === "web") {
       state.nativeSchema = false;
       if (!state.arborCloudKitTransport || typeof state.arborCloudKitTransport.createClient !== "function") {
         throw new Error("Arbor could not prepare its private notes zone in iCloud.");
       }
+      state.libraryLoadOperation = "zones/modify";
       const ensured = await state.arborCloudKitTransport.createClient().ensureRecordZone(cloudKitWebZone.ARBOR_WEB_ZONE_ID);
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
       state.nativeZoneID = ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
@@ -5959,7 +5997,13 @@
         if (!accountSessionCurrent(session) || !state.nativeZoneID) return;
         const options = cloudKitWebZone.metadataChangeOptions(state.nativeSchema, state.nativeZoneID);
         if (token) options.syncToken = token;
-        const response = assertResponse(await state.database.fetchRecordZoneChanges(options));
+        state.libraryLoadOperation = "zones/fetch-changes";
+        let response;
+        try {
+          response = assertResponse(await state.database.fetchRecordZoneChanges(options));
+        } catch (error) {
+          throw withCloudKitOperation(error, "zones/fetch-changes");
+        }
         if (!accountSessionCurrent(session) || !state.nativeZoneID) return;
         const zones = response.zones || [];
         const changes = zones.find(function (zone) {
@@ -5992,7 +6036,7 @@
       syncDerivedCollections(); renderAll(); await fetchChanges(null);
     }
     if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
-    state.loadingRecords = false;
+    state.libraryLoadOperation = ""; state.loadingRecords = false;
     syncDerivedCollections(); renderAll();
     const restoredState = restoreOpenTabsForLoadedNotes();
     const first = noteSorting.sortNotes(state.notes.filter(function (note) { return !isArchived(note.record); }), state.preferences.noteSortOrder)[0];
@@ -6399,7 +6443,9 @@
       return true;
     } catch (error) {
       if (!accountSessionCurrent(session)) return false;
+      if (error && !error.operation && state.libraryLoadOperation) error = withCloudKitOperation(error, state.libraryLoadOperation);
       state.loadingRecords = false;
+      state.libraryLoadOperation = "";
       state.loadRecordsErrorMessage = readableError(error);
       renderNotes();
       setListMessage(state.loadRecordsErrorMessage, true, true, true);

@@ -233,10 +233,12 @@ function safeErrorCode(payload) {
   return /^[A-Z_]+$/.test(code) ? code : "REQUEST_FAILED";
 }
 
-function cloudKitError(message, payload) {
+function cloudKitError(message, payload, { operation = null, httpStatus = null } = {}) {
   const code = safeErrorCode(payload);
   const error = new Error(`${message} (${code}).`);
   error.code = code;
+  if (typeof operation === "string" && /^[a-z]+(?:\/[a-z]+)+$/.test(operation)) error.operation = operation;
+  if (Number.isInteger(httpStatus) && httpStatus >= 0) error.httpStatus = httpStatus;
   return error;
 }
 
@@ -316,7 +318,7 @@ export class CloudKitEncryptedWebServices {
       const result = payload.zones && payload.zones[0];
       const error = result && result.serverErrorCode ? result : payload.serverErrorCode ? payload : null;
       if (error && !["ZONE_ALREADY_EXISTS", "ALREADY_EXISTS", "EXISTS"].includes(safeErrorCode(error))) {
-        throw cloudKitError("CloudKit zone creation failed", error);
+        throw cloudKitError("CloudKit zone creation failed", error, { operation: "zones/modify" });
       }
       if (!error && (!result || !result.zoneID || result.zoneID.zoneName !== zoneID.zoneName)) throw new TypeError("CloudKit did not confirm creation of the Arbor sync zone.");
       return { zoneID, alreadyExists: Boolean(error || (result && result.serverErrorCode)), record: result || null };
@@ -428,19 +430,29 @@ export class CloudKitEncryptedWebServices {
     url.searchParams.set("ckWebAuthToken", token);
 
     let response;
-    let payload;
     try {
       response = await this.fetchImpl(url.toString(), method === "GET" ? { method: "GET" } : {
         method: "POST",
         headers: { "Content-Type": "text/plain; charset=UTF-8" },
         body: JSON.stringify(body),
       });
-      payload = await response.json();
     } catch {
       // The server may have consumed the one-use token even if the response
       // was lost. Preserve it until Apple explicitly rejects it; the request
       // may have failed before leaving this browser.
-      throw new Error("CloudKit Web Services did not return a usable response.");
+      throw cloudKitError("CloudKit Web Services did not return a usable response", { serverErrorCode: "NETWORK_ERROR" }, { operation });
+    }
+
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      // Keep the failure actionable without surfacing Apple response content,
+      // request URLs, authentication tokens, or note data in the UI.
+      throw cloudKitError("CloudKit Web Services returned an unreadable response", { serverErrorCode: "INVALID_RESPONSE" }, {
+        operation,
+        httpStatus: response && response.status
+      });
     }
 
     const replacement = payload && payload.ckWebAuthToken;
@@ -450,10 +462,13 @@ export class CloudKitEncryptedWebServices {
     );
     const zoneAlreadyExists = operation === "zones/modify" && ["ZONE_ALREADY_EXISTS", "ALREADY_EXISTS", "EXISTS"].includes(safeErrorCode(payload));
     if ((!response.ok && !zoneAlreadyExists) || (payload.serverErrorCode && !zoneAlreadyExists)) {
-      throw cloudKitError("CloudKit Web Services request failed", payload);
+      throw cloudKitError("CloudKit Web Services request failed", payload, { operation, httpStatus: response.status });
     }
     if (typeof replacement !== "string" || !replacement) {
-      throw new Error("CloudKit did not return a replacement authentication token.");
+      throw cloudKitError("CloudKit did not return a replacement authentication token", { serverErrorCode: "MISSING_AUTH_TOKEN" }, {
+        operation,
+        httpStatus: response.status
+      });
     }
     return payload;
   }

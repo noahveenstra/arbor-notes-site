@@ -1321,7 +1321,8 @@ samp,
 }
 .correction-glyph-in {
   display: inline-block;
-  animation: correction-glyph-appear var(--motion-fade-duration) ease both;
+  animation: correction-glyph-appear var(--correction-glyph-duration, 180ms) cubic-bezier(.22, .68, .28, 1) both;
+  animation-delay: var(--correction-glyph-delay, 0ms);
 }
 .correction-glyph-out {
   position: fixed;
@@ -1329,16 +1330,17 @@ samp,
   display: block;
   overflow: visible;
   pointer-events: none;
-  transform-origin: left center;
-  animation: correction-glyph-disappear var(--motion-fade-duration) ease both;
+  transform-origin: center;
+  animation: correction-glyph-disappear var(--correction-glyph-duration, 180ms) cubic-bezier(.22, .68, .28, 1) both;
+  animation-delay: var(--correction-glyph-delay, 0ms);
 }
 @keyframes correction-glyph-appear {
-  from { filter: blur(3px); opacity: 0; }
-  to { filter: blur(0); opacity: 1; }
+  from { filter: blur(4px); opacity: 0; transform: translateY(.42em); }
+  to { filter: blur(0); opacity: 1; transform: translateY(0); }
 }
 @keyframes correction-glyph-disappear {
-  from { filter: blur(0); opacity: 1; }
-  to { filter: blur(3px); opacity: 0; }
+  from { filter: blur(0); opacity: 1; transform: translateY(0); }
+  to { filter: blur(4px); opacity: 0; transform: translateY(-.42em); }
 }
 @media (prefers-reduced-motion: reduce) {
   .correction-glyph-in,

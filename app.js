@@ -3701,34 +3701,56 @@
     };
   }
 
-  function correctionDiff(before, after) {
+  const CORRECTION_GLYPH_DURATION_MS = 180;
+  const CORRECTION_GLYPH_STAGGER_MS = 115;
+
+  function correctionAnimationSequence(before, after) {
     const oldCharacters = Array.from(before);
     const newCharacters = Array.from(after);
     const rows = oldCharacters.length + 1;
     const columns = newCharacters.length + 1;
-    const lengths = Array.from({ length: rows }, function () { return new Uint16Array(columns); });
+    const costs = Array.from({ length: rows }, function () { return new Uint16Array(columns); });
+    for (let oldIndex = oldCharacters.length; oldIndex >= 0; oldIndex -= 1) costs[oldIndex][newCharacters.length] = oldCharacters.length - oldIndex;
+    for (let newIndex = newCharacters.length; newIndex >= 0; newIndex -= 1) costs[oldCharacters.length][newIndex] = newCharacters.length - newIndex;
     for (let oldIndex = oldCharacters.length - 1; oldIndex >= 0; oldIndex -= 1) {
       for (let newIndex = newCharacters.length - 1; newIndex >= 0; newIndex -= 1) {
-        lengths[oldIndex][newIndex] = oldCharacters[oldIndex] === newCharacters[newIndex]
-          ? lengths[oldIndex + 1][newIndex + 1] + 1
-          : Math.max(lengths[oldIndex + 1][newIndex], lengths[oldIndex][newIndex + 1]);
+        costs[oldIndex][newIndex] = oldCharacters[oldIndex] === newCharacters[newIndex]
+          ? costs[oldIndex + 1][newIndex + 1]
+          : 1 + Math.min(costs[oldIndex + 1][newIndex + 1], costs[oldIndex + 1][newIndex], costs[oldIndex][newIndex + 1]);
       }
     }
-    const keptOld = new Set();
-    const keptNew = new Set();
+    const steps = [];
     let oldIndex = 0;
     let newIndex = 0;
     while (oldIndex < oldCharacters.length && newIndex < newCharacters.length) {
       if (oldCharacters[oldIndex] === newCharacters[newIndex]) {
-        keptOld.add(oldIndex); keptNew.add(newIndex); oldIndex += 1; newIndex += 1;
-      } else if (lengths[oldIndex + 1][newIndex] >= lengths[oldIndex][newIndex + 1]) oldIndex += 1;
-      else newIndex += 1;
+        steps.push({ oldIndex: oldIndex, newIndex: newIndex });
+        oldIndex += 1;
+        newIndex += 1;
+        continue;
+      }
+      const replaceCost = 1 + costs[oldIndex + 1][newIndex + 1];
+      const removeCost = 1 + costs[oldIndex + 1][newIndex];
+      const insertCost = 1 + costs[oldIndex][newIndex + 1];
+      const bestCost = costs[oldIndex][newIndex];
+      if (replaceCost === bestCost) {
+        steps.push({ oldIndex: oldIndex, newIndex: newIndex });
+        oldIndex += 1;
+        newIndex += 1;
+      } else if (insertCost === bestCost && (removeCost !== bestCost || costs[oldIndex][newIndex + 1] <= costs[oldIndex + 1][newIndex])) {
+        steps.push({ newIndex: newIndex });
+        newIndex += 1;
+      } else {
+        steps.push({ oldIndex: oldIndex });
+        oldIndex += 1;
+      }
     }
+    while (oldIndex < oldCharacters.length) { steps.push({ oldIndex: oldIndex }); oldIndex += 1; }
+    while (newIndex < newCharacters.length) { steps.push({ newIndex: newIndex }); newIndex += 1; }
     return {
       oldCharacters: oldCharacters,
       newCharacters: newCharacters,
-      incoming: new Set(newCharacters.map(function (_, index) { return index; }).filter(function (index) { return !keptNew.has(index); })),
-      removed: oldCharacters.map(function (_, index) { return index; }).filter(function (index) { return !keptOld.has(index); })
+      steps: steps
     };
   }
 
@@ -3762,27 +3784,55 @@
   }
 
   function animatedCorrectionReplacement(original, replacement, source) {
-    const diff = correctionDiff(String(original || ""), String(replacement || ""));
-    const oldRects = correctionGlyphRects(source, diff.oldCharacters.length);
+    const sequence = correctionAnimationSequence(String(original || ""), String(replacement || ""));
+    const oldRects = correctionGlyphRects(source, sequence.oldCharacters.length);
+    const oldStepByIndex = new Map();
+    const newStepByIndex = new Map();
+    sequence.steps.forEach(function (step, stepIndex) {
+      if (step.oldIndex !== undefined) oldStepByIndex.set(step.oldIndex, stepIndex);
+      if (step.newIndex !== undefined) newStepByIndex.set(step.newIndex, stepIndex);
+    });
+    const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const glyphDuration = prefersReducedMotion ? 0 : CORRECTION_GLYPH_DURATION_MS;
+    const glyphStagger = prefersReducedMotion ? 0 : CORRECTION_GLYPH_STAGGER_MS;
+    const totalDuration = sequence.steps.length
+      ? glyphDuration + Math.max(0, sequence.steps.length - 1) * glyphStagger
+      : 0;
     const wrapper = document.createElement("span");
     wrapper.className = "correction-applied-highlight";
     wrapper.setAttribute("data-proofreading-ignore", "");
     const incoming = [];
-    diff.newCharacters.forEach(function (character, index) {
-      if (diff.incoming.has(index)) {
+    if (prefersReducedMotion) {
+      wrapper.appendChild(document.createTextNode(sequence.newCharacters.join("")));
+    } else {
+      sequence.newCharacters.forEach(function (character, index) {
         const glyph = document.createElement("span");
         glyph.className = "correction-glyph-in";
+        glyph.dataset.correctionIndex = String(index);
+        glyph.dataset.correctionStep = String(newStepByIndex.get(index) || 0);
+        glyph.style.setProperty("--correction-glyph-delay", (newStepByIndex.get(index) || 0) * glyphStagger + "ms");
+        glyph.style.setProperty("--correction-glyph-duration", glyphDuration + "ms");
         glyph.textContent = character;
         incoming.push(glyph);
         wrapper.appendChild(glyph);
-      } else wrapper.appendChild(document.createTextNode(character));
-    });
+      });
+    }
     return {
       wrapper: wrapper,
       incoming: incoming,
-      removed: diff.removed.map(function (index) {
-        return { rect: oldRects[index], character: diff.oldCharacters[index] };
-      }).filter(function (item) { return item.rect && item.rect.width > 0 && item.rect.height > 0; })
+      removed: prefersReducedMotion ? [] : sequence.oldCharacters.map(function (character, index) {
+        const step = oldStepByIndex.get(index) || 0;
+        return {
+          rect: oldRects[index],
+          character: character,
+          index: index,
+          step: step,
+          delay: step * glyphStagger,
+          duration: glyphDuration
+        };
+      }).filter(function (item) { return item.rect && item.rect.width > 0 && item.rect.height > 0; }),
+      stepCount: sequence.steps.length,
+      totalDuration: totalDuration
     };
   }
 
@@ -3811,6 +3861,8 @@
       const glyph = document.createElement("span");
       glyph.className = "correction-glyph-out";
       glyph.setAttribute("aria-hidden", "true");
+      glyph.dataset.correctionIndex = String(item.index);
+      glyph.dataset.correctionStep = String(item.step);
       glyph.textContent = item.character;
       glyph.style.left = rect.left + "px";
       glyph.style.top = rect.top + "px";
@@ -3818,6 +3870,8 @@
       glyph.style.height = rect.height + "px";
       glyph.style.font = getComputedStyle(body).font;
       glyph.style.color = getComputedStyle(body).color;
+      glyph.style.setProperty("--correction-glyph-delay", item.delay + "ms");
+      glyph.style.setProperty("--correction-glyph-duration", item.duration + "ms");
       document.body.appendChild(glyph);
       return glyph;
     });
@@ -3834,7 +3888,7 @@
         if (saved) restoreEditorTextSelection(body, saved);
       }
       overlays.forEach(function (glyph) { glyph.remove(); });
-    }, 260);
+    }, animation.totalDuration + 24);
     window.setTimeout(function () {
       if (!animation.wrapper.isConnected) return;
       const saved = captureEditorSelection(body);
@@ -3851,7 +3905,7 @@
       }
       if (saved) restoreEditorTextSelection(body, saved);
       if (animation.recheckProofreading) scheduleProofreading(body, 0);
-    }, 1000);
+    }, Math.max(1000, animation.totalDuration + 120));
   }
 
   function applyAutomaticCorrection(body, target, correction) {

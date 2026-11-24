@@ -3032,6 +3032,60 @@
     } catch (_) { return false; }
   }
 
+  function captureCorrectionSelection(root) {
+    // Keep caret recovery inside its paragraph/list item; a whole-editor text
+    // offset aliases the end of one block with a following empty block.
+    const selection = window.getSelection();
+    if (!selection || !selection.anchorNode || !root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) return null;
+    function capturePoint(node, offset) {
+      const block = editorBlockForNode(root, node);
+      const textOffset = editorTextOffset(block, node, offset);
+      return {
+        blockPath: proofreadingBlockPath(block, root),
+        nodePath: editorNodePath(block, node),
+        nodeType: node.nodeType,
+        offset: offset,
+        textOffset: textOffset
+      };
+    }
+    return {
+      anchor: capturePoint(selection.anchorNode, selection.anchorOffset),
+      focus: capturePoint(selection.focusNode, selection.focusOffset)
+    };
+  }
+
+  function restoreCorrectionSelection(root, saved) {
+    if (!root || !saved || !saved.anchor || !saved.focus) return false;
+    function resolvePoint(point) {
+      const block = proofreadingElementAtPath(root, point.blockPath || []);
+      if (!block) return null;
+      let node = resolveEditorNodePath(block, point.nodePath || []);
+      let offset = Number(point.offset) || 0;
+      if (node && node.nodeType === point.nodeType) {
+        offset = Math.max(0, Math.min(offset, node.nodeType === Node.TEXT_NODE ? node.length : node.childNodes.length));
+        if (editorTextOffset(block, node, offset) === point.textOffset) return { node: node, offset: offset };
+      }
+      const fallback = editorPointAtTextOffset(block, point.textOffset);
+      return fallback ? { node: fallback.node, offset: fallback.offset } : null;
+    }
+    const anchor = resolvePoint(saved.anchor);
+    const focus = resolvePoint(saved.focus);
+    if (!anchor || !focus) return false;
+    try {
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      if (typeof selection.setBaseAndExtent === "function") {
+        selection.setBaseAndExtent(anchor.node, anchor.offset, focus.node, focus.offset);
+      } else {
+        const range = document.createRange();
+        range.setStart(anchor.node, anchor.offset);
+        range.setEnd(focus.node, focus.offset);
+        selection.addRange(range);
+      }
+      return true;
+    } catch (_) { return false; }
+  }
+
   function captureEditorSelection(root) {
     const selection = window.getSelection();
     if (!selection || !selection.anchorNode || !root.contains(selection.anchorNode) || !root.contains(selection.focusNode)) return null;
@@ -3836,24 +3890,6 @@
     };
   }
 
-  function protectCorrectionBoundarySpaces(wrapper) {
-    if (!wrapper || !wrapper.parentNode) return null;
-    const previous = wrapper.previousSibling;
-    const next = wrapper.nextSibling;
-    if (previous && previous.nodeType === Node.TEXT_NODE) {
-      previous.nodeValue = (previous.nodeValue || "").replace(/[ \t]+$/, function (spaces) { return "\u00a0".repeat(spaces.length); });
-    }
-    if (next && next.nodeType === Node.TEXT_NODE) {
-      next.nodeValue = (next.nodeValue || "").replace(/^[ \t]+/, function (spaces) { return "\u00a0".repeat(spaces.length); });
-    }
-    const firstInsertedText = wrapper.firstChild;
-    return previous && previous.nodeType === Node.TEXT_NODE
-      ? previous
-      : (firstInsertedText && firstInsertedText.nodeType === Node.TEXT_NODE
-        ? firstInsertedText
-        : (next && next.nodeType === Node.TEXT_NODE ? next : null));
-  }
-
   function correctionGlyphOverlayLayer() {
     let layer = document.getElementById("correction-glyph-layer");
     if (layer) return layer;
@@ -3892,7 +3928,7 @@
     });
     window.setTimeout(function () {
       if (animation.wrapper.isConnected) {
-        const saved = captureEditorSelection(body);
+        const saved = captureCorrectionSelection(body);
         animation.incoming.forEach(function (glyph) {
           if (glyph.isConnected) glyph.replaceWith(document.createTextNode(glyph.textContent || ""));
         });
@@ -3900,14 +3936,14 @@
         animation.wrapper.removeAttribute("data-proofreading-ignore");
         const parent = animation.wrapper.parentNode;
         if (parent) parent.normalize();
-        if (saved) restoreEditorTextSelection(body, saved);
+        if (saved) restoreCorrectionSelection(body, saved);
       }
       overlays.forEach(function (glyph) { glyph.remove(); });
       if (overlayLayer && !overlayLayer.childElementCount) overlayLayer.remove();
     }, animation.totalDuration + 24);
     window.setTimeout(function () {
       if (!animation.wrapper.isConnected) return;
-      const saved = captureEditorSelection(body);
+      const saved = captureCorrectionSelection(body);
       const parent = animation.wrapper.parentNode;
       const proofreadingContext = animation.proofreadingContextWrapper;
       if (proofreadingContext && proofreadingContext.isConnected) {
@@ -3915,11 +3951,7 @@
       }
       animation.wrapper.replaceWith.apply(animation.wrapper, Array.from(animation.wrapper.childNodes));
       if (parent) parent.normalize();
-      const boundaryNode = animation.boundaryRepairNode;
-      if (boundaryNode && boundaryNode.isConnected && boundaryNode.nodeType === Node.TEXT_NODE) {
-        boundaryNode.nodeValue = (boundaryNode.nodeValue || "").replace(/\u00a0/g, " ");
-      }
-      if (saved) restoreEditorTextSelection(body, saved);
+      if (saved) restoreCorrectionSelection(body, saved);
       if (animation.recheckProofreading) scheduleProofreading(body, 0);
     }, Math.max(1000, animation.totalDuration + 120));
   }
@@ -3953,7 +3985,6 @@
     let suffixNode = null;
     if (suffix) { suffixNode = document.createTextNode(suffix); fragment.appendChild(suffixNode); }
     node.replaceWith(fragment);
-    animation.boundaryRepairNode = protectCorrectionBoundarySpaces(animation.wrapper);
     if (target.boundary === "return" && savedSelection) {
       restoreProofreadingSelection(body, savedSelection);
     } else if (savedTextSelection) {
@@ -4873,7 +4904,6 @@
         }
       }
       marker.replaceWith(animation.wrapper);
-      animation.boundaryRepairNode = protectCorrectionBoundarySpaces(animation.wrapper);
       const range = document.createRange(); range.selectNodeContents(animation.wrapper); range.collapse(false);
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
     }

@@ -1319,19 +1319,19 @@ samp,
   background: color-mix(in srgb, var(--system-blue) 11%, transparent);
   box-shadow: inset 0 -1.5px 0 color-mix(in srgb, var(--system-blue) 78%, transparent);
 }
+#correction-glyph-layer { position: fixed; z-index: 120; inset: 0; overflow: visible; pointer-events: none; }
 .correction-glyph-in {
   display: inline-block;
-  animation: correction-glyph-appear var(--correction-glyph-duration, 180ms) cubic-bezier(.22, .68, .28, 1) both;
+  animation: correction-glyph-appear var(--correction-glyph-duration, 90ms) cubic-bezier(.22, .68, .28, 1) both;
   animation-delay: var(--correction-glyph-delay, 0ms);
 }
 .correction-glyph-out {
-  position: fixed;
-  z-index: 120;
+  position: absolute;
   display: block;
   overflow: visible;
   pointer-events: none;
   transform-origin: center;
-  animation: correction-glyph-disappear var(--correction-glyph-duration, 180ms) cubic-bezier(.22, .68, .28, 1) both;
+  animation: correction-glyph-disappear var(--correction-glyph-duration, 90ms) cubic-bezier(.22, .68, .28, 1) both;
   animation-delay: var(--correction-glyph-delay, 0ms);
 }
 @keyframes correction-glyph-appear {

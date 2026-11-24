@@ -3701,8 +3701,8 @@
     };
   }
 
-  const CORRECTION_GLYPH_DURATION_MS = 180;
-  const CORRECTION_GLYPH_STAGGER_MS = 115;
+  const CORRECTION_GLYPH_DURATION_MS = 90;
+  const CORRECTION_GLYPH_STAGGER_MS = 57.5;
 
   function correctionAnimationSequence(before, after) {
     const oldCharacters = Array.from(before);
@@ -3854,8 +3854,21 @@
         : (next && next.nodeType === Node.TEXT_NODE ? next : null));
   }
 
+  function correctionGlyphOverlayLayer() {
+    let layer = document.getElementById("correction-glyph-layer");
+    if (layer) return layer;
+    layer = document.createElement("div");
+    layer.id = "correction-glyph-layer";
+    layer.setAttribute("aria-hidden", "true");
+    document.documentElement.appendChild(layer);
+    return layer;
+  }
+
   function finishCorrectionAnimation(body, animation) {
     if (!animation || !animation.wrapper) return;
+    const editorStyle = getComputedStyle(body);
+    const editorZoom = Math.max(0.01, parseFloat(getComputedStyle(document.body).zoom) || 1);
+    const overlayLayer = animation.removed.length ? correctionGlyphOverlayLayer() : null;
     const overlays = animation.removed.map(function (item) {
       const rect = item.rect;
       const glyph = document.createElement("span");
@@ -3868,11 +3881,13 @@
       glyph.style.top = rect.top + "px";
       glyph.style.width = Math.max(rect.width, 2) + "px";
       glyph.style.height = rect.height + "px";
-      glyph.style.font = getComputedStyle(body).font;
-      glyph.style.color = getComputedStyle(body).color;
+      glyph.style.font = editorStyle.font;
+      glyph.style.fontSize = (parseFloat(editorStyle.fontSize) * editorZoom) + "px";
+      glyph.style.lineHeight = rect.height + "px";
+      glyph.style.color = editorStyle.color;
       glyph.style.setProperty("--correction-glyph-delay", item.delay + "ms");
       glyph.style.setProperty("--correction-glyph-duration", item.duration + "ms");
-      document.body.appendChild(glyph);
+      overlayLayer.appendChild(glyph);
       return glyph;
     });
     window.setTimeout(function () {
@@ -3888,6 +3903,7 @@
         if (saved) restoreEditorTextSelection(body, saved);
       }
       overlays.forEach(function (glyph) { glyph.remove(); });
+      if (overlayLayer && !overlayLayer.childElementCount) overlayLayer.remove();
     }, animation.totalDuration + 24);
     window.setTimeout(function () {
       if (!animation.wrapper.isConnected) return;

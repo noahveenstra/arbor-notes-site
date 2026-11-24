@@ -1,5 +1,5 @@
 import { env, pipeline } from "./vendor/transformers/transformers.min.js";
-import { CHUNKER_VERSION, EMBEDDING_DIMENSION, LOCAL_MODEL_ID, MODEL_ID, MODEL_REVISION, QUERY_PREFIX, getCacheStats } from "./semantic-search-index.js?v=arctic-semantic-7";
+import { CHUNKER_VERSION, EMBEDDING_DIMENSION, LOCAL_MODEL_ID, MODEL_ID, MODEL_REVISION, QUERY_PREFIX, getCacheStats } from "./semantic-search-index.js?v=arb-160-incremental-20261124";
 
 const runtimeByDevice = new Map();
 const fallbackByDevice = new Map();

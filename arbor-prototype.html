@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#176b57">
+  <title>Arbor — Faith notes demo</title>
+  <link rel="stylesheet" href="./fonts.css">
+  <link rel="stylesheet" href="./arbor-prototype.css">
+  <script src="./arbor-prototype.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#prototype-main">Skip to notes</a>
+  <div class="demo-banner" role="note">A fixed sample · fictional people and words</div>
+
+  <div class="prototype-shell">
+    <aside class="library-rail" aria-label="Library">
+      <a class="brand" href="#library" aria-label="Arbor library home">
+        <span class="brand-mark" aria-hidden="true">a</span>
+        <span><strong>Arbor</strong><small>field notes</small></span>
+      </a>
+      <nav class="rail-nav" aria-label="Library paths">
+        <a class="rail-link" href="#library" data-nav="library"><span class="rail-glyph" aria-hidden="true">⌂</span><span>Library</span></a>
+        <a class="rail-link" href="#faith" data-nav="faith"><span class="rail-glyph" aria-hidden="true">╱</span><span>Faith</span></a>
+        <a class="rail-link rail-child" href="#wisdom" data-nav="wisdom"><span class="rail-stem" aria-hidden="true"></span><span>Wisdom</span></a>
+        <a class="rail-link rail-child" href="#source/james-1-5" data-nav="prayer"><span class="rail-stem" aria-hidden="true"></span><span>Prayer</span></a>
+      </nav>
+      <div class="rail-note">
+        <span class="rail-note-mark" aria-hidden="true"></span>
+        <p>Everything here is<br>curated for this demo.</p>
+      </div>
+    </aside>
+
+    <div class="mobile-bar">
+      <a class="mobile-brand" href="#library"><span class="brand-mark" aria-hidden="true">a</span><strong>Arbor</strong></a>
+      <nav aria-label="Library paths">
+        <a href="#library" data-nav="library">Library</a>
+        <a href="#faith" data-nav="faith">Faith</a>
+        <a href="#wisdom" data-nav="wisdom">Wisdom</a>
+      </nav>
+    </div>
+
+    <div class="reading-area">
+      <header class="route-bar">
+        <nav id="breadcrumbs" class="breadcrumbs" aria-label="Breadcrumb"></nav>
+        <a id="return-link" class="return-link" href="#wisdom" hidden>Return to Wisdom</a>
+      </header>
+      <main id="prototype-main" tabindex="-1" aria-live="polite" aria-atomic="true"></main>
+    </div>
+
+    <aside id="context-rail" class="context-rail" aria-label="Source context"></aside>
+  </div>
+</body>
+</html>

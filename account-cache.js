@@ -14,11 +14,14 @@
 // "transformers-cache" for the same public model bytes; that name is not
 // arbor-* and is left in place.
 
+import { ARBOR_STATE_STORAGE_PREFIX, ARBOR_SYNC_PENDING_PREFIX, ARBOR_SYNC_SUCCESS_PREFIX } from "./arbor-state.js";
+
 export const LIBRARY_CACHE_DATABASE = "arbor-web-library-cache";
 export const SEMANTIC_VECTOR_DATABASE = "arbor-browser-semantic-index-arctic-e596f50-sentence-list-32w26-max32-even-v2";
 export const UNDO_HISTORY_DATABASE = "arbor-web-undo-history";
 export const ACCOUNT_RECORD_NAME_KEY = "arbor.web.account-id";
 export const ACCOUNT_LOCAL_STORAGE_KEYS = ["arbor.web.open-tabs.v1"];
+const ACCOUNT_LOCAL_STORAGE_PREFIXES = ["arbor.web.note-history.v1::"];
 
 export const DRAFT_NAME_PREFIXES = [
   "arbor.web.draft",
@@ -126,12 +129,14 @@ export function clearDraftAndOfflineKeys(storage) {
 export function clearAccountLocalState(storage) {
   const removed = [];
   if (!storage) return removed;
-  ACCOUNT_LOCAL_STORAGE_KEYS.forEach(function (key) {
+  const knownKeys = new Set(ACCOUNT_LOCAL_STORAGE_KEYS);
+  storageKeys(storage).forEach(function (key) {
+    const accountLocalKey = knownKeys.has(key) || key.startsWith(ARBOR_STATE_STORAGE_PREFIX) || key.startsWith(ARBOR_SYNC_PENDING_PREFIX) || key.startsWith(ARBOR_SYNC_SUCCESS_PREFIX) ||
+      ACCOUNT_LOCAL_STORAGE_PREFIXES.some(function (prefix) { return key.startsWith(prefix); });
+    if (!accountLocalKey) return;
     try {
-      if (storage.getItem(key) !== null) {
-        storage.removeItem(key);
-        removed.push(key);
-      }
+      storage.removeItem(key);
+      removed.push(key);
     } catch (_) {}
   });
   return removed;

@@ -10,9 +10,12 @@ const WORKER_OPTIONS = { scope: SERVICE_WORKER_SCOPE, updateViaCache: "none" };
 const WORKER_READY_TIMEOUT_MS = 12_000;
 const PWA_CLIENT_URL = "./pwa-client.js?v=arb-94-update-action-20261119-a";
 const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
+const PASSAGE_ANCHOR_URL = "./passage-anchor.js?v=recall-anchor-1";
 const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-177-static-autocorrect-highlight-20261124-a";
+const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-1-20261124-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-178-sync-20261124-5f720d7";
+const ARBOR_VIEW_URL = "./arbor-view.js?v=arb-178-voice-default-20261124-a";
 
 function showBootError(error) {
   const message = document.getElementById("shell-boot-error");
@@ -94,6 +97,8 @@ async function startApp() {
   window.__arborFirstControlReloadStarted = true;
   await import(PWA_CLIENT_URL);
   globalThis.ArborUndoHistory = await import(UNDO_HISTORY_URL);
+  globalThis.ArborPassageAnchor = await import(PASSAGE_ANCHOR_URL);
+  globalThis.ArborCloudKitSync = await import(ARBOR_CLOUDKIT_SYNC_URL);
   try {
     await appendClassicScript(RUST_SEARCH_URL);
   } catch (error) {
@@ -101,6 +106,8 @@ async function startApp() {
   }
   await appendClassicScript(NOTE_SORT_URL);
   await appendClassicScript(APP_SCRIPT_URL);
+  globalThis.ArborView = await import(ARBOR_VIEW_URL);
+  globalThis.ArborView.mountArborView({ api: window.arborWeb });
   document.documentElement.classList.remove("is-preparing-shell");
 }
 

@@ -9,18 +9,25 @@
   const proofreadingDictionarySync = window.ArborProofreadingDictionarySync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
   const config = window.ARBOR_CLOUDKIT_CONFIG || { demoMode: false };
-  const demoMode = Boolean(config.demoMode) || new URLSearchParams(window.location.search).get("preview") === "sample";
+  const previewMode = new URLSearchParams(window.location.search).get("preview");
+  const largeDemoMode = previewMode === "large";
+  const demoMode = Boolean(config.demoMode) || previewMode === "sample" || largeDemoMode;
   const $ = function (id) { return document.getElementById(id); };
   const savedNoteTabs = loadPreference("arbor.web.open-tabs.v1", { recordNames: [], activeRecordName: "" });
   const frame = $("app-frame");
   const state = {
     container: null,
+    arborCloudKitTransport: null,
+    arborStateSync: null,
+    arborSyncStatus: null,
+    arborSignOutGuardInstalled: false,
     database: null,
     nativeZoneID: null,
     nativeZoneExists: false,
     nativeSchema: false,
     user: null,
     demo: false,
+    largeDemo: false,
     loadingRecords: false,
     loadRecordsErrorMessage: "",
     records: new Map(),
@@ -76,6 +83,7 @@
     syncToken: null,
     syncBaselines: new Map(),
     pendingRemoteRecords: new Map(),
+    pendingArborDeletedNotes: new Map(),
     cacheDBPromise: null,
     bodyCache: new Map(),
     previewCache: new Map(),
@@ -98,7 +106,13 @@
     semanticSearchQuery: "",
     semanticLoadingQuery: "",
     semanticErrorQuery: "",
+    semanticProgress: null,
+    semanticQueryVector: null,
     semanticScores: new Map(),
+    semanticPassages: new Map(),
+    semanticResultRevisions: new Map(),
+    semanticPendingNoteIds: new Set(),
+    semanticCurrentRequest: null,
     semanticWorker: null,
     semanticWorkerBusy: false,
     semanticWorkerRequestId: 0,
@@ -106,6 +120,11 @@
     semanticPrepared: null,
     semanticPendingRequest: null,
     semanticWorkerTimer: 0,
+    semanticIndexTimer: 0,
+    semanticLastActivity: 0,
+    semanticRevisionSequence: Date.now(),
+    semanticWorkerIdleTimer: 0,
+    semanticWorkerIdleGeneration: 0,
     semanticWorkerUnavailable: false,
     proofreadingWorker: null,
     proofreadingRequestId: 0,
@@ -149,6 +168,13 @@
   const FONT_LABELS = { sans: "Sans", serif: "Serif", mono: "Mono", pixel: "Pixel" };
   const SPELLING_CONTEXT_RANK_TIMEOUT_MS = 30_000;
   const AUTO_CORRECTION_CONTEXT_TIMEOUT_MS = 30_000;
+  const SEMANTIC_WORKER_IDLE_UNLOAD_MS = 120_000;
+  const SEMANTIC_WORKER_TIMEOUT_MS = 180_000;
+  const SEMANTIC_INDEX_IDLE_GRACE_MS = 700;
+  const SEMANTIC_FIRST_ANSWER_NOTES = 2;
+  const SEMANTIC_FIRST_ANSWER_PASSAGES = 32;
+  const SEMANTIC_BACKGROUND_BATCH_NOTES = 4;
+  const SEMANTIC_BACKGROUND_BATCH_PASSAGES = 64;
   const MARGIN_OPTIONS = { condensed: 84, compact: 70, normal: 64, roomy: 58, spacious: 52 };
   const TEXT_SIZE_OPTIONS = { xsmall: 14, small: 18, medium: 20, large: 22, xlarge: 24 };
   const OPEN_NOTE_TABS_KEY = "arbor.web.open-tabs.v1";
@@ -233,7 +259,7 @@
     if (!accountCacheModulePromise) {
       const script = document.querySelector("script[src*='app.js']");
       const base = script && script.src ? script.src : window.location.href;
-      accountCacheModulePromise = import(new URL("./account-cache.js?v=arb-103-open-tabs-20261119-a", base).href);
+      accountCacheModulePromise = import(new URL("./account-cache.js?v=arb-note-history-signout-20261124-a", base).href);
     }
     return accountCacheModulePromise;
   }
@@ -331,7 +357,14 @@
     } catch (_) {}
   }
 
+  function cancelSemanticWorkerIdleUnload() {
+    state.semanticWorkerIdleGeneration += 1;
+    window.clearTimeout(state.semanticWorkerIdleTimer);
+    state.semanticWorkerIdleTimer = 0;
+  }
+
   function stopSemanticWorker() {
+    cancelSemanticWorkerIdleUnload();
     state.semanticPendingRequest = null;
     state.semanticActiveRequest = null;
     state.semanticWorkerBusy = false;
@@ -340,6 +373,7 @@
     state.semanticRequestId += 1;
     window.clearTimeout(state.semanticWorkerTimer);
     window.clearTimeout(state.semanticTimer);
+    window.clearTimeout(state.semanticIndexTimer);
     if (state.semanticWorker) {
       state.semanticWorker.terminate();
       state.semanticWorker = null;
@@ -368,9 +402,7 @@
     stopSemanticWorker();
     // The vector cache is opened on the page itself, not only in the worker.
     // Close it and drop in-memory vectors before the database is deleted.
-    if (semanticIndexPromise) {
-      try { await (await semanticIndexPromise).resetSemanticIndex(); } catch (_) {}
-    }
+    try { await (await loadSemanticIndex()).resetSemanticIndex({ broadcast: true }); } catch (_) {}
     await new Promise(function (resolve) { setTimeout(resolve, 0); });
     window.clearTimeout(state.cacheWriteTimer);
     state.cacheWriteTimer = null;
@@ -423,6 +455,12 @@
     state.semanticErrorQuery = "";
     state.semanticRequestedQuery = "";
     state.semanticScores = new Map();
+    state.semanticPassages = new Map();
+    state.semanticResultRevisions = new Map();
+    state.semanticPendingNoteIds = new Set();
+    state.semanticCurrentRequest = null;
+    state.semanticProgress = null;
+    state.semanticQueryVector = null;
     state.showCreatedDate = false;
     stopSemanticWorker();
     const searchInput = $("global-search-input");
@@ -444,6 +482,43 @@
       onBlocked: onAccountCacheBlocked,
       prepareForDelete: releaseAccountCacheConnections
     };
+  }
+
+  function stopArborStateSync(clearToken) {
+    if (state.arborStateSync) state.arborStateSync.dispose();
+    state.arborStateSync = null;
+    state.arborSyncStatus = null;
+    if (clearToken && state.arborCloudKitTransport) state.arborCloudKitTransport.clearToken();
+  }
+
+  function startArborStateSync(accountId, session) {
+    if (demoMode || !window.ArborCloudKitSync || !state.arborCloudKitTransport || !accountId) return;
+    if (state.arborStateSync && state.arborStateSync.accountId === accountId) return;
+    stopArborStateSync(false);
+    try {
+      const manager = window.ArborCloudKitSync.createArborStateSync({
+        storage: window.localStorage,
+        accountId: accountId,
+        client: state.arborCloudKitTransport.createClient(),
+        isCurrent: function () { return accountSessionCurrent(session); },
+        onStatus: function (status) {
+          state.arborSyncStatus = status;
+          document.dispatchEvent(new CustomEvent("arbor:sync-status-changed", { detail: status }));
+        },
+        onState: function () { document.dispatchEvent(new Event("arbor:state-sync-updated")); }
+      });
+      state.arborStateSync = manager;
+      manager.start();
+    } catch (error) {
+      state.arborSyncStatus = "error";
+      console.warn("Arbor state sync could not start.", error && error.message || "local state unavailable");
+    }
+  }
+
+  function getArborStateStore(context) {
+    if (!context || context.demo || !state.arborStateSync) return null;
+    if (state.arborStateSync.accountId !== context.accountId || context.session !== state.accountSession) return null;
+    return state.arborStateSync.store;
   }
 
   async function openUndoHistoryForAccount(accountKey, memoryOnly) {
@@ -2370,8 +2445,63 @@
 
   function searchCorpus() {
     return state.notes.filter(function (note) { return !isArchived(note.record); }).map(function (note) {
-      return { id: note.recordName, title: note.title, body: note.body || "", folder: note.folderPath || "", createdAt: note.createdAt.getTime(), updatedAt: note.modifiedAt.getTime() };
+      const modifiedAt = note.modifiedAt.getTime();
+      return {
+        id: note.recordName,
+        title: note.title,
+        body: typeof note.editorBody === "string" ? note.editorBody : (note.body || ""),
+        folder: note.folderPath || "",
+        createdAt: note.createdAt.getTime(),
+        updatedAt: modifiedAt,
+        sourceRevision: semanticSourceRevision(note)
+      };
     });
+  }
+
+  function advanceSemanticRevision(note) {
+    if (!note) return;
+    state.semanticRevisionSequence = Math.max(Date.now(), state.semanticRevisionSequence + 1);
+    note.semanticRevision = state.semanticRevisionSequence;
+    const noteID = String(note.recordName || "");
+    const previousRevision = state.semanticResultRevisions.get(noteID);
+    if (!noteID || !state.semanticRequestedQuery || previousRevision == null || previousRevision === semanticSourceRevision(note)) return;
+    state.semanticScores.delete(noteID);
+    state.semanticPassages.delete(noteID);
+    if (!state.semanticPendingNoteIds.has(noteID)) {
+      state.semanticPendingNoteIds.add(noteID);
+      if (state.semanticProgress) {
+        state.semanticProgress = {
+          indexed: Math.max(0, state.semanticProgress.indexed - 1),
+          total: state.semanticProgress.total,
+          remaining: state.semanticProgress.remaining + 1,
+          skipped: state.semanticProgress.skipped
+        };
+      }
+    }
+    const request = state.semanticCurrentRequest;
+    if (!request || !semanticSearchIsCurrent(request)) return;
+    state.semanticLoadingQuery = request.normalized;
+    if (state.searchPage) renderSearchPage();
+    else if ($("search-dialog").open) renderSearchSuggestions($("global-search-input").value);
+    if (state.semanticWorkerUnavailable || state.semanticErrorQuery === request.normalized) return;
+    if (state.semanticWorkerBusy) {
+      state.semanticPendingRequest = request;
+      return;
+    }
+    if (!state.semanticProgress) {
+      state.semanticProgress = { indexed: state.semanticScores.size, total: searchCorpus().length, remaining: 1, skipped: 0 };
+    } else if (!state.semanticProgress.remaining) {
+      state.semanticProgress.remaining = 1;
+    }
+    scheduleNextSemanticBatch(request);
+  }
+
+  function semanticSourceRevision(note) {
+    if (!note) return "";
+    const modifiedAt = note.modifiedAt instanceof Date ? note.modifiedAt.getTime() : Number(note.updatedAt || 0);
+    const recordChangeTag = String(note.record && note.record.recordChangeTag || "");
+    const contentFingerprint = String(fieldValue(note.record, "contentFingerprint") || "");
+    return modifiedAt + ":" + recordChangeTag + ":" + contentFingerprint + ":" + String(note.semanticRevision || 0);
   }
 
   function meaningfulSearchTerms(query) {
@@ -2407,9 +2537,16 @@
   function searchNotes(query) {
     const normalized = String(query || "").trim().toLocaleLowerCase();
     if (!normalized) return [];
-    const lexical = lexicalSearchNotes(normalized);
+    const corpus = searchCorpus();
+    const lexical = searchLexically(corpus, normalized).map(function (note) {
+      const range = window.ArborPassageAnchor.findLexicalPassageRange(note.body, query);
+      return Object.assign({}, note, { _passageCandidate: range ? { body: note.body, range: range } : null });
+    });
     if (state.semanticSearchQuery !== normalized) return lexical;
-    const semantic = semanticOnlySuggestions(searchCorpus(), state.semanticScores, lexical);
+    const eligibleCorpus = corpus.filter(function (note) { return state.semanticResultRevisions.get(String(note.id)) === note.sourceRevision; });
+    const semantic = semanticOnlySuggestions(eligibleCorpus, state.semanticScores, lexical).map(function (note) {
+      return Object.assign({}, note, { _passageCandidate: state.semanticPassages.get(note.id) || null });
+    });
     return lexical.concat(semantic);
   }
 
@@ -2464,19 +2601,78 @@
     if (normalized.length < 2) {
       if (state.semanticRequestedQuery) {
         state.semanticRequestedQuery = ""; state.semanticSearchQuery = ""; state.semanticLoadingQuery = ""; state.semanticErrorQuery = ""; state.semanticScores = new Map();
-        state.semanticPendingRequest = null; state.semanticRequestId += 1; window.clearTimeout(state.semanticTimer);
+        state.semanticPassages = new Map();
+        state.semanticProgress = null; state.semanticQueryVector = null;
+        state.semanticResultRevisions = new Map(); state.semanticPendingNoteIds = new Set(); state.semanticCurrentRequest = null;
+        state.semanticPendingRequest = null; state.semanticRequestId += 1; window.clearTimeout(state.semanticTimer); window.clearTimeout(state.semanticIndexTimer);
       }
       return;
     }
     if (normalized === state.semanticRequestedQuery) return;
     state.semanticRequestedQuery = normalized; state.semanticSearchQuery = ""; state.semanticErrorQuery = ""; state.semanticScores = new Map();
+    state.semanticPassages = new Map();
+    state.semanticProgress = null; state.semanticQueryVector = null;
+    state.semanticResultRevisions = new Map(); state.semanticPendingNoteIds = new Set();
     state.semanticLoadingQuery = normalized;
-    const request = { id: ++state.semanticRequestId, query: text, normalized: normalized };
+    const request = {
+      id: ++state.semanticRequestId,
+      query: text,
+      normalized: normalized,
+      accountScope: state.connectionUserID || (state.demo ? "sample-preview" : "signed-out"),
+      accountSession: state.accountSession,
+      priorityNoteIds: lexicalSearchNotes(text).slice(0, 12).map(function (note) { return note.id; })
+    };
+    state.semanticCurrentRequest = request;
     window.clearTimeout(state.semanticTimer);
+    window.clearTimeout(state.semanticIndexTimer);
     state.semanticTimer = window.setTimeout(function () { hydrateSearchCorpus(request); }, 180);
   }
 
-  function semanticSearchIsCurrent(request) { return request && request.id === state.semanticRequestId && request.normalized === state.semanticRequestedQuery; }
+  function semanticSearchIsCurrent(request) {
+    const accountScope = state.connectionUserID || (state.demo ? "sample-preview" : "signed-out");
+    return request && request.id === state.semanticRequestId && request.normalized === state.semanticRequestedQuery
+      && request.accountSession === state.accountSession && request.accountScope === accountScope;
+  }
+
+  function semanticCorpusMatches(prepared) {
+    if (!prepared || !Array.isArray(prepared.documents)) return false;
+    const current = searchCorpus();
+    if (current.length !== prepared.documents.length) return false;
+    const revisions = new Map(current.map(function (note) { return [String(note.id), note.sourceRevision]; }));
+    return prepared.documents.every(function (document) {
+      return revisions.get(String(document.note.id)) === document.sourceRevision;
+    });
+  }
+
+  function noteSemanticActivity() { state.semanticLastActivity = Date.now(); }
+
+  function scheduleNextSemanticBatch(request) {
+    window.clearTimeout(state.semanticIndexTimer);
+    if (!semanticSearchIsCurrent(request) || document.visibilityState === "hidden" || !state.semanticProgress || !state.semanticProgress.remaining) return;
+    const idleFor = Date.now() - state.semanticLastActivity;
+    const wait = Math.max(150, SEMANTIC_INDEX_IDLE_GRACE_MS - idleFor);
+    state.semanticIndexTimer = window.setTimeout(function () {
+      state.semanticIndexTimer = 0;
+      if (!semanticSearchIsCurrent(request) || document.visibilityState === "hidden") return;
+      if (Date.now() - state.semanticLastActivity < SEMANTIC_INDEX_IDLE_GRACE_MS) {
+        scheduleNextSemanticBatch(request);
+        return;
+      }
+      sendSemanticSearch(request, true);
+    }, wait);
+  }
+
+  function semanticProgressText(query) {
+    const normalized = String(query || "").trim().toLocaleLowerCase();
+    if (state.semanticRequestedQuery !== normalized) return "";
+    if (state.semanticErrorQuery === normalized && !state.semanticProgress) return "Related-note search unavailable; exact word results are shown.";
+    if (!state.semanticProgress) return "";
+    const progress = state.semanticProgress;
+    const skipped = progress.skipped ? " " + progress.skipped + " notes exceeded the passage limit." : "";
+    if (progress.remaining > 0) return "Related results from " + progress.indexed + " of " + progress.total + " indexed notes; " + (state.semanticErrorQuery === state.semanticRequestedQuery ? "indexing paused." : "indexing continues.") + skipped;
+    if (progress.skipped > 0) return "Related results from " + progress.indexed + " of " + progress.total + " indexed notes; " + progress.skipped + " notes exceeded the passage limit.";
+    return "Related results checked across all " + progress.total + " notes.";
+  }
 
   function renderSemanticSearchUpdate(request) {
     const selected = state.searchItems[state.searchActiveIndex] && state.searchItems[state.searchActiveIndex].id;
@@ -2491,12 +2687,52 @@
 
   let semanticIndexPromise;
   function loadSemanticIndex() {
-    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arctic-semantic-7");
+    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-160-incremental-20261124");
     return semanticIndexPromise;
   }
 
   function releaseSemanticWorker() {
     state.semanticWorkerBusy = false; state.semanticWorkerRequestId = 0; state.semanticActiveRequest = null; state.semanticPrepared = null;
+    scheduleSemanticWorkerIdleUnload();
+  }
+
+  function scheduleSemanticWorkerIdleUnload() {
+    cancelSemanticWorkerIdleUnload();
+    if (!state.semanticWorker) return;
+    const generation = state.semanticWorkerIdleGeneration;
+    state.semanticWorkerIdleTimer = window.setTimeout(async function () {
+      state.semanticWorkerIdleTimer = 0;
+      if (generation !== state.semanticWorkerIdleGeneration || state.semanticWorkerBusy || state.semanticPendingRequest || document.visibilityState === "hidden") return;
+      const worker = state.semanticWorker;
+      if (!worker) return;
+      state.semanticWorker = null;
+      worker.terminate();
+      try {
+        const index = await loadSemanticIndex();
+        if (generation !== state.semanticWorkerIdleGeneration || state.semanticWorkerBusy || state.semanticPendingRequest || state.semanticWorker) return;
+        await index.releaseSemanticMemory();
+      } catch (_) {}
+    }, SEMANTIC_WORKER_IDLE_UNLOAD_MS);
+  }
+
+  function pauseSemanticWorkerForHiddenTab() {
+    window.clearTimeout(state.semanticIndexTimer);
+    if (!state.semanticWorker && !state.semanticWorkerBusy && !state.semanticLoadingQuery && !(state.semanticProgress && state.semanticProgress.remaining)) return;
+    state.semanticPendingRequest = null;
+    stopSemanticWorker();
+    state.semanticRequestedQuery = "";
+    state.semanticSearchQuery = "";
+    state.semanticLoadingQuery = "";
+    state.semanticErrorQuery = "";
+    state.semanticScores = new Map();
+    state.semanticPassages = new Map();
+    state.semanticProgress = null; state.semanticQueryVector = null;
+    state.semanticResultRevisions = new Map(); state.semanticPendingNoteIds = new Set(); state.semanticCurrentRequest = null;
+    const input = $(state.searchPage ? "expanded-search-input" : "global-search-input");
+    const query = input && input.value || state.searchQuery || "";
+    if (state.searchPage) renderSearchPage();
+    else if ($("search-dialog").open) renderSearchSuggestions(query);
+    loadSemanticIndex().then(function (index) { return index.resetSemanticIndex(); }).catch(function () {});
   }
 
   function disableSemanticSearch(error) {
@@ -2504,6 +2740,7 @@
     state.semanticWorkerUnavailable = true; state.semanticPendingRequest = null;
     releaseSemanticWorker();
     window.clearTimeout(state.semanticWorkerTimer);
+    window.clearTimeout(state.semanticIndexTimer);
     if (state.semanticWorker) { state.semanticWorker.terminate(); state.semanticWorker = null; }
     state.semanticLoadingQuery = ""; state.semanticErrorQuery = state.semanticRequestedQuery;
     if (state.searchPage) renderSearchPage(); else if ($("search-dialog").open) renderSearchSuggestions($("global-search-input").value);
@@ -2512,7 +2749,7 @@
   function startSemanticWorker() {
     if (state.semanticWorker) return state.semanticWorker;
     try {
-      const worker = new Worker("./semantic-search-worker.js?v=arctic-semantic-7", { type: "module" });
+      const worker = new Worker("./semantic-search-worker.js?v=arb-160-incremental-20261124", { type: "module" });
       worker.addEventListener("message", function (event) {
         const message = event.data || {};
         if (!state.semanticWorkerBusy || message.id !== state.semanticWorkerRequestId) return;
@@ -2530,28 +2767,46 @@
   async function finishSemanticResult(request, prepared, rows) {
     try {
       const index = await loadSemanticIndex();
-      const results = await index.completeSemanticQuery(prepared, rows);
+      const completion = await index.completeSemanticQuery(prepared, rows);
       releaseSemanticWorker();
-      if (semanticSearchIsCurrent(request)) {
-        state.semanticScores = new Map((results || []).map(function (result) { return [result.id, result.score]; }));
-        state.semanticSearchQuery = request.normalized; state.semanticLoadingQuery = ""; state.semanticErrorQuery = "";
+      if (semanticSearchIsCurrent(request) && !completion.stale && !semanticCorpusMatches(prepared)) {
+        state.semanticQueryVector = null;
+        state.semanticPendingRequest = request;
+      } else if (semanticSearchIsCurrent(request) && !completion.stale) {
+        const results = completion.results || [];
+        state.semanticQueryVector = completion.queryVector;
+        state.semanticScores = new Map(results.map(function (result) { return [result.id, result.score]; }));
+        state.semanticPassages = new Map(results.filter(function (result) { return result.passage; }).map(function (result) { return [result.id, result.passage]; }));
+        state.semanticResultRevisions = new Map(results.map(function (result) { return [String(result.id), result.sourceRevision]; }));
+        results.forEach(function (result) {
+          if (state.semanticPendingNoteIds.has(String(result.id))) state.semanticPendingNoteIds.delete(String(result.id));
+        });
+        state.semanticProgress = completion.coverage;
+        state.semanticSearchQuery = request.normalized;
+        state.semanticLoadingQuery = completion.coverage.remaining ? request.normalized : "";
+        state.semanticErrorQuery = "";
         renderSemanticSearchUpdate(request);
+        if (completion.coverage.remaining) scheduleNextSemanticBatch(request);
       }
       sendPendingSemanticSearch();
     } catch (error) { disableSemanticSearch(error); }
   }
 
-  async function sendSemanticSearch(request) {
+  async function sendSemanticSearch(request, continuing) {
     if (!semanticSearchIsCurrent(request)) return;
+    cancelSemanticWorkerIdleUnload();
     const worker = startSemanticWorker(); if (!worker) return;
     if (state.semanticWorkerBusy) { state.semanticPendingRequest = request; return; }
     state.semanticWorkerBusy = true; state.semanticWorkerRequestId = request.id; state.semanticActiveRequest = request;
     try {
-      const notes = searchCorpus().map(function (note) { return { id: note.id, title: note.title, body: note.body || "" }; });
+      const notes = searchCorpus();
       if (!notes.length) {
         releaseSemanticWorker();
         if (semanticSearchIsCurrent(request)) {
           state.semanticScores = new Map();
+          state.semanticPassages = new Map();
+          state.semanticResultRevisions = new Map();
+          state.semanticPendingNoteIds = new Set();
           state.semanticSearchQuery = request.normalized; state.semanticLoadingQuery = ""; state.semanticErrorQuery = "";
           renderSemanticSearchUpdate(request);
         }
@@ -2560,13 +2815,19 @@
       }
       const index = await loadSemanticIndex();
       if (!semanticSearchIsCurrent(request)) { releaseSemanticWorker(); sendPendingSemanticSearch(); return; }
-      const prepared = await index.prepareSemanticQuery(request.query, notes);
+      const prepared = await index.prepareSemanticQuery(request.query, notes, {
+        accountScope: request.accountScope,
+        priorityNoteIds: request.priorityNoteIds,
+        batchNotes: continuing ? SEMANTIC_BACKGROUND_BATCH_NOTES : SEMANTIC_FIRST_ANSWER_NOTES,
+        batchPassages: continuing ? SEMANTIC_BACKGROUND_BATCH_PASSAGES : SEMANTIC_FIRST_ANSWER_PASSAGES
+      });
       if (!semanticSearchIsCurrent(request)) { releaseSemanticWorker(); sendPendingSemanticSearch(); return; }
       state.semanticPrepared = prepared;
-      worker.postMessage({ id: request.id, texts: [prepared.queryText].concat(prepared.passages) });
+      const queryVector = state.semanticQueryVector;
+      worker.postMessage({ id: request.id, queryVector: queryVector, texts: (queryVector ? [] : [prepared.queryText]).concat(prepared.passages) });
       state.semanticWorkerTimer = window.setTimeout(function () {
         if (state.semanticWorkerBusy && state.semanticWorkerRequestId === request.id) disableSemanticSearch(new Error("Search took too long"));
-      }, 180000);
+      }, SEMANTIC_WORKER_TIMEOUT_MS);
     } catch (error) { disableSemanticSearch(error); }
   }
 
@@ -2580,13 +2841,16 @@
     scheduleSemanticSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
     if (!text) { state.searchActiveIndex = -1; input.removeAttribute("aria-activedescendant"); setMotionVisibility(list, false); list.innerHTML = ""; return; }
     if (state.searchActiveIndex >= state.searchItems.length) state.searchActiveIndex = -1;
+    const progress = semanticProgressText(text);
     if (!state.searchItems.length) {
       const message = state.semanticLoadingQuery === text.toLocaleLowerCase() ? "Looking for related notes…" : state.semanticErrorQuery === text.toLocaleLowerCase() ? "Related-note search unavailable" : "No matching notes";
-      list.innerHTML = '<div class="search-suggestions-empty">' + message + "</div>";
+      list.innerHTML = '<div class="search-suggestions-empty" aria-live="polite">' + escapeHTML(progress || message) + "</div>";
     } else list.innerHTML = state.searchItems.map(function (note, index) {
       const folder = note.folder ? '<span class="search-suggestion-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(note.folder) + "</span>" : "";
-      return '<button id="search-suggestion-' + index + '" class="search-suggestion' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '" data-search-index="' + index + '"><span class="search-suggestion-title">' + highlightMatch(note.title, text) + '</span><span class="search-suggestion-excerpt">' + highlightMatch(searchExcerpt(note, text), text) + '</span><span class="search-suggestion-footer">' + folder + '<span class="search-suggestion-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + "</span></span></button>";
+      const excerpt = note._passageCandidate && note._passageCandidate.excerpt || searchExcerpt(note, text);
+      return '<button id="search-suggestion-' + index + '" class="search-suggestion' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '" data-search-index="' + index + '"><span class="search-suggestion-title">' + highlightMatch(note.title, text) + '</span><span class="search-suggestion-excerpt">' + highlightMatch(excerpt, text) + '</span><span class="search-suggestion-footer">' + folder + '<span class="search-suggestion-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + "</span></span></button>";
     }).join("");
+    if (progress && state.searchItems.length) list.insertAdjacentHTML("beforeend", '<div class="search-suggestions-empty" aria-live="polite">' + escapeHTML(progress) + "</div>");
     setMotionVisibility(list, true);
     const active = list.querySelector(".is-active");
     if (active) input.setAttribute("aria-activedescendant", active.id); else input.removeAttribute("aria-activedescendant");
@@ -2630,14 +2894,16 @@
       $("expanded-search-results").innerHTML = '<div class="search-page-empty">Search your notes by a word or phrase.</div>';
       return;
     }
-    $("expanded-search-count").textContent = state.searchItems.length + (state.searchItems.length === 1 ? " result" : " results") + " for “" + query + "”";
+    const progress = semanticProgressText(query);
+    $("expanded-search-count").textContent = state.searchItems.length + (state.searchItems.length === 1 ? " result" : " results") + " for “" + query + "”" + (progress ? " · " + progress : "");
     if (!state.searchItems.length) {
       const message = state.semanticLoadingQuery === query.toLocaleLowerCase() ? "Looking for related notes…" : state.semanticErrorQuery === query.toLocaleLowerCase() ? "Related-note search unavailable." : "No notes match this search.";
       $("expanded-search-results").innerHTML = '<div class="search-page-empty">' + message + "</div>"; return;
     }
     $("expanded-search-results").innerHTML = state.searchItems.map(function (note, index) {
       const folder = note.folder || "Unfiled";
-      return '<button class="search-page-row' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '"><span class="search-page-row-title">' + highlightMatch(note.title, query) + '</span><span class="search-page-row-meta"><span class="search-page-row-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + '</span><span class="search-page-row-excerpt">' + highlightMatch(searchExcerpt(note, query), query) + '</span></span><span class="search-page-row-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(folder) + "</span></button>";
+      const excerpt = note._passageCandidate && note._passageCandidate.excerpt || searchExcerpt(note, query);
+      return '<button class="search-page-row' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '"><span class="search-page-row-title">' + highlightMatch(note.title, query) + '</span><span class="search-page-row-meta"><span class="search-page-row-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + '</span><span class="search-page-row-excerpt">' + highlightMatch(excerpt, query) + '</span></span><span class="search-page-row-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(folder) + "</span></button>";
     }).join("");
   }
 
@@ -2711,11 +2977,47 @@
   }
 
   function openSearchResult(recordName) {
+    const result = state.searchItems.find(function (item) { return item.id === recordName; });
+    const candidate = result && result._passageCandidate;
+    const session = state.accountSession;
     if ($("search-dialog").open) $("search-dialog").close();
     if (state.searchPage) { state.searchPage = false; frame.classList.remove("is-search-expanded"); }
     state.showingArchive = false;
     state.selectedFolder = "";
-    openNote(recordName).then(function () { renderAll(); });
+    openNote(recordName).then(async function (opened) {
+      if (!opened || !candidate || !accountSessionCurrent(session)) { renderAll(); return; }
+      const note = state.notes.find(function (item) { return item.recordName === recordName; });
+      if (!note || !accountSessionCurrent(session)) { renderAll(); return; }
+      const index = window.ArborPassageAnchor;
+      let anchor = candidate.anchor || null;
+      if (!anchor && candidate.range && typeof candidate.body === "string") {
+        try {
+          anchor = await index.createPassageAnchor({
+            noteId: recordName,
+            body: candidate.body,
+            start: candidate.range.start,
+            end: candidate.range.end,
+            matchProvenance: candidate.range.matchProvenance
+          });
+        } catch (_) { anchor = null; }
+      }
+      if (!anchor || !accountSessionCurrent(session)) { renderAll(); return; }
+      const resolved = await index.resolvePassageAnchor(anchor, {
+        exists: true,
+        noteId: recordName,
+        archived: isArchived(note.record),
+        body: currentEditorBodyMarkdown()
+      });
+      if (!accountSessionCurrent(session)) return;
+      if (resolved.resolutionStatus === "resolved") {
+        if (!selectSearchPassage(resolved)) showToast("The note opened, but its current Markdown could not place this passage exactly.", true);
+      } else if (resolved.resolutionStatus !== "archived") {
+        showToast(resolved.resolutionStatus === "ambiguous"
+          ? "This passage now appears in more than one place. The note is open without a highlight."
+          : "This passage changed since search. The note is open without an approximate highlight.", true);
+      }
+      renderAll();
+    });
   }
 
   function textWithLineBreaks(node) {
@@ -2891,6 +3193,124 @@
         return part.start + lineStart + contentStart + local;
       }
     };
+  }
+
+  function searchMarkdownPoint(root, requestedOffset) {
+    const requested = Number(requestedOffset);
+    if (!root || !Number.isInteger(requested) || requested < 0) return null;
+    const source = currentEditorBodyMarkdown();
+    let normalizedSource = "";
+    const normalizedToSource = [0];
+    for (let index = 0; index < source.length; index += 1) {
+      if (source[index] === "\r") {
+        if (source[index + 1] === "\n") { normalizedSource += "\n"; index += 1; }
+        if (source[index] === "\n") normalizedToSource.push(index + 1);
+        else normalizedToSource[normalizedToSource.length - 1] = index + 1;
+        continue;
+      }
+      normalizedSource += source[index];
+      normalizedToSource.push(index + 1);
+    }
+    let normalizedOffset = -1;
+    for (let index = 0; index < normalizedToSource.length; index += 1) {
+      if (normalizedToSource[index] === requested) { normalizedOffset = index; break; }
+    }
+    if (normalizedOffset < 0) return null;
+    const parts = bodyMarkdownParts(root).parts;
+    let sourceCursor = 0;
+    for (const part of parts) {
+      if (!part.markdown) continue;
+      const sourceStart = normalizedSource.indexOf(part.markdown, sourceCursor);
+      if (sourceStart < 0) continue;
+      sourceCursor = sourceStart + part.markdown.length;
+      const sourceLocal = normalizedOffset - sourceStart;
+      if (sourceLocal < 0 || sourceLocal > part.markdown.length) continue;
+      if (part.node.tagName === "UL" || part.node.tagName === "OL") {
+        for (const item of Array.from(part.node.children).filter(function (child) { return child.tagName === "LI"; })) {
+          const mapping = listItemReviewBlock(root, item);
+          if (!mapping || sourceLocal < mapping.start - part.start || sourceLocal > mapping.start - part.start + mapping.markdown.length) continue;
+          const serialized = inlineMarkdownWithOffsets(item, "");
+          const walker = document.createTreeWalker(item, NodeFilter.SHOW_TEXT);
+          while (walker.nextNode()) {
+            const node = walker.currentNode;
+            const positions = serialized.offsets.get(node) || [];
+            for (let offset = 0; offset < positions.length; offset += 1) {
+              if (mapping.toOffset(node, offset) - part.start === sourceLocal) return { node: node, offset: offset };
+            }
+          }
+        }
+        continue;
+      }
+
+      const prefix = /^H[1-3]$/.test(part.node.tagName) ? "#".repeat(Number(part.node.tagName[1])) + " " : "";
+      const serialized = inlineMarkdownWithOffsets(part.node, prefix);
+      const inner = serialized.markdown.slice(prefix.length);
+      const leading = inner.length - inner.trimStart().length;
+      const quote = part.node.tagName === "BLOCKQUOTE";
+      const walker = document.createTreeWalker(part.node, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const positions = serialized.offsets.get(node) || [];
+        for (let offset = 0; offset < positions.length; offset += 1) {
+          let local;
+          if (quote) {
+            const content = inner.slice(leading).trimEnd();
+            const plainOffset = Math.max(0, positions[offset] - leading);
+            const lineCount = (content.slice(0, plainOffset).match(/\n/g) || []).length;
+            local = 2 + plainOffset + lineCount * 2;
+          } else if (prefix) {
+            local = prefix.length + Math.max(0, positions[offset] - prefix.length - leading);
+          } else local = Math.max(0, positions[offset] - leading);
+          if (local === sourceLocal) return { node: node, offset: offset };
+        }
+      }
+    }
+    return null;
+  }
+
+  function selectSearchPassage(anchor) {
+    const root = $("note-body");
+    const start = searchMarkdownPoint(root, anchor.start);
+    const end = searchMarkdownPoint(root, anchor.end);
+    if (!start || !end) return false;
+    try {
+      const range = document.createRange();
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      const target = start.node.parentElement;
+      if (target && target.scrollIntoView) target.scrollIntoView({ block: "center", behavior: "smooth" });
+      return true;
+    } catch (_) { return false; }
+  }
+
+  async function openArborPassage(recordName, anchor) {
+    const session = state.accountSession;
+    const opened = await openNote(recordName);
+    if (!opened || !anchor || !accountSessionCurrent(session)) return false;
+    const note = state.notes.find(function (item) { return item.recordName === recordName; });
+    if (!note || !accountSessionCurrent(session)) return false;
+    const resolved = await window.ArborPassageAnchor.resolvePassageAnchor(anchor, {
+      exists: true,
+      noteId: recordName,
+      archived: isArchived(note.record),
+      body: currentEditorBodyMarkdown()
+    });
+    if (!accountSessionCurrent(session)) return false;
+    if (resolved.resolutionStatus === "resolved") {
+      if (!selectSearchPassage(resolved)) showToast("The note opened, but its current Markdown could not place this passage exactly.", true);
+      renderAll();
+      return true;
+    }
+    showToast(resolved.resolutionStatus === "ambiguous"
+      ? "This passage now appears in more than one place. The note is open without a highlight."
+      : resolved.resolutionStatus === "archived"
+        ? "The source note is archived, so Arbor opened it without a passage highlight."
+        : "This passage changed since it was saved. The note is open without an approximate highlight.", true);
+    renderAll();
+    return false;
   }
 
   function selectionReviewContext() {
@@ -5549,6 +5969,7 @@
           }
         });
         (changes.deletedRecords || []).forEach(function (record) {
+          notifyArborNoteDeleted(record.recordName);
           state.records.delete(record.recordName); state.bodyCache.delete(record.recordName);
           state.previewCache.delete(record.recordName); state.previewLoadErrors.delete(record.recordName);
         });
@@ -5680,6 +6101,7 @@
         (changes.deletedRecords || []).forEach(function (record) {
           const recordName = record.recordName;
           deletedNames.add(recordName);
+          notifyArborNoteDeleted(recordName);
           if (recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
             state.pendingRemoteRecords.set(recordName, null);
             return;
@@ -5848,8 +6270,14 @@
   async function connectUser(identity) {
     if (!identity) return;
     const userID = String(identity.userRecordName || "").trim();
-    if (state.database && state.connectionUserID === userID && !state.accountCacheSuspended) return;
+    if (state.database && state.connectionUserID === userID && !state.accountCacheSuspended) {
+      startArborStateSync(userID, state.accountSession);
+      return;
+    }
     const session = ++state.accountSession;
+    stopArborStateSync(false);
+    state.pendingArborDeletedNotes.clear();
+    document.dispatchEvent(new Event("arbor:account-change"));
     let ready = false;
     try {
       await enqueueAccountPersistence(async function () {
@@ -5895,6 +6323,7 @@
       return;
     }
     if (!ready || session !== state.accountSession) return;
+    startArborStateSync(userID, session);
     try { await openUndoHistoryForAccount(state.cacheKey, false); }
     catch (_) { showToast("Undo history could not be loaded from this browser.", true); }
     if (session !== state.accountSession) return;
@@ -5972,8 +6401,36 @@
       return;
     }
     try {
+      if (!state.arborSignOutGuardInstalled) {
+        document.addEventListener("click", function (event) {
+          const target = event.target && event.target.closest ? event.target.closest("#apple-sign-out-button") : null;
+          const manager = state.arborStateSync;
+          const accountId = state.connectionUserID;
+          const pending = Boolean(manager && manager.hasPending()) || Boolean(
+            accountId && window.ArborCloudKitSync && window.ArborCloudKitSync.hasPendingArborSync(window.localStorage, accountId)
+          );
+          if (!target || !pending) return;
+          const proceed = window.confirm("Some Arbor changes have not synced to iCloud. Signing out clears the unsynced local Arbor copy on this browser. Sign out anyway?");
+          if (!proceed) {
+            event.preventDefault();
+            event.stopImmediatePropagation();
+          }
+        }, true);
+        state.arborSignOutGuardInstalled = true;
+      }
+      if (window.ArborCloudKitSync && typeof window.ArborCloudKitSync.createArborCloudKitTransport === "function") {
+        state.arborCloudKitTransport = window.ArborCloudKitSync.createArborCloudKitTransport({
+          containerIdentifier: config.containerIdentifier,
+          environment: config.environment || "development",
+          apiToken: token
+        });
+      }
       CloudKit.configure({
         locale: "en-us",
+        services: state.arborCloudKitTransport ? {
+          authTokenStore: state.arborCloudKitTransport.authTokenStore,
+          fetch: state.arborCloudKitTransport.fetch
+        } : undefined,
         containers: [{
           containerIdentifier: config.containerIdentifier,
           apiTokenAuth: {
@@ -6000,8 +6457,11 @@
       });
       state.container.whenUserSignsIn().then(function (identity) { connectUser(identity); });
       state.container.whenUserSignsOut().then(function () {
+        stopArborStateSync(true);
         const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts();
         const session = ++state.accountSession;
+        state.pendingArborDeletedNotes.clear();
+        document.dispatchEvent(new Event("arbor:account-change"));
         const undoClose = detachUndoHistory();
         // Wipe unsaved-edit drafts right away. The queued cache delete below also
         // calls clearDrafts, which is safe to run twice.
@@ -6068,9 +6528,11 @@
   }
 
   function demoNoteRecord(id, title, content, folderPath, daysAgo, hour) {
-    const modifiedAt = new Date();
+    const sampleNow = new Date();
+    const modifiedAt = new Date(sampleNow);
     modifiedAt.setDate(modifiedAt.getDate() - daysAgo);
     modifiedAt.setHours(hour, 43, 0, 0);
+    if (modifiedAt > sampleNow) modifiedAt.setTime(sampleNow.getTime());
     const createdAt = new Date(modifiedAt.getTime() - 45 * 60 * 1000);
     const body = title + "\n\n" + content;
     const filename = cleanFilenameStem(title) + ".md";
@@ -6098,8 +6560,78 @@
     };
   }
 
+  const LARGE_DEMO_NOTE_COUNT = 600;
+  const LARGE_DEMO_SPEAKERS = ["Mara Vale", "Amara Flores", "Micah Chen", "Jonah Reed", "Elena Park", "Ruth Ellis"];
+  const LARGE_DEMO_CONTEXTS = [
+    "an evening walk", "the commute home", "a quiet lunch break", "a conversation after a meeting", "rereading an older journal page",
+    "a Sunday discussion group", "the first week of a new routine", "a phone call with a friend", "a difficult decision at work", "a slower weekend morning",
+    "a question I heard from someone else", "the end of a busy month", "a draft I almost deleted", "a long drive across town", "a conversation I wanted to revisit",
+    "a day when I felt uncertain", "a small change in my plans", "a note I found while cleaning my desk", "a walk before breakfast", "a moment when I needed to ask for help",
+    "a family dinner", "the afternoon after a hard week", "a project review with the team", "a book I was reading slowly", "a quiet moment before bed"
+  ];
+  const LARGE_DEMO_TOPICS = [
+    { label: "Wisdom", folder: "Faith", first: "I used to think a wise choice was one I could defend with certainty.", next: "I am beginning to think careful action and honest questions can belong together.", quote: "Wisdom can leave room for a question while we take the next faithful step.", response: "I like that image, though I do not know yet when waiting becomes avoidance.", question: "When does asking for more certainty help, and when does it keep me from acting?", reference: "James 1:5" },
+    { label: "Jesus", folder: "Faith", first: "I want to notice what the story says before I decide what I expected it to say.", next: "Reading slowly leaves me with questions I had missed when I rushed to the application.", quote: "Stay with the details of the story before turning it into a lesson.", response: "I am trying to separate what I read from what I brought with me.", question: "Which part of the passage am I seeing clearly, and which part am I filling in?", reference: "Mark 4:35–41" },
+    { label: "Love", folder: "Faith", first: "I have sometimes treated love as agreement, even when I was unsure.", next: "I am trying to make room for care and honest disagreement in the same conversation.", quote: "A loving answer can be truthful without being hurried.", response: "I agree about taking time, but I do not want kindness to become a reason to avoid the truth.", question: "How can I disagree without reducing the other person to the disagreement?", reference: "1 Corinthians 13:4–7" },
+    { label: "Bible reading", folder: "Faith", first: "I often look for a sentence to carry away before I understand the whole passage.", next: "Context changed what I thought a familiar line was doing in the conversation.", quote: "Notice who is speaking, who is listening, and what happened just before this.", response: "That makes me want to read the surrounding chapter before writing a conclusion.", question: "What changes when I read this passage alongside its surrounding story?", reference: "Luke 10:38–42" },
+    { label: "Prayer", folder: "Faith", first: "Some days I wait for the right words before I begin to pray.", next: "A short, honest sentence felt more possible than trying to sound resolved.", quote: "Silence can be part of prayer; it does not have to be filled immediately.", response: "I want to remember this without turning it into a rule for every day.", question: "What am I able to say honestly right now, even if I have no conclusion?", reference: "Psalm 13" },
+    { label: "Service", folder: "Faith", first: "I have offered help before asking what would actually be useful.", next: "Asking first made it clearer whether to bring something, listen, or give space.", quote: "Let the person asking describe what help would mean to them.", response: "My eagerness to help can make me stop listening too soon.", question: "What might change if I ask one more question before I volunteer?", reference: "Mark 10:45" },
+    { label: "Courage", folder: "Faith", first: "I thought courage meant waiting until fear was gone.", next: "I said the difficult thing while still afraid, and I was able to stay kind.", quote: "Fear may still be present when someone chooses to act.", response: "I have heard that before, but I am not sure I live as if it is true.", question: "What is the next small step I could take without pretending to feel fearless?", reference: "Joshua 1:9" },
+    { label: "Patience", folder: "Faith", first: "I used to think patience meant staying quiet until the problem passed.", next: "I can wait thoughtfully and still name what needs to change.", quote: "Waiting is not always the same as refusing to act.", response: "I am still learning how to tell the difference in my own choices.", question: "What am I waiting for, and what would make waiting wise here?", reference: "James 5:7–8" },
+    { label: "Friendship", folder: "Relationships", first: "I have tried to be available every time a friend asked, even when I was worn out.", next: "A clear boundary made it easier for me to listen well when we did talk.", quote: "A dependable friendship can include an honest no and a real yes later.", response: "I still worry that a boundary will sound like rejection.", question: "How can I describe my limits while making the care in this friendship clear?", reference: null },
+    { label: "Listening", folder: "Relationships", first: "I often prepared my reply while the other person was still talking.", next: "Repeating what I heard changed the conversation more than giving quick advice.", quote: "Check what you understood before deciding what the other person needs.", response: "I noticed how often I had been answering a different question.", question: "What could I ask to make sure I understand before I respond?", reference: null },
+    { label: "Forgiveness", folder: "Relationships", first: "I have treated forgiveness as if it required pretending the hurt was small.", next: "I can name the harm honestly without deciding today what reconciliation requires.", quote: "Forgiveness and restored trust are related, but they are not the same decision.", response: "I want to remember that distinction before making promises for someone else.", question: "Which part of this situation is mine to decide, and which is not?", reference: null },
+    { label: "Family", folder: "Relationships", first: "I sometimes assume my family knows what I meant because they know me well.", next: "A direct question cleared up more than another round of guessing.", quote: "Familiarity does not always make an unspoken expectation clear.", response: "I want to ask plainly instead of testing whether someone notices.", question: "What am I expecting them to infer that I could say directly?", reference: null },
+    { label: "Grief", folder: "Relationships", first: "I expected grief to move forward in a straight line if I kept busy.", next: "A familiar song brought the loss back, and that did not erase the steadier days.", quote: "Missing someone can return without meaning that every earlier step disappeared.", response: "I felt relieved, though I do not want to turn that into a timetable.", question: "What kind of support feels useful today, without setting a deadline for grief?", reference: null },
+    { label: "Home", folder: "Personal", first: "I thought home was mostly about having a place where nothing could interrupt me.", next: "Some of my best evenings at home included someone else changing the plan.", quote: "A home can make room for people to arrive unfinished.", response: "I like that, though I also need quiet sometimes.", question: "What balance of company and quiet makes this place feel like home?", reference: null },
+    { label: "Leadership", folder: "Work", first: "I thought leading meant having an answer before the meeting began.", next: "I can lead by naming what we do not know and asking who has seen it directly.", quote: "Make room for the people closest to the evidence.", response: "That sounds right, but I still feel pressure to be decisive.", question: "What do I know firsthand, and what should I ask the team to clarify?", reference: null },
+    { label: "Ambition", folder: "Work", first: "I thought ambition meant always choosing the larger opportunity.", next: "I turned one opportunity down to keep doing work I value.", quote: "Growth can include deciding what not to pursue.", response: "That gave me permission to ask what I want the work to make possible.", question: "What am I hoping this opportunity will make possible, and what might it cost?", reference: null },
+    { label: "Collaboration", folder: "Work", first: "I assumed a good teammate would notice where I needed help.", next: "Naming the stuck point gave the team something concrete to solve together.", quote: "Make the work visible early enough for someone else to contribute.", response: "I had waited until I felt behind before saying anything.", question: "What part of this work could I share before it becomes urgent?", reference: null },
+    { label: "Money", folder: "Work", first: "I thought a careful budget meant avoiding every surprise.", next: "Planning for what matters helped more than trying to predict every expense.", quote: "A budget should leave room for the life it is meant to support.", response: "I still want a safety margin, but I do not want fear to make every choice.", question: "What is this plan meant to support, beyond avoiding mistakes?", reference: null },
+    { label: "Creativity", folder: "Learning", first: "I kept waiting for a clear idea before starting the draft.", next: "The first rough page often showed me what the idea actually was.", quote: "Make a small version before deciding what it means.", response: "I had treated the blank page like a test instead of a place to find out.", question: "What could I make in ten minutes that would help me learn what I think?", reference: null },
+    { label: "Attention", folder: "Learning", first: "I kept telling myself I could listen while checking messages.", next: "When I put the phone away, I remembered more of what my friend said.", quote: "Attention can show another person that what they say matters.", response: "I want to notice whether I am present before I promise to help.", question: "What is pulling my attention away from the person or task in front of me?", reference: null },
+    { label: "Discipline", folder: "Learning", first: "I treated discipline as following the exact schedule I made on Sunday.", next: "A smaller practice I can return to after a hard week is more useful than a perfect plan I abandon.", quote: "A routine should survive an ordinary difficult day.", response: "I want consistency, but I do not want to punish myself for being tired.", question: "What is the smallest version of this practice I can return to tomorrow?", reference: null },
+    { label: "Failure", folder: "Learning", first: "I took the missed deadline as proof I was not suited for this work.", next: "The miss showed me where the plan was unrealistic, not what I can do forever.", quote: "A failed attempt describes an attempt, not a whole person.", response: "I want to believe that when I look at the unfinished project.", question: "What did this attempt teach me about the plan, without deciding everything about me?", reference: null },
+    { label: "Curiosity", folder: "Learning", first: "I sometimes avoid basic questions because I think I should already know the answer.", next: "Asking the question showed that several people had made the same assumption.", quote: "A useful question can reveal where an explanation stopped working.", response: "I want to remember that before I mistake silence for understanding.", question: "What assumption could I check by asking the simple version of the question?", reference: null }
+  ];
+
+  function largeDemoNoteContent(topic, variant, speaker) {
+    const context = LARGE_DEMO_CONTEXTS[variant % LARGE_DEMO_CONTEXTS.length];
+    switch (variant % 5) {
+      case 0:
+        return "## Personal reflection\n" + topic.first + "\n\nI wrote this after " + context + ". I am keeping it because I want to see whether my answer changes as I live with the question. This is one moment in a longer story, not a final position.";
+      case 1:
+        return "## Talk notes\nSpeaker: " + speaker + "\nContext: " + context + ".\n\n“" + topic.quote + "”\n\n## My response\n" + topic.response + " This is what I wrote down afterward; the speaker's words and my response are separate.";
+      case 2:
+        return "## Returning to " + topic.label.toLowerCase() + "\n" + topic.next + "\n\nThis came back to me after " + context + ". I am comparing it with an earlier note rather than assuming that one sentence settles the subject. I may still change my mind.";
+      case 3:
+        return "## Open question\n" + topic.question + "\n\nI wrote this question after " + context + ". I do not have a settled answer yet. I want to keep the uncertainty visible instead of turning this question into a belief I have not claimed.";
+      default:
+        return "## Reading reference\n" + (topic.reference ? "Reference only: " + topic.reference + ". No verse text is copied into this note." : "Reading note for " + topic.label.toLowerCase() + ".") + "\n\nI saved this pointer after " + context + ". It does not record what the source says or claim that I agree with it.";
+    }
+  }
+
+  function createLargeDemoNotes(existingCount) {
+    const notes = [];
+    const generatedCount = Math.max(0, LARGE_DEMO_NOTE_COUNT - existingCount);
+    for (let index = 0; index < generatedCount; index += 1) {
+      const topicIndex = index % LARGE_DEMO_TOPICS.length;
+      const topic = LARGE_DEMO_TOPICS[topicIndex];
+      const variant = Math.floor(index / LARGE_DEMO_TOPICS.length);
+      const kind = ["reflection", "talk notes", "returning note", "open question", "reading reference"][variant % 5];
+      const ordinal = String(variant + 1).padStart(2, "0");
+      const title = topic.label + " — " + kind + " " + ordinal;
+      const daysAgo = (index * 17 + topicIndex * 31) % 1460;
+      const hour = (index * 7 + topicIndex * 3) % 24;
+      const speaker = LARGE_DEMO_SPEAKERS[(topicIndex + variant) % LARGE_DEMO_SPEAKERS.length];
+      notes.push(demoNoteRecord(existingCount + index + 1, title, largeDemoNoteContent(topic, variant, speaker), topic.folder, daysAgo, hour));
+    }
+    return notes;
+  }
+
   function initializeDemo() {
     state.demo = true;
+    state.largeDemo = largeDemoMode;
     state.dictionaryEntries = [];
     state.dictionaryPending = [];
     state.dictionarySyncStatus = "Preview only; dictionary changes are not synced.";
@@ -6138,16 +6670,29 @@
       demoNoteRecord(3, "An Analysis on Ed Sheeran’s Composition", "A sample research note with a short observation and a few supporting points.\n\n## Observation\nSmall changes in rhythm and repetition can make a chorus feel familiar before the listener notices why.\n\n## Listen for\n- Repeated melodic shapes\n- Contrast between verse and chorus\n- How the arrangement builds over time", "Home/Projects", 6, 11),
       demoNoteRecord(4, "How the Apple Computer Changed the World", "A sample history note saved in a project folder.\n\nThe personal computer moved from specialist equipment into homes, schools, and creative work. Its biggest change was not a single machine, but making computing feel ordinary and useful.", "Home/Projects", 18, 9)
     ];
+    if (largeDemoMode) {
+      ["Faith", "Relationships", "Learning", "Reading"].forEach(function (path, index) {
+        const existing = Array.from(state.records.values()).some(function (record) { return fieldValue(record, "relativePath") === path; });
+        if (!existing) {
+          const record = demoFolderRecord(path, index + 5);
+          state.records.set(record.recordName, record);
+        }
+      });
+      sampleNotes.push.apply(sampleNotes, createLargeDemoNotes(sampleNotes.length));
+    }
     sampleNotes.forEach(function (record) { state.records.set(record.recordName, record); });
 
-    state.selectedFolder = "Home/Projects";
+    state.selectedFolder = largeDemoMode ? "" : "Home/Projects";
     syncDerivedCollections();
     showApp();
     const authButtons = document.querySelector(".auth-buttons");
     if (authButtons) authButtons.hidden = true;
     const badge = $("demo-badge");
-    if (badge) badge.hidden = false;
-    setConnection("Sample data · resets on reload", false);
+    if (badge) {
+      badge.hidden = false;
+      badge.textContent = largeDemoMode ? LARGE_DEMO_NOTE_COUNT + " fictional notes · resets on reload" : "Sample data · resets on reload";
+    }
+    setConnection(largeDemoMode ? LARGE_DEMO_NOTE_COUNT + " fictional notes · resets on reload" : "Sample data · resets on reload", false);
     renderAll();
     const first = noteSorting.sortNotes(state.notes.filter(function (note) { return !isArchived(note.record); }), state.preferences.noteSortOrder)[0];
     const restoredState = restoreOpenTabsForLoadedNotes();
@@ -6386,6 +6931,7 @@
     note.body = draft.body;
     note.editorBody = draft.body;
     note.preview = previewText(draft.body);
+    advanceSemanticRevision(note);
     $("note-title").value = title === "Untitled" ? "" : title;
     fitTitle();
     if (state.editor) { state.editor.destroy(); state.editor = null; }
@@ -6419,6 +6965,7 @@
       note.body = baseline.body;
       note.editorBody = baseline.editorBody;
       note.preview = previewText(baseline.editorBody);
+      advanceSemanticRevision(note);
     }
     const title = normalizedTitle(baseline.title);
     $("note-title").value = title === "Untitled" ? "" : baseline.title;
@@ -6472,6 +7019,7 @@
       note.body = currentEditorBodyMarkdown();
       note.editorBody = note.body;
       note.preview = previewText(note.body);
+      advanceSemanticRevision(note);
     }
     persistCurrentDraft();
     setSaveState("Unsaved", "dirty");
@@ -8747,15 +9295,42 @@
       event.returnValue = "";
     });
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState !== "hidden") return;
-      persistCurrentDraft();
-      if (state.dirty) flushSave().catch(function () {});
+      if (document.visibilityState === "hidden") {
+        pauseSemanticWorkerForHiddenTab();
+        persistCurrentDraft();
+        if (state.dirty) flushSave().catch(function () {});
+        return;
+      }
+      const searchIsOpen = state.searchPage || $("search-dialog").open;
+      const input = $(state.searchPage ? "expanded-search-input" : "global-search-input");
+      const query = input && input.value || state.searchQuery || "";
+      if (searchIsOpen && query.trim().length >= 2 && !state.semanticWorkerUnavailable) requestSemanticSearch(query);
     });
     window.addEventListener("pagehide", function () {
       persistCurrentDraft();
       if (state.dirty) flushSave().catch(function () {});
     });
     $("search-nav-button").addEventListener("click", function () { openExpandedSearch(""); });
+    document.addEventListener("input", noteSemanticActivity, true);
+    document.addEventListener("scroll", noteSemanticActivity, true);
+    window.addEventListener("arbor:semantic-index-reset", function () {
+      stopSemanticWorker();
+      const input = $(state.searchPage ? "expanded-search-input" : "global-search-input");
+      const query = String(input && input.value || state.searchQuery || "").trim();
+      state.semanticRequestedQuery = query.toLocaleLowerCase();
+      state.semanticSearchQuery = "";
+      state.semanticLoadingQuery = "";
+      state.semanticErrorQuery = "";
+      state.semanticProgress = null;
+      state.semanticQueryVector = null;
+      state.semanticScores = new Map();
+      state.semanticPassages = new Map();
+      state.semanticResultRevisions = new Map();
+      state.semanticPendingNoteIds = new Set();
+      state.semanticCurrentRequest = null;
+      if (state.searchPage) renderSearchPage();
+      else if ($("search-dialog").open) renderSearchSuggestions(query);
+    });
     $("search-page-new-note").addEventListener("click", openCapture);
     $("capture-form").addEventListener("submit", function (event) { event.preventDefault(); commitCapture(); });
     $("capture-input").addEventListener("input", resizeCaptureInput);
@@ -9067,9 +9642,69 @@
     $("search-dialog").inert = false;
   }
 
+  function getArborContext() {
+    const userRecordName = state.user && state.user.userRecordName ? String(state.user.userRecordName).trim() : "";
+    const accountId = state.demo ? "sample-preview" : userRecordName;
+    const ready = Boolean(accountId && (state.demo || (state.database && !state.accountCacheSuspended)));
+    const notes = state.notes.map(function (note) {
+      const fieldBody = state.nativeSchema ? fieldValue(note.record, "text") : note.editorBody;
+      const cachedBody = state.bodyCache.get(note.recordName);
+      const canonicalBody = typeof fieldBody === "string" ? fieldBody : (typeof cachedBody === "string" ? cachedBody : "");
+      const bodyAvailable = typeof fieldBody === "string" || typeof cachedBody === "string";
+      const bodyHasUnsavedChanges = state.selectedRecordName === note.recordName && state.dirty;
+      return {
+        noteId: note.recordName,
+        recordName: note.recordName,
+        title: note.title,
+        body: canonicalBody,
+        bodyAvailable: bodyAvailable && !bodyHasUnsavedChanges,
+        createdAt: note.createdAt,
+        modifiedAt: note.modifiedAt,
+        archived: isArchived(note.record),
+        path: note.path
+      };
+    });
+    return {
+      accountId: accountId,
+      session: state.accountSession,
+      ready: ready,
+      demo: state.demo,
+      notes: notes
+    };
+  }
+
+  function notifyArborNoteDeleted(recordName) {
+    const context = getArborContext();
+    if (!context.ready || !context.accountId) return;
+    state.pendingArborDeletedNotes.set(recordName, { accountId: context.accountId, session: context.session });
+    document.dispatchEvent(new CustomEvent("arbor:note-deleted", {
+      detail: { noteId: recordName, context: { accountId: context.accountId, session: context.session } }
+    }));
+  }
+
+  function takePendingArborDeletedNotes() {
+    const pending = Array.from(state.pendingArborDeletedNotes, function (entry) {
+      return { noteId: entry[0], context: entry[1] };
+    });
+    state.pendingArborDeletedNotes.clear();
+    return pending;
+  }
+
+  function showArborStatus(message) {
+    showToast(String(message || ""), false);
+  }
+
   window.arborWeb = {
     clearDrafts: clearDrafts,
     prepareForShellUpdate: prepareForShellUpdate,
-    cancelShellUpdatePreparation: cancelShellUpdatePreparation
+    cancelShellUpdatePreparation: cancelShellUpdatePreparation,
+    getArborContext: getArborContext,
+    getArborStateStore: getArborStateStore,
+    getArborSyncStatus: function () { return state.arborSyncStatus; },
+    syncArborState: function () { return state.arborStateSync ? state.arborStateSync.sync() : Promise.resolve(false); },
+    openNote: function (recordName) { return openNote(recordName); },
+    openPassage: openArborPassage,
+    getPendingDeletedNoteRedactions: takePendingArborDeletedNotes,
+    showArborStatus: showArborStatus
   };
 })();

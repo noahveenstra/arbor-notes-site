@@ -34,6 +34,7 @@
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-130-signed-out-welcome-20261122-a">
   <link rel="stylesheet" href="./ui.css?v=arb-177-static-autocorrect-highlight-20261124-b">
+  <link rel="stylesheet" href="./arbor-view.css?v=arb-178-history-diff-4">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261120-d"></script>
@@ -49,7 +50,7 @@
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
   <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
-  <script src="./app-bootstrap.js?v=arb-148-live-sync-20261123-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-178-sync-20261124-5f720d7" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -88,6 +89,10 @@
           <svg class="search-nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.7"></circle><path d="m13 13 4 4"></path></svg>
           <span>Search</span>
         </button>
+        <button class="all-notes-link arbor-nav-button nav-row" id="arbor-view-open" type="button" aria-label="Open Arbors" title="Arbors" aria-expanded="false" aria-controls="arbor-view-panel">
+          <svg class="arbor-nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 17V8M10 12c-3.8 0-5.4-2-5.4-4.8C7.9 7.2 10 8.8 10 12Zm0-2.2c0-3.1 1.8-5.1 5.3-5.3 0 3.2-1.8 5.3-5.3 5.3Z"></path></svg>
+          <span>Arbors</span>
+        </button>
 
         <div class="section-label-row folders-heading">
           <span>Folders</span>
@@ -103,6 +108,17 @@
         <button class="settings-link" id="settings-open" type="button" title="Settings"><span>Settings</span></button>
       </div>
     </aside>
+    <section class="arbor-view-panel" id="arbor-view-panel" aria-label="Arbors" aria-hidden="true" inert hidden>
+      <aside class="arbor-view-navigation" data-arbor-nav aria-label="Arbor paths"></aside>
+      <div class="arbor-view-reading-area">
+        <header class="arbor-view-header">
+          <div class="arbor-view-breadcrumb"><span>Library</span><span aria-hidden="true">/</span><strong data-arbor-title>Arbors</strong></div>
+          <button type="button" class="arbor-view-close" data-action="close" aria-label="Back to notes" title="Back to notes">×</button>
+        </header>
+        <main class="arbor-view-content" data-arbor-content tabindex="-1" aria-live="polite" aria-atomic="true"></main>
+        <div class="arbor-view-status" data-arbor-status role="status" aria-live="polite" aria-atomic="true"></div>
+      </div>
+    </section>
     <div class="pane-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize folders sidebar" aria-valuemin="150" aria-valuemax="360" aria-valuenow="195" tabindex="0"></div>
 
     <section class="list-panel" id="list-panel" aria-labelledby="list-heading">

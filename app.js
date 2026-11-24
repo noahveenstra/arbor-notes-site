@@ -3755,205 +3755,107 @@
     };
   }
 
-  const CORRECTION_GLYPH_DURATION_MS = 90;
-  const CORRECTION_GLYPH_STAGGER_MS = 57.5;
+  const CORRECTION_HIGHLIGHT_DURATION_MS = 3000;
+  const CORRECTION_HIGHLIGHT_FADE_MS = 250;
+  const automaticCorrectionHighlights = new WeakMap();
 
-  function correctionAnimationSequence(before, after) {
-    const oldCharacters = Array.from(before);
-    const newCharacters = Array.from(after);
-    const rows = oldCharacters.length + 1;
-    const columns = newCharacters.length + 1;
-    const costs = Array.from({ length: rows }, function () { return new Uint16Array(columns); });
-    for (let oldIndex = oldCharacters.length; oldIndex >= 0; oldIndex -= 1) costs[oldIndex][newCharacters.length] = oldCharacters.length - oldIndex;
-    for (let newIndex = newCharacters.length; newIndex >= 0; newIndex -= 1) costs[oldCharacters.length][newIndex] = newCharacters.length - newIndex;
-    for (let oldIndex = oldCharacters.length - 1; oldIndex >= 0; oldIndex -= 1) {
-      for (let newIndex = newCharacters.length - 1; newIndex >= 0; newIndex -= 1) {
-        costs[oldIndex][newIndex] = oldCharacters[oldIndex] === newCharacters[newIndex]
-          ? costs[oldIndex + 1][newIndex + 1]
-          : 1 + Math.min(costs[oldIndex + 1][newIndex + 1], costs[oldIndex + 1][newIndex], costs[oldIndex][newIndex + 1]);
-      }
-    }
-    const steps = [];
-    let oldIndex = 0;
-    let newIndex = 0;
-    while (oldIndex < oldCharacters.length && newIndex < newCharacters.length) {
-      if (oldCharacters[oldIndex] === newCharacters[newIndex]) {
-        steps.push({ oldIndex: oldIndex, newIndex: newIndex });
-        oldIndex += 1;
-        newIndex += 1;
-        continue;
-      }
-      const replaceCost = 1 + costs[oldIndex + 1][newIndex + 1];
-      const removeCost = 1 + costs[oldIndex + 1][newIndex];
-      const insertCost = 1 + costs[oldIndex][newIndex + 1];
-      const bestCost = costs[oldIndex][newIndex];
-      if (replaceCost === bestCost) {
-        steps.push({ oldIndex: oldIndex, newIndex: newIndex });
-        oldIndex += 1;
-        newIndex += 1;
-      } else if (insertCost === bestCost && (removeCost !== bestCost || costs[oldIndex][newIndex + 1] <= costs[oldIndex + 1][newIndex])) {
-        steps.push({ newIndex: newIndex });
-        newIndex += 1;
-      } else {
-        steps.push({ oldIndex: oldIndex });
-        oldIndex += 1;
-      }
-    }
-    while (oldIndex < oldCharacters.length) { steps.push({ oldIndex: oldIndex }); oldIndex += 1; }
-    while (newIndex < newCharacters.length) { steps.push({ newIndex: newIndex }); newIndex += 1; }
-    return {
-      oldCharacters: oldCharacters,
-      newCharacters: newCharacters,
-      steps: steps
-    };
-  }
-
-  function correctionGlyphRects(source, characterCount) {
-    if (!source || !characterCount) return [];
-    const nodes = [];
-    const sourceRange = source && source.startContainer ? source : null;
-    const sourceRoot = sourceRange ? sourceRange.commonAncestorContainer : source;
-    if (sourceRoot.nodeType === Node.TEXT_NODE) nodes.push(sourceRoot);
-    else {
-      const walker = document.createTreeWalker(sourceRoot, NodeFilter.SHOW_TEXT);
-      while (walker.nextNode()) nodes.push(walker.currentNode);
-    }
-    const rects = [];
-    nodes.forEach(function (node) {
-      let offset = 0;
-      for (const character of Array.from(node.nodeValue || "")) {
-        if (rects.length >= characterCount) return;
-        const charEnd = offset + character.length;
-        if (sourceRange && node === sourceRange.startContainer && charEnd <= sourceRange.startOffset) { offset = charEnd; continue; }
-        if (sourceRange && node === sourceRange.endContainer && offset >= sourceRange.endOffset) break;
-        const range = document.createRange();
-        range.setStart(node, offset);
-        range.setEnd(node, charEnd);
-        const rect = range.getBoundingClientRect();
-        rects.push({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
-        offset = charEnd;
-      }
-    });
-    return rects;
-  }
-
-  function animatedCorrectionReplacement(original, replacement, source) {
-    const sequence = correctionAnimationSequence(String(original || ""), String(replacement || ""));
-    const oldRects = correctionGlyphRects(source, sequence.oldCharacters.length);
-    const oldStepByIndex = new Map();
-    const newStepByIndex = new Map();
-    sequence.steps.forEach(function (step, stepIndex) {
-      if (step.oldIndex !== undefined) oldStepByIndex.set(step.oldIndex, stepIndex);
-      if (step.newIndex !== undefined) newStepByIndex.set(step.newIndex, stepIndex);
-    });
-    const prefersReducedMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const glyphDuration = prefersReducedMotion ? 0 : CORRECTION_GLYPH_DURATION_MS;
-    const glyphStagger = prefersReducedMotion ? 0 : CORRECTION_GLYPH_STAGGER_MS;
-    const totalDuration = sequence.steps.length
-      ? glyphDuration + Math.max(0, sequence.steps.length - 1) * glyphStagger
-      : 0;
+  function createCorrectionHighlight(replacement, reversibleCorrection) {
     const wrapper = document.createElement("span");
-    wrapper.className = "correction-applied-highlight";
+    wrapper.className = reversibleCorrection
+      ? "correction-applied-highlight is-reversible" : "correction-applied-highlight";
     wrapper.setAttribute("data-proofreading-ignore", "");
-    const incoming = [];
-    if (prefersReducedMotion) {
-      wrapper.appendChild(document.createTextNode(sequence.newCharacters.join("")));
-    } else {
-      sequence.newCharacters.forEach(function (character, index) {
-        const glyph = document.createElement("span");
-        glyph.className = "correction-glyph-in";
-        glyph.dataset.correctionIndex = String(index);
-        glyph.dataset.correctionStep = String(newStepByIndex.get(index) || 0);
-        glyph.style.setProperty("--correction-glyph-delay", (newStepByIndex.get(index) || 0) * glyphStagger + "ms");
-        glyph.style.setProperty("--correction-glyph-duration", glyphDuration + "ms");
-        glyph.textContent = character;
-        incoming.push(glyph);
-        wrapper.appendChild(glyph);
-      });
-    }
-    return {
-      wrapper: wrapper,
-      incoming: incoming,
-      removed: prefersReducedMotion ? [] : sequence.oldCharacters.map(function (character, index) {
-        const step = oldStepByIndex.get(index) || 0;
-        return {
-          rect: oldRects[index],
-          character: character,
-          index: index,
-          step: step,
-          delay: step * glyphStagger,
-          duration: glyphDuration
-        };
-      }).filter(function (item) { return item.rect && item.rect.width > 0 && item.rect.height > 0; }),
-      stepCount: sequence.steps.length,
-      totalDuration: totalDuration
-    };
-  }
-
-  function correctionGlyphOverlayLayer() {
-    let layer = document.getElementById("correction-glyph-layer");
-    if (layer) return layer;
-    layer = document.createElement("div");
-    layer.id = "correction-glyph-layer";
-    layer.setAttribute("aria-hidden", "true");
-    document.documentElement.appendChild(layer);
-    return layer;
-  }
-
-  function finishCorrectionAnimation(body, animation) {
-    if (!animation || !animation.wrapper) return;
-    const editorStyle = getComputedStyle(body);
-    const editorZoom = Math.max(0.01, parseFloat(getComputedStyle(document.body).zoom) || 1);
-    const overlayLayer = animation.removed.length ? correctionGlyphOverlayLayer() : null;
-    const overlays = animation.removed.map(function (item) {
-      const rect = item.rect;
-      const glyph = document.createElement("span");
-      glyph.className = "correction-glyph-out";
-      glyph.setAttribute("aria-hidden", "true");
-      glyph.dataset.correctionIndex = String(item.index);
-      glyph.dataset.correctionStep = String(item.step);
-      glyph.textContent = item.character;
-      glyph.style.left = rect.left + "px";
-      glyph.style.top = rect.top + "px";
-      glyph.style.width = Math.max(rect.width, 2) + "px";
-      glyph.style.height = rect.height + "px";
-      glyph.style.font = editorStyle.font;
-      glyph.style.fontSize = (parseFloat(editorStyle.fontSize) * editorZoom) + "px";
-      glyph.style.lineHeight = rect.height + "px";
-      glyph.style.color = editorStyle.color;
-      glyph.style.setProperty("--correction-glyph-delay", item.delay + "ms");
-      glyph.style.setProperty("--correction-glyph-duration", item.duration + "ms");
-      overlayLayer.appendChild(glyph);
-      return glyph;
+    wrapper.textContent = String(replacement == null ? "" : replacement);
+    if (reversibleCorrection) automaticCorrectionHighlights.set(wrapper, {
+      original: String(reversibleCorrection.original || ""),
+      replacement: String(replacement == null ? "" : replacement),
+      recordName: reversibleCorrection.recordName,
+      clearTimer: null,
+      removeTimer: null
     });
-    window.setTimeout(function () {
-      if (animation.wrapper.isConnected) {
+    return wrapper;
+  }
+
+  function correctionClickTextOffset(wrapper, event) {
+    const text = wrapper && wrapper.firstChild;
+    if (!text || text.nodeType !== Node.TEXT_NODE) return 0;
+    let point = null;
+    if (typeof document.caretPositionFromPoint === "function") {
+      const position = document.caretPositionFromPoint(event.clientX, event.clientY);
+      if (position && wrapper.contains(position.offsetNode)) point = { node: position.offsetNode, offset: position.offset };
+    } else if (typeof document.caretRangeFromPoint === "function") {
+      const range = document.caretRangeFromPoint(event.clientX, event.clientY);
+      if (range && wrapper.contains(range.startContainer)) point = { node: range.startContainer, offset: range.startOffset };
+    }
+    if (!point) return 0;
+    if (point.node === text) return Math.max(0, Math.min(point.offset, text.length));
+    return point.node === wrapper && point.offset > 0 ? text.length : 0;
+  }
+
+  function correctionSelectionAtBlockOffset(block, offset) {
+    const point = editorPointAtTextOffset(block, offset);
+    const selection = window.getSelection();
+    if (!point || !selection) return false;
+    try {
+      const range = document.createRange();
+      range.setStart(point.node, point.offset);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    } catch (_) { return false; }
+  }
+
+  function revertAutomaticCorrection(body, wrapper, event) {
+    const correction = automaticCorrectionHighlights.get(wrapper);
+    if (!correction || !wrapper.isConnected || correction.recordName !== state.selectedRecordName ||
+        wrapper.textContent !== correction.replacement) return false;
+    const block = editorBlockForNode(body, wrapper);
+    if (!block) return false;
+    const prefixOffset = editorTextOffset(block, wrapper, 0);
+    if (prefixOffset == null) return false;
+    const clickedOffset = correctionClickTextOffset(wrapper, event);
+    window.clearTimeout(correction.clearTimer);
+    window.clearTimeout(correction.removeTimer);
+    automaticCorrectionHighlights.delete(wrapper);
+    wrapper.replaceWith(document.createTextNode(correction.original));
+    block.normalize();
+    body.focus({ preventScroll: true });
+    correctionSelectionAtBlockOffset(block, prefixOffset + Math.min(clickedOffset, correction.original.length));
+    announceStatus("Restored “" + correction.replacement + "” to “" + correction.original + "”.");
+    body.dispatchEvent(new InputEvent("input", {
+      bubbles: true,
+      inputType: "insertReplacementText",
+      data: correction.original
+    }));
+    return true;
+  }
+
+  function finishCorrectionHighlight(body, wrapper, options) {
+    if (!wrapper || !wrapper.isConnected) return;
+    const opts = options || {};
+    const correction = automaticCorrectionHighlights.get(wrapper);
+    const beginFade = function () {
+      if (!wrapper.isConnected) return;
+      wrapper.classList.add("is-clearing");
+      const removeHighlight = function () {
+        if (!wrapper.isConnected) return;
         const saved = captureCorrectionSelection(body);
-        animation.incoming.forEach(function (glyph) {
-          if (glyph.isConnected) glyph.replaceWith(document.createTextNode(glyph.textContent || ""));
-        });
-        animation.wrapper.normalize();
-        animation.wrapper.removeAttribute("data-proofreading-ignore");
-        const parent = animation.wrapper.parentNode;
+        const parent = wrapper.parentNode;
+        const proofreadingContext = opts.proofreadingContextWrapper;
+        if (proofreadingContext && proofreadingContext.isConnected) {
+          proofreadingContext.replaceWith.apply(proofreadingContext, Array.from(proofreadingContext.childNodes));
+        }
+        wrapper.replaceWith.apply(wrapper, Array.from(wrapper.childNodes));
         if (parent) parent.normalize();
         if (saved) restoreCorrectionSelection(body, saved);
-      }
-      overlays.forEach(function (glyph) { glyph.remove(); });
-      if (overlayLayer && !overlayLayer.childElementCount) overlayLayer.remove();
-    }, animation.totalDuration + 24);
-    window.setTimeout(function () {
-      if (!animation.wrapper.isConnected) return;
-      const saved = captureCorrectionSelection(body);
-      const parent = animation.wrapper.parentNode;
-      const proofreadingContext = animation.proofreadingContextWrapper;
-      if (proofreadingContext && proofreadingContext.isConnected) {
-        proofreadingContext.replaceWith.apply(proofreadingContext, Array.from(proofreadingContext.childNodes));
-      }
-      animation.wrapper.replaceWith.apply(animation.wrapper, Array.from(animation.wrapper.childNodes));
-      if (parent) parent.normalize();
-      if (saved) restoreCorrectionSelection(body, saved);
-      if (animation.recheckProofreading) scheduleProofreading(body, 0);
-    }, Math.max(1000, animation.totalDuration + 120));
+        automaticCorrectionHighlights.delete(wrapper);
+        if (opts.recheckProofreading) scheduleProofreading(body, 0);
+      };
+      const removeTimer = window.setTimeout(removeHighlight, CORRECTION_HIGHLIGHT_FADE_MS);
+      if (correction) correction.removeTimer = removeTimer;
+    };
+    const clearTimer = window.setTimeout(beginFade, CORRECTION_HIGHLIGHT_DURATION_MS);
+    if (correction) correction.clearTimer = clearTimer;
   }
 
   function applyAutomaticCorrection(body, target, correction) {
@@ -3975,13 +3877,13 @@
     const replacement = String(correction.replacement);
     const prefix = node.nodeValue.slice(0, target.start);
     const suffix = node.nodeValue.slice(target.end);
-    const originalRange = document.createRange();
-    originalRange.setStart(node, target.start);
-    originalRange.setEnd(node, target.end);
-    const animation = animatedCorrectionReplacement(target.word, replacement, originalRange);
+    const highlight = createCorrectionHighlight(replacement, {
+      original: target.word,
+      recordName: state.selectedRecordName
+    });
     const fragment = document.createDocumentFragment();
     if (prefix) fragment.appendChild(document.createTextNode(prefix));
-    fragment.appendChild(animation.wrapper);
+    fragment.appendChild(highlight);
     let suffixNode = null;
     if (suffix) { suffixNode = document.createTextNode(suffix); fragment.appendChild(suffixNode); }
     node.replaceWith(fragment);
@@ -4001,12 +3903,12 @@
     } else {
       const range = document.createRange();
       if (suffixNode) range.setStart(suffixNode, Math.min(target.caret - target.end, suffixNode.length));
-      else range.selectNodeContents(animation.wrapper);
+      else range.selectNodeContents(highlight);
       range.collapse(true);
       selection.removeAllRanges();
       selection.addRange(range);
     }
-    finishCorrectionAnimation(body, animation);
+    finishCorrectionHighlight(body, highlight);
     state.autoCorrectionApplying = true;
     announceStatus("Auto-corrected " + target.word + " to " + replacement + ". Undo is available.");
     body.dispatchEvent(new InputEvent("input", {
@@ -4484,8 +4386,16 @@
   }
 
   function onCorrectionClick(event) {
-    const mark = correctionMarkFromEvent(event);
     const body = $("note-body");
+    const appliedHighlight = event.target && event.target.closest
+      ? event.target.closest(".correction-applied-highlight") : null;
+    if (body && appliedHighlight && body.contains(appliedHighlight) && event.detail > 0 &&
+        revertAutomaticCorrection(body, appliedHighlight, event)) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const mark = correctionMarkFromEvent(event);
     let entry = mark && state.proofreadingCorrections && state.proofreadingCorrections.get(mark.dataset.correctionId);
     const pointerType = event.pointerType || state.proofreadingLastPointerType;
     if (!entry && body && event.detail > 0) entry = capitalizationCorrectionFromEvent(body, event);
@@ -4878,7 +4788,7 @@
     const marker = entry.marker;
     const body = $("note-body");
     const parent = marker.parentNode;
-    let animation = null;
+    let highlight = null;
     closeCorrectionPopover(false);
     if (option.action === "remove-duplicate") {
       const before = marker.previousSibling;
@@ -4891,7 +4801,7 @@
       }
     } else {
       const replacementText = String(option.replacement == null ? option.label : option.replacement);
-      animation = animatedCorrectionReplacement(marker.textContent || "", replacementText, marker);
+      highlight = createCorrectionHighlight(replacementText);
       if (entry.kind === "capitalization") {
         const following = marker.nextSibling;
         if (following && following.nodeType === Node.TEXT_NODE && following.nodeValue.trim()) {
@@ -4899,12 +4809,12 @@
           contextWrapper.setAttribute("data-proofreading-ignore", "");
           following.replaceWith(contextWrapper);
           contextWrapper.appendChild(following);
-          animation.proofreadingContextWrapper = contextWrapper;
-          animation.recheckProofreading = true;
+          highlight.proofreadingContextWrapper = contextWrapper;
+          highlight.recheckProofreading = true;
         }
       }
-      marker.replaceWith(animation.wrapper);
-      const range = document.createRange(); range.selectNodeContents(animation.wrapper); range.collapse(false);
+      marker.replaceWith(highlight);
+      const range = document.createRange(); range.selectNodeContents(highlight); range.collapse(false);
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
     }
     body.focus({ preventScroll: true });
@@ -4913,8 +4823,11 @@
       inputType: option.action === "remove-duplicate" ? "deleteContentBackward" : "insertReplacementText",
       data: option.action === "remove-duplicate" ? null : String(option.replacement == null ? option.label : option.replacement)
     }));
-    if (animation) finishCorrectionAnimation(body, animation);
-    scheduleProofreading(body, animation ? 280 : 0);
+    if (highlight) finishCorrectionHighlight(body, highlight, {
+      proofreadingContextWrapper: highlight.proofreadingContextWrapper,
+      recheckProofreading: highlight.recheckProofreading
+    });
+    scheduleProofreading(body, highlight ? 280 : 0);
   }
 
   function ignoreCorrectionOccurrence() {

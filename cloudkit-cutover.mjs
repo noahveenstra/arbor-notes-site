@@ -1,4 +1,4 @@
-import { CloudKitEncryptedWebServices, createCloudKitAuthTransport } from "./cloudkit-encrypted-web-services.mjs?v=arb-23-cloudkit-cutover-20261124-a";
+import { CloudKitEncryptedWebServices, createCloudKitAuthTransport } from "./cloudkit-encrypted-web-services.mjs?v=arb-auth-cookie-20261124-a";
 import { copyPrivateLibraryMigrationPlan, planPrivateLibraryMigration } from "./cloudkit-library-migration.mjs?v=arb-23-cloudkit-cutover-20261124-a";
 
 const config = globalThis.ARBOR_CLOUDKIT_CONFIG || {};

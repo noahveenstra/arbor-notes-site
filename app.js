@@ -1022,7 +1022,7 @@
     screen.dataset.state = "checking";
     $("setup-screen").hidden = true;
     $("welcome-status").hidden = false;
-    $("welcome-status").textContent = "Checking your Apple Account…";
+    $("welcome-status").textContent = "Restoring Arbor’s iCloud session…";
     $("welcome-auth").hidden = true;
     $("welcome-retry").hidden = true;
     frame.hidden = true;
@@ -1045,7 +1045,7 @@
     screen.dataset.state = "error";
     $("setup-screen").hidden = true;
     $("welcome-status").hidden = false;
-    $("welcome-status").textContent = "Arbor couldn’t check your Apple Account. Check your connection, then reload.";
+    $("welcome-status").textContent = "Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple; reload Arbor to retry.";
     $("welcome-auth").hidden = true;
     $("welcome-retry").hidden = false;
     frame.hidden = true;
@@ -1066,7 +1066,7 @@
       return withDiagnostic("Apple sign-in completed, but CloudKit rejected Arbor’s saved session. Refresh the connection to continue.");
     }
     if (/NETWORK_ERROR|network error|did not return a usable response/i.test(text)) {
-      return withDiagnostic("Arbor couldn’t reach iCloud. Your Apple sign-in is kept; try again when your connection is back.");
+      return withDiagnostic("Arbor couldn’t reach iCloud. Your Arbor session is still saved; retry sync when your connection is back.");
     }
     if (/ZONE_NOT_FOUND|UNKNOWN_ITEM/i.test(text)) return withDiagnostic("The Arbor notes zone is not available in this CloudKit environment yet.");
     if (/OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED/i.test(text)) return withDiagnostic("This note changed on another device. Arbor kept your local draft and is refreshing the newer iCloud version.");
@@ -6393,7 +6393,7 @@
       });
     } catch (error) {
       if (session !== state.accountSession) return;
-      setConnection("Connection needs attention", false);
+      setConnection("Signed in · Sync needs attention", false);
       showApp();
       renderAll();
       showToast(readableError(error), true);
@@ -6429,7 +6429,7 @@
       setConnection("Using your Apple Account.", true);
     } catch (error) {
       if (session !== state.accountSession) return;
-      setConnection("Connection needs attention", false);
+      setConnection("Signed in · Sync needs attention", false);
       if (!state.notes.length) {
         setListMessage(readableError(error), true, true);
       }
@@ -6449,7 +6449,7 @@
       state.loadRecordsErrorMessage = readableError(error);
       renderNotes();
       setListMessage(state.loadRecordsErrorMessage, true, true, true);
-      setConnection("Connection needs attention", false);
+      setConnection("Signed in · Sync needs attention", false);
       showToast(readableError(error), true);
       return false;
     }
@@ -6522,7 +6522,7 @@
         }]
       });
       state.container = CloudKit.getDefaultContainer();
-      setConnection("Checking your Apple Account…", false);
+      setConnection("Restoring Arbor’s iCloud session…", false);
       showWelcomeChecking();
       state.container.setUpAuth().then(function (identity) {
         if (identity) connectUser(identity);

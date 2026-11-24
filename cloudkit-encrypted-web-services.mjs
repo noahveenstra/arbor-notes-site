@@ -18,11 +18,19 @@ function cloudKitURL(input) {
   }
 }
 
+function rotatedWebAuthToken(response) {
+  const headers = response && response.headers;
+  if (!headers || typeof headers.get !== "function") return null;
+  return headers.get("x-apple-cloudkit-web-auth-token")
+    || headers.get("x-apple-cloudkit-session")
+    || null;
+}
+
 /**
  * Creates one in-memory CloudKit JS auth-token store and a fetch adapter shared
  * by CloudKit JS and the encrypted-field Web Services client. Authenticated
- * CloudKit requests are serialized until the response body yields its rotated
- * one-use token, so concurrent SDK and sync requests cannot reuse a token.
+ * CloudKit requests are serialized until the response yields its rotated
+ * one-use token, whether Apple returns it in a header or JSON body.
  */
 export function createCloudKitAuthTransport({
   containerIdentifier,
@@ -88,6 +96,9 @@ export function createCloudKitAuthTransport({
         throw new Error("CloudKit did not return a usable response.");
       }
 
+      const headerToken = rotatedWebAuthToken(response);
+      const hasHeaderToken = typeof headerToken === "string" && Boolean(headerToken);
+      if (hasHeaderToken) setToken(headerToken);
       if (!response || !response.body || typeof ReadableStream === "undefined" || typeof Response === "undefined") {
         release.resolve();
         return response;
@@ -97,7 +108,7 @@ export function createCloudKitAuthTransport({
       const decoder = new TextDecoder();
       const tokenPattern = /"ckWebAuthToken"\s*:\s*("(?:\\.|[^"\\])*")/;
       let scanBuffer = "";
-      let foundReplacement = false;
+      let foundReplacement = hasHeaderToken;
       let released = false;
       const finish = (clearUnrotatedToken = true) => {
         if (released) return;
@@ -106,6 +117,10 @@ export function createCloudKitAuthTransport({
         release.resolve();
       };
       const inspect = (chunk, final) => {
+        if (foundReplacement) {
+          if (final) decoder.decode();
+          return;
+        }
         scanBuffer += decoder.decode(chunk || new Uint8Array(), { stream: !final });
         const match = tokenPattern.exec(scanBuffer);
         if (match) {
@@ -492,7 +507,9 @@ export class CloudKitEncryptedWebServices {
       });
     }
 
-    const replacement = payload && payload.ckWebAuthToken;
+    const headerToken = rotatedWebAuthToken(response);
+    const replacement = (typeof headerToken === "string" && headerToken)
+      || (payload && payload.ckWebAuthToken);
     this.authTokenStore.putToken(
       this.containerIdentifier,
       typeof replacement === "string" && replacement ? replacement : null,

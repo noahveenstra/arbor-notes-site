@@ -61,6 +61,8 @@
     undoPersistenceWarned: false,
     replayingHistory: false,
     autoCorrectionApplying: false,
+    autoCorrectionReturnBoundary: null,
+    automaticSpellingRequests: new Map(),
     editorHistoryBaseline: null,
     query: "",
     toastTimer: null,
@@ -146,6 +148,7 @@
   const FONT_OPTIONS = { sans: "var(--font-sans)", serif: "var(--font-serif)", mono: "var(--font-mono)", pixel: "var(--font-pixel)" };
   const FONT_LABELS = { sans: "Sans", serif: "Serif", mono: "Mono", pixel: "Pixel" };
   const SPELLING_CONTEXT_RANK_TIMEOUT_MS = 30_000;
+  const AUTO_CORRECTION_CONTEXT_TIMEOUT_MS = 30_000;
   const MARGIN_OPTIONS = { condensed: 84, compact: 70, normal: 64, roomy: 58, spacious: 52 };
   const TEXT_SIZE_OPTIONS = { xsmall: 14, small: 18, medium: 20, large: 22, xlarge: 24 };
   const OPEN_NOTE_TABS_KEY = "arbor.web.open-tabs.v1";
@@ -3137,7 +3140,7 @@
   function editorBlockForNode(body, node) {
     let element = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement);
     while (element && element !== body) {
-      if (["P", "DIV", "LI"].includes(element.tagName)) return element;
+      if (["P", "DIV", "LI", "BLOCKQUOTE", "H1", "H2", "H3", "H4", "H5", "H6"].includes(element.tagName)) return element;
       element = element.parentElement;
     }
     return body;
@@ -3301,6 +3304,8 @@
   }
 
   function createEditor(value) {
+    cancelAutomaticSpellingContextRequests();
+    state.autoCorrectionReturnBoundary = null;
     if (state.editor) { state.editor.destroy(); state.editor = null; }
     const container = $("rich-editor"); container.replaceChildren();
     const body = document.createElement("div");
@@ -3310,9 +3315,12 @@
     const onInput = function (event) {
       const autoCorrection = state.autoCorrectionApplying;
       state.autoCorrectionApplying = false;
+      cancelAutomaticSpellingContextRequests();
       if (!state.selectionReviewApplying) closeSelectionReview(false);
       scheduleSave(true, autoCorrection ? { label: "Auto-correct", groupKey: null } : null);
-      const trigger = autoCorrection ? null : autoCorrectionTrigger(body, event);
+      const returnBoundary = state.autoCorrectionReturnBoundary;
+      state.autoCorrectionReturnBoundary = null;
+      const trigger = autoCorrection ? null : (autoCorrectionTrigger(body, event) || autoCorrectionReturnTrigger(body, event, returnBoundary));
       scheduleProofreading(body, trigger ? 0 : undefined, trigger);
       if (event.isComposing) window.clearTimeout(state.capitalizationContextTimer);
       else scheduleCapitalizationContextCheck(body);
@@ -3338,6 +3346,9 @@
           return;
         }
       }
+      state.autoCorrectionReturnBoundary = event.key === "Enter" && !event.isComposing
+        ? autoCorrectionBoundaryBeforeReturn(body)
+        : null;
       const selection = window.getSelection();
       const anchor = selection && selection.anchorNode;
       const element = anchor && (anchor.nodeType === Node.ELEMENT_NODE ? anchor : anchor.parentElement);
@@ -3396,6 +3407,11 @@
       console.warn("Local writing suggestions are unavailable.", error);
       return null;
     }
+  }
+
+  function cancelAutomaticSpellingContextRequests() {
+    state.automaticSpellingRequests.forEach(function (pending) { window.clearTimeout(pending.timeoutId); });
+    state.automaticSpellingRequests.clear();
   }
 
   function proofreadingTextNodes(body) {
@@ -3541,39 +3557,148 @@
 
   function autoCorrectionTrigger(body, event) {
     if (!state.preferences.autoCorrectHighConfidence || !event || event.isComposing || event.inputType !== "insertText" ||
-        typeof event.data !== "string" || !/^[\t ,.;:!?]$/u.test(event.data)) return null;
+        typeof event.data !== "string" || !/^[\p{White_Space}\p{P}]$/u.test(event.data) || /^['’]$/u.test(event.data)) return null;
     const context = editorCaretContext(body);
     if (!context) return null;
-    const match = context.before.match(/([\p{L}]+(?:['’][\p{L}]+)*)([\t ,.;:!?])$/u);
+    const match = context.before.match(/([\p{L}]+(?:['’][\p{L}]+)*)([\p{White_Space}\p{P}])$/u);
     if (!match) return null;
+    if (/^['’]$/u.test(match[2])) return null;
     const selection = context.selection;
-    const node = selection.anchorNode;
-    if (!node || node.nodeType !== Node.TEXT_NODE) return null;
-    const end = selection.anchorOffset - match[2].length;
-    const start = end - match[1].length;
-    if (start < 0 || node.nodeValue.slice(start, selection.anchorOffset) !== match[1] + match[2]) return null;
-    const parent = node.parentElement;
+    const wordStart = context.before.length - match[1].length - match[2].length;
+    const blockText = textWithLineBreaks(context.block);
+    if (blockText.slice(wordStart, wordStart + match[1].length + match[2].length) !== match[1] + match[2]) return null;
+    const wordPoint = editorPointAtTextWithBreaks(context.block, wordStart, "forward");
+    const wordEndPoint = editorPointAtTextWithBreaks(context.block, wordStart + match[1].length);
+    if (!wordPoint || !wordEndPoint || wordPoint.node !== wordEndPoint.node || wordPoint.node.nodeType !== Node.TEXT_NODE
+        || wordPoint.node.nodeValue.slice(wordPoint.offset, wordEndPoint.offset) !== match[1]) return null;
+    const parent = wordPoint.node.parentElement;
     if (parent && parent.closest("a, code, pre, [data-proofreading-ignore]")) return null;
     return {
       word: match[1],
       before: context.before.slice(0, context.before.length - match[1].length - match[2].length),
       fullBefore: context.before,
       block: context.block,
-      delimiter: match[2]
+      wordStart: wordStart,
+      delimiter: match[2],
+      boundary: "typed",
+      boundaryCaretNode: selection.anchorNode,
+      boundaryCaretOffset: selection.anchorOffset,
+      boundaryCaretBlock: editorBlockForNode(body, selection.anchorNode)
     };
+  }
+
+  function autoCorrectionBoundaryBeforeReturn(body) {
+    if (!state.preferences.autoCorrectHighConfidence) return null;
+    const context = editorCaretContext(body);
+    if (!context || context.before.includes("\n")) return null;
+    const match = context.before.match(/([\p{L}]+(?:['’][\p{L}]+)*)$/u);
+    if (!match) return null;
+    const wordStart = context.before.length - match[1].length;
+    const wordPoint = editorPointAtTextWithBreaks(context.block, wordStart, "forward");
+    const wordEndPoint = editorPointAtTextWithBreaks(context.block, wordStart + match[1].length);
+    if (!wordPoint || !wordEndPoint || wordPoint.node !== wordEndPoint.node || wordPoint.node.nodeType !== Node.TEXT_NODE
+        || wordPoint.node.nodeValue.slice(wordPoint.offset, wordEndPoint.offset) !== match[1]) return null;
+    const parent = wordPoint.node.parentElement;
+    if (parent && parent.closest("a, code, pre, [data-proofreading-ignore]")) return null;
+    return {
+      word: match[1],
+      before: context.before.slice(0, context.before.length - match[1].length),
+      fullBefore: context.before,
+      block: context.block,
+      wordStart: wordStart,
+      delimiter: "",
+      boundary: "return"
+    };
+  }
+
+  function autoCorrectionReturnTrigger(body, event, boundary) {
+    if (!boundary || boundary.boundary !== "return" || !event || event.isComposing
+        || (event.inputType !== "insertParagraph" && event.inputType !== "insertLineBreak" && event.data !== "\n")) return null;
+    const selection = window.getSelection();
+    if (!selection || !selection.isCollapsed || !selection.anchorNode || !body.contains(selection.anchorNode)) return null;
+    return Object.assign({}, boundary, {
+      returnCaretNode: selection.anchorNode,
+      returnCaretOffset: selection.anchorOffset,
+      returnCaretBlock: editorBlockForNode(body, selection.anchorNode)
+    });
+  }
+
+  function editorPointAtTextWithBreaks(root, requestedOffset, bias) {
+    let remaining = Math.max(0, Number(requestedOffset) || 0);
+    function find(node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        if (remaining < node.length || (remaining === node.length && bias !== "forward")) return { node: node, offset: remaining };
+        remaining -= node.length;
+        return null;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return null;
+      if (node.tagName === "BR") {
+        if (remaining === 0 && bias !== "forward") return { node: node.parentNode, offset: Array.prototype.indexOf.call(node.parentNode.childNodes, node) };
+        remaining = Math.max(0, remaining - 1);
+        return null;
+      }
+      for (const child of Array.from(node.childNodes)) {
+        const point = find(child);
+        if (point) return point;
+      }
+      return null;
+    }
+    return find(root) || editorPointAtTextOffset(root, requestedOffset);
   }
 
   function resolveAutoCorrectionTarget(body, trigger) {
     if (!trigger) return null;
-    const context = editorCaretContext(body);
-    if (!context || context.block !== trigger.block || context.before !== trigger.fullBefore) return null;
-    const selection = context.selection;
-    const node = selection.anchorNode;
-    if (!node || node.nodeType !== Node.TEXT_NODE) return null;
-    const end = selection.anchorOffset - trigger.delimiter.length;
-    const start = end - trigger.word.length;
-    if (start < 0 || node.nodeValue.slice(start, end) !== trigger.word || node.nodeValue.slice(end, selection.anchorOffset) !== trigger.delimiter) return null;
-    return { node: node, start: start, end: end, caret: selection.anchorOffset, word: trigger.word };
+    const selection = window.getSelection();
+    let node;
+    let start;
+    let end;
+    let caret;
+    if (trigger.boundary === "return") {
+      if (!trigger.block || !body.contains(trigger.block) || !trigger.returnCaretNode || !body.contains(trigger.returnCaretNode)
+          || !selection || !selection.isCollapsed || selection.anchorNode !== trigger.returnCaretNode
+          || selection.anchorOffset !== trigger.returnCaretOffset
+          || editorBlockForNode(body, selection.anchorNode) !== trigger.returnCaretBlock) return null;
+      const blockText = textWithLineBreaks(trigger.block);
+      if (blockText.slice(trigger.wordStart, trigger.wordStart + trigger.word.length) !== trigger.word) return null;
+      const beginning = editorPointAtTextWithBreaks(trigger.block, trigger.wordStart, "forward");
+      const ending = editorPointAtTextWithBreaks(trigger.block, trigger.wordStart + trigger.word.length);
+      if (!beginning || !ending || beginning.node !== ending.node || beginning.node.nodeType !== Node.TEXT_NODE
+          || beginning.node.nodeValue.slice(beginning.offset, ending.offset) !== trigger.word) return null;
+      node = beginning.node;
+      start = beginning.offset;
+      end = ending.offset;
+      caret = end;
+    } else {
+      const context = editorCaretContext(body);
+      if (!context || context.block !== trigger.block || context.before !== trigger.fullBefore) return null;
+      const blockText = textWithLineBreaks(trigger.block);
+      if (blockText.slice(trigger.wordStart, trigger.wordStart + trigger.word.length) !== trigger.word
+          || blockText.slice(trigger.wordStart + trigger.word.length, trigger.wordStart + trigger.word.length + trigger.delimiter.length) !== trigger.delimiter) return null;
+      const beginning = editorPointAtTextWithBreaks(trigger.block, trigger.wordStart, "forward");
+      const ending = editorPointAtTextWithBreaks(trigger.block, trigger.wordStart + trigger.word.length);
+      if (!beginning || !ending || beginning.node !== ending.node || beginning.node.nodeType !== Node.TEXT_NODE
+          || beginning.node.nodeValue.slice(beginning.offset, ending.offset) !== trigger.word) return null;
+      node = beginning.node;
+      start = beginning.offset;
+      end = ending.offset;
+      caret = context.selection.anchorOffset;
+    }
+    return {
+      node: node,
+      start: start,
+      end: end,
+      caret: caret,
+      word: trigger.word,
+      boundary: trigger.boundary,
+      block: trigger.block,
+      boundaryFullBefore: trigger.fullBefore,
+      boundaryCaretNode: trigger.boundaryCaretNode,
+      boundaryCaretOffset: trigger.boundaryCaretOffset,
+      boundaryCaretBlock: trigger.boundaryCaretBlock,
+      returnCaretNode: trigger.returnCaretNode,
+      returnCaretOffset: trigger.returnCaretOffset,
+      returnCaretBlock: trigger.returnCaretBlock
+    };
   }
 
   function correctionDiff(before, after) {
@@ -3734,8 +3859,17 @@
         proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), target.word)) return false;
     const node = target.node;
     const selection = window.getSelection();
-    if (!node || !node.isConnected || !body.contains(node) || !selection || !selection.isCollapsed ||
-        selection.anchorNode !== node || selection.anchorOffset !== target.caret || node.nodeValue.slice(target.start, target.end) !== target.word) return false;
+    const currentContext = target.boundary === "typed" ? editorCaretContext(body) : null;
+    const caretMatches = target.boundary === "return"
+      ? selection && selection.isCollapsed && selection.anchorNode === target.returnCaretNode
+        && selection.anchorOffset === target.returnCaretOffset && editorBlockForNode(body, selection.anchorNode) === target.returnCaretBlock
+      : selection && selection.isCollapsed && currentContext && currentContext.block === target.block
+        && currentContext.before === target.boundaryFullBefore;
+    if (!node || !node.isConnected || !body.contains(node) || !caretMatches || node.nodeValue.slice(target.start, target.end) !== target.word) return false;
+    const savedSelection = captureProofreadingSelection(body);
+    const savedTextSelection = target.boundary === "typed" && savedSelection
+      && (savedSelection.anchorNode === node || savedSelection.focusNode === node) ? captureEditorSelection(body) : null;
+    const targetTextStart = target.boundary === "typed" ? editorTextOffset(body, node, target.start) : -1;
     const replacement = String(correction.replacement);
     const prefix = node.nodeValue.slice(0, target.start);
     const suffix = node.nodeValue.slice(target.end);
@@ -3750,12 +3884,27 @@
     if (suffix) { suffixNode = document.createTextNode(suffix); fragment.appendChild(suffixNode); }
     node.replaceWith(fragment);
     animation.boundaryRepairNode = protectCorrectionBoundarySpaces(animation.wrapper);
-    const range = document.createRange();
-    if (suffixNode) range.setStart(suffixNode, Math.min(target.caret - target.end, suffixNode.length));
-    else range.selectNodeContents(animation.wrapper);
-    range.collapse(true);
-    selection.removeAllRanges();
-    selection.addRange(range);
+    if (target.boundary === "return" && savedSelection) {
+      restoreProofreadingSelection(body, savedSelection);
+    } else if (savedTextSelection) {
+      const delta = replacement.length - target.word.length;
+      const adjusted = Object.assign({}, savedTextSelection, {
+        anchorTextOffset: savedTextSelection.anchorTextOffset >= targetTextStart + target.word.length
+          ? savedTextSelection.anchorTextOffset + delta : savedTextSelection.anchorTextOffset,
+        focusTextOffset: savedTextSelection.focusTextOffset >= targetTextStart + target.word.length
+          ? savedTextSelection.focusTextOffset + delta : savedTextSelection.focusTextOffset
+      });
+      restoreEditorTextSelection(body, adjusted);
+    } else if (savedSelection) {
+      restoreProofreadingSelection(body, savedSelection);
+    } else {
+      const range = document.createRange();
+      if (suffixNode) range.setStart(suffixNode, Math.min(target.caret - target.end, suffixNode.length));
+      else range.selectNodeContents(animation.wrapper);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
     finishCorrectionAnimation(body, animation);
     state.autoCorrectionApplying = true;
     announceStatus("Auto-corrected " + target.word + " to " + replacement + ". Undo is available.");
@@ -3784,7 +3933,15 @@
       const nodes = proofreadingTextNodes(body);
       const blocks = nodes.map(function (node) { return node.nodeValue || ""; });
       const autoCorrectionTarget = autoCorrection ? resolveAutoCorrectionTarget(body, autoCorrection) : null;
-      state.proofreadingPending = { requestId: requestId, recordName: recordName, body: body, nodes: nodes, blocks: blocks, autoCorrectionTarget: autoCorrectionTarget };
+      state.proofreadingPending = {
+        requestId: requestId,
+        recordName: recordName,
+        body: body,
+        nodes: nodes,
+        blocks: blocks,
+        autoCorrectionTarget: autoCorrectionTarget,
+        autoCorrectionTrigger: autoCorrectionTarget ? autoCorrection : null
+      };
       worker.postMessage({
         type: "check",
         requestId: requestId,
@@ -3796,6 +3953,82 @@
         personalWords: autoCorrectionTarget ? dictionaryTerms() : []
       });
     }, wait);
+  }
+
+  function requestAutomaticSpellingContextCorrection(body, recordName, trigger, issue) {
+    if (!state.preferences.autoCorrectHighConfidence || !trigger || !issue || !Array.isArray(issue.options) || issue.options.length < 2
+        || !trigger.block || !body.contains(trigger.block) || !resolveAutoCorrectionTarget(body, trigger)) return;
+    const paragraph = textWithLineBreaks(trigger.block);
+    const selectionStart = trigger.wordStart;
+    const selectionEnd = selectionStart + trigger.word.length;
+    if (!paragraph || paragraph.length > 5000 || paragraph.slice(selectionStart, selectionEnd) !== trigger.word) return;
+    const worker = ensureSelectionReviewWorker();
+    if (!worker) return;
+    const requestId = ++state.spellingContextRankRequestId;
+    const pending = {
+      requestId: requestId,
+      recordName: recordName,
+      body: body,
+      trigger: trigger,
+      word: trigger.word,
+      paragraph: paragraph,
+      selectionStart: selectionStart,
+      selectionEnd: selectionEnd,
+      options: issue.options.slice()
+    };
+    pending.timeoutId = window.setTimeout(function () {
+      if (state.automaticSpellingRequests.get(requestId) === pending) state.automaticSpellingRequests.delete(requestId);
+    }, AUTO_CORRECTION_CONTEXT_TIMEOUT_MS);
+    state.automaticSpellingRequests.set(requestId, pending);
+    try {
+      worker.postMessage({
+        type: "spelling-context-rank",
+        requestId: requestId,
+        payload: { paragraph: paragraph, selectionStart: selectionStart, selectionEnd: selectionEnd }
+      });
+    } catch (_) {
+      window.clearTimeout(pending.timeoutId);
+      state.automaticSpellingRequests.delete(requestId);
+    }
+  }
+
+  function onAutomaticSpellingContextMessage(event) {
+    const message = event.data || {};
+    if (message.type === "spelling-context-rank-progress") return;
+    if (message.type !== "spelling-context-rank-result") return;
+    const pending = state.automaticSpellingRequests.get(message.requestId);
+    if (!pending) return;
+    state.automaticSpellingRequests.delete(message.requestId);
+    window.clearTimeout(pending.timeoutId);
+    if (pending.recordName !== state.selectedRecordName || pending.body !== $("note-body")
+        || document.activeElement !== pending.body || !pending.body.contains(pending.trigger.block)
+        || textWithLineBreaks(pending.trigger.block) !== pending.paragraph) return;
+    const correction = window.ArborAutocorrect && window.ArborAutocorrect.contextCandidateCorrection(
+      pending.word,
+      pending.options,
+      message.result,
+      pending.selectionStart,
+      pending.selectionEnd,
+      dictionaryTerms()
+    );
+    const currentTarget = resolveAutoCorrectionTarget(pending.body, pending.trigger);
+    if (!correction || !currentTarget) return;
+    unwrapProofreadingMarks(pending.body);
+    const target = resolveAutoCorrectionTarget(pending.body, pending.trigger);
+    if (!target || !applyAutomaticCorrection(pending.body, target, correction)) scheduleProofreading(pending.body, 0);
+  }
+
+  function autoCorrectionIssueForTarget(pending, results) {
+    const target = pending && pending.autoCorrectionTarget;
+    if (!target) return null;
+    const nodeIndex = pending.nodes.indexOf(target.node);
+    if (nodeIndex < 0) return null;
+    const issues = Array.isArray(results && results[nodeIndex]) ? results[nodeIndex] : [];
+    return issues.find(function (item) {
+      return item && item.kind === "spelling" && item.word === target.word
+        && item.start === target.start && item.end === target.end
+        && Array.isArray(item.options) && item.options.length > 1;
+    }) || null;
   }
 
   function proofreadingBlockForNode(node, body) {
@@ -4024,6 +4257,10 @@
       state.proofreadingPending = null;
       if (applyAutomaticCorrection(pending.body, pending.autoCorrectionTarget, result.autocorrection)) return;
       state.proofreadingPending = pending;
+    }
+    if (pending.autoCorrectionTarget && pending.autoCorrectionTrigger && !result.autocorrection) {
+      const spellingIssue = autoCorrectionIssueForTarget(pending, result.results);
+      if (spellingIssue) requestAutomaticSpellingContextCorrection(pending.body, pending.recordName, pending.autoCorrectionTrigger, spellingIssue);
     }
     state.proofreadingPending = null;
     const savedSelection = captureProofreadingSelection(pending.body);
@@ -4678,8 +4915,10 @@
       });
       worker.addEventListener("message", onSelectionReviewMessage);
       worker.addEventListener("message", onSpellingContextRankMessage);
+      worker.addEventListener("message", onAutomaticSpellingContextMessage);
       worker.addEventListener("message", onCapitalizationContextMessage);
       worker.addEventListener("error", function () {
+        cancelAutomaticSpellingContextRequests();
         window.clearTimeout(state.capitalizationContextTimeout);
         state.capitalizationContextPending = null;
         state.capitalizationContextRerun = false;

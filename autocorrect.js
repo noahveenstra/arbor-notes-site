@@ -91,6 +91,29 @@
     });
   }
 
+  function contextCandidateCorrection(wordValue, options, result, selectionStart, selectionEnd, personalWords) {
+    const word = String(wordValue || "");
+    const lower = normalized(word);
+    if (!/^[\p{L}]+(?:['’][\p{L}]+)*$/u.test(word) || /\p{Lu}/u.test(word)
+        || !Array.isArray(options) || isPersonalWord(word, personalWords)) return null;
+    if (!result || result.status !== "suggestions" || !Array.isArray(result.suggestions)) return null;
+    const suggestion = result.suggestions.find(function (item) {
+      return item && item.status === "suggestion" && item.original === word
+        && item.start === selectionStart && item.end === selectionEnd
+        && typeof item.replacement === "string";
+    });
+    if (!suggestion || !/^[\p{L}]+(?:['’][\p{L}]+)*$/u.test(suggestion.replacement)
+        || normalized(suggestion.replacement) === lower) return null;
+    const candidate = options.find(function (item) {
+      if (typeof item === "string") return normalized(item) === normalized(suggestion.replacement);
+      if (!item || item.action) return false;
+      return normalized(item.replacement || item.label) === normalized(suggestion.replacement);
+    });
+    if (!candidate) return null;
+    const replacement = typeof candidate === "string" ? candidate : (candidate.replacement || candidate.label);
+    return { original: word, replacement: replacement, rule: "local-context-candidate" };
+  }
+
   function highConfidenceCorrection(wordValue, contextBefore, spell, personalWords) {
     const word = String(wordValue || "");
     const lower = normalized(word);
@@ -131,5 +154,8 @@
     return { original: word, replacement: replacement, rule: rule };
   }
 
-  return Object.freeze({ highConfidenceCorrection: highConfidenceCorrection });
+  return Object.freeze({
+    highConfidenceCorrection: highConfidenceCorrection,
+    contextCandidateCorrection: contextCandidateCorrection
+  });
 });

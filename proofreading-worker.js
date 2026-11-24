@@ -1,6 +1,6 @@
 "use strict";
 
-importScripts("./proofreading.js?v=arb-140-capitalization-whole-word-20261123-c", "./autocorrect.js?v=arb-109-autocorrect-maintenance-20261123-a", "./vendor/spellcheck/nspell.js");
+importScripts("./proofreading.js?v=arb-140-capitalization-whole-word-20261123-c", "./autocorrect.js?v=arb-109-context-autocorrect-20261123-b", "./vendor/spellcheck/nspell.js");
 
 let dictionaryPromise = null;
 let spellChecker = null;

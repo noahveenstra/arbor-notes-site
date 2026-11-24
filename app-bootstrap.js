@@ -12,7 +12,7 @@ const PWA_CLIENT_URL = "./pwa-client.js?v=arb-94-update-action-20261119-a";
 const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
 const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-148-live-sync-20261123-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-149-context-autocorrect-20261123-a";
 
 function showBootError(error) {
   const message = document.getElementById("shell-boot-error");

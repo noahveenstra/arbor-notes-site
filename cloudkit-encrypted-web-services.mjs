@@ -1,6 +1,7 @@
 const CLOUDKIT_WEB_SERVICES = "https://api.apple-cloudkit.com/database/1";
 const CLOUDKIT_API_HOST = "api.apple-cloudkit.com";
 const CLOUDKIT_SESSION_MAX_AGE_SECONDS = 14 * 24 * 60 * 60;
+const CLOUDKIT_SESSION_STORAGE_PREFIX = "arbor.cloudkit.session.v1.";
 
 function deferred() {
   let resolve;
@@ -28,12 +29,13 @@ export function createCloudKitAuthTransport({
   fetchImpl = globalThis.fetch,
   tokenStore: suppliedTokenStore,
   documentRef = globalThis.document,
-  locationRef = globalThis.location
+  locationRef = globalThis.location,
+  storageRef
 } = {}) {
   if (typeof containerIdentifier !== "string" || !containerIdentifier) throw new TypeError("A CloudKit container identifier is required.");
   if (typeof fetchImpl !== "function") throw new TypeError("Fetch is unavailable.");
 
-  const tokenStore = suppliedTokenStore || createCloudKitCookieAuthTokenStore(containerIdentifier, { documentRef, locationRef });
+  const tokenStore = suppliedTokenStore || createCloudKitCookieAuthTokenStore(containerIdentifier, { documentRef, locationRef, storageRef });
   if (!tokenStore || typeof tokenStore.getToken !== "function" || typeof tokenStore.putToken !== "function") {
     throw new TypeError("A CloudKit auth token store is required.");
   }
@@ -168,13 +170,16 @@ export function createCloudKitAuthTransport({
 }
 
 /**
- * CloudKit JS calls this store for its session token. Keep the token in a
- * first-party cookie so the same auth state survives a page reload without
- * copying it into note storage, localStorage, IndexedDB, or Cache Storage.
+ * CloudKit JS calls this store for its session token. Keep it in a first-party
+ * cookie, with a tab-scoped sessionStorage fallback only when the browser
+ * cannot read the script-set cookie. The fallback survives reloads in the same
+ * tab without copying the token into note storage, localStorage, IndexedDB, or
+ * Cache Storage.
  */
 export function createCloudKitCookieAuthTokenStore(containerIdentifier, {
   documentRef = globalThis.document,
   locationRef = globalThis.location,
+  storageRef,
   maxAgeSeconds = CLOUDKIT_SESSION_MAX_AGE_SECONDS
 } = {}) {
   if (typeof containerIdentifier !== "string" || !containerIdentifier) throw new TypeError("A CloudKit container identifier is required.");
@@ -183,7 +188,14 @@ export function createCloudKitCookieAuthTokenStore(containerIdentifier, {
   const secure = Boolean(locationRef && locationRef.protocol === "https:");
   const safeContainerSuffix = containerIdentifier.replace(/[^A-Za-z0-9_.-]/g, "_");
   const cookieName = `${secure ? "__Host-" : ""}arbor-cloudkit-${safeContainerSuffix}`;
+  const storageKey = CLOUDKIT_SESSION_STORAGE_PREFIX + encodeURIComponent(containerIdentifier);
+  let sessionStorageRef = storageRef;
+  if (sessionStorageRef === undefined) {
+    try { sessionStorageRef = globalThis.sessionStorage || null; }
+    catch (_) { sessionStorageRef = null; }
+  }
   let memoryToken = null;
+  let cookiePersistenceFailed = false;
 
   function readCookie() {
     if (!documentRef) return memoryToken;
@@ -200,29 +212,54 @@ export function createCloudKitCookieAuthTokenStore(containerIdentifier, {
     }
   }
 
+  function readSessionToken() {
+    if (!sessionStorageRef) return null;
+    try {
+      const value = sessionStorageRef.getItem(storageKey);
+      return typeof value === "string" && value ? value : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function writeSessionToken(value) {
+    if (!sessionStorageRef) return;
+    try {
+      if (value) sessionStorageRef.setItem(storageKey, value);
+      else sessionStorageRef.removeItem(storageKey);
+    } catch (_) {}
+  }
+
   function getToken(requestedContainer) {
     if (requestedContainer !== containerIdentifier) return null;
     const stored = readCookie();
-    if (documentRef) {
-      memoryToken = typeof stored === "string" && stored ? stored : null;
+    if (typeof stored === "string" && stored) {
+      memoryToken = stored;
+      cookiePersistenceFailed = false;
+      writeSessionToken(null);
       return memoryToken;
     }
-    return memoryToken;
+    const sessionToken = readSessionToken();
+    if (sessionToken) return memoryToken = sessionToken;
+    return cookiePersistenceFailed ? memoryToken : memoryToken = null;
   }
 
   function putToken(requestedContainer, value) {
     if (requestedContainer !== containerIdentifier) return;
     memoryToken = typeof value === "string" && value ? value : null;
-    if (!documentRef) return;
-    const encoded = memoryToken ? encodeURIComponent(memoryToken) : "";
-    const maxAge = memoryToken ? maxAgeSeconds : 0;
-    const secureAttribute = secure ? "; Secure" : "";
-    try {
-      documentRef.cookie = `${cookieName}=${encoded}; Path=/; SameSite=Lax; Max-Age=${maxAge}${secureAttribute}`;
-    } catch (_) {
-      // Without a readable first-party cookie the auth store returns no token;
-      // do not move the session into localStorage or another note-data store.
+    if (documentRef) {
+      const encoded = memoryToken ? encodeURIComponent(memoryToken) : "";
+      const maxAge = memoryToken ? maxAgeSeconds : 0;
+      const secureAttribute = secure ? "; Secure" : "";
+      try {
+        documentRef.cookie = `${cookieName}=${encoded}; Path=/; SameSite=Lax; Max-Age=${maxAge}${secureAttribute}`;
+      } catch (_) {
+        // The tab-scoped fallback below can still preserve a reload if this
+        // browser blocks script-set cookies.
+      }
     }
+    cookiePersistenceFailed = Boolean(memoryToken && readCookie() !== memoryToken);
+    writeSessionToken(cookiePersistenceFailed ? memoryToken : null);
   }
 
   return Object.freeze({ getToken, putToken });

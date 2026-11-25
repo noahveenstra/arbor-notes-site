@@ -364,31 +364,6 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 #note-pane.has-open-tabs .editor-scroll { margin: 0 var(--space-4) var(--space-4); border-radius: 0 0 var(--radius-xl) var(--radius-xl); background: var(--paper); }
 #modified-at { display: block; max-width: calc(100% - 220px); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transform: translateY(12px); }
 #back-to-list-button { display: none !important; }
-#save-state {
-  position: absolute;
-  right: 22px;
-  top: 50%;
-  z-index: 2;
-  transform: translateY(-50%);
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 6px;
-  min-width: 96px;
-  color: var(--secondary-label);
-  font: 500 12px/1.2 var(--font-text);
-  letter-spacing: -0.01em;
-  transition: color var(--motion-fade-duration) ease;
-  white-space: nowrap;
-  pointer-events: none;
-}
-#save-state .save-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--tertiary-label); transition: background-color var(--motion-fade-duration) ease; }
-#save-state.is-saved .save-dot { background: var(--system-green); }
-#save-state.is-dirty .save-dot { background: var(--system-orange); }
-#save-state.is-saving .save-dot { background: var(--system-orange); animation: save-pulse 1.1s ease-in-out infinite; }
-#save-state.is-error { color: var(--system-red); }
-#save-state.is-error .save-dot { background: var(--system-red); animation: none; }
-@keyframes save-pulse { 50% { opacity: .35; } }
 .draft-banner {
   display: flex;
   align-items: center;
@@ -441,7 +416,6 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
   #back-to-list-button { display: block !important; }
   #modified-at { max-width: calc(100% - 168px); transform: none; }
   .note-actions-button { right: 12px; }
-  #save-state { right: 12px; }
   #note-workspace .editor-scroll { padding: 8px 22px 30px; }
   #note-title, #rich-editor .note-body { width: 100%; }
 }

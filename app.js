@@ -83,6 +83,8 @@
     editorHistoryBaseline: null,
     query: "",
     toastTimer: null,
+    saveProblemMessage: "",
+    saveProblemRecordName: "",
     deviceID: getDeviceID(),
     cacheKey: null,
     dictionaryEntries: [],
@@ -1030,23 +1032,34 @@
     setMotionVisibility(message, visible);
   }
 
-  function setSaveState(text, mode) {
-    const el = $("save-state");
-    const label = $("save-state-label");
-    if (!el || !label) return;
-    fadeSwapText(label, text);
-    setMotionVisibility(el, Boolean(mode));
-    el.classList.toggle("is-saving", mode === "saving");
-    el.classList.toggle("is-saved", mode === "saved");
-    el.classList.toggle("is-error", mode === "error");
-    el.classList.toggle("is-dirty", mode === "dirty");
+  const OFFLINE_UNSAVED_MESSAGE = "You are offline. This edit is still on this browser.";
+
+  function saveProblemMessage(error) {
+    const raw = String(error && (error.message || error.reason || error) || "");
+    if (browserOffline() || /you are offline/i.test(raw)) return OFFLINE_UNSAVED_MESSAGE;
+    if (error && error.arborPreservedDraft) return raw || "This note has overlapping edits. Arbor kept your edits on this browser.";
+    if (isCloudKitRecordConflict(error)) return readableError(error);
+    if (launchLibrary && launchLibrary.isNetworkSaveFailure(error)) {
+      return "Save failed. This edit is still on this browser. " + readableError(error);
+    }
+    return "Save failed. " + readableError(error);
   }
 
-  function hideSaveState() {
-    const el = $("save-state");
-    if (!el) return;
-    setMotionVisibility(el, false);
-    el.classList.remove("is-saving", "is-saved", "is-error", "is-dirty");
+  function showSaveProblem(message, recordName) {
+    state.saveProblemRecordName = recordName || state.selectedRecordName || "";
+    showToast(message, true, true);
+  }
+
+  function clearSaveProblem(recordName) {
+    if (recordName && state.saveProblemRecordName && recordName !== state.saveProblemRecordName) return;
+    const toast = $("toast");
+    const message = state.saveProblemMessage;
+    state.saveProblemRecordName = "";
+    if (!message) return;
+    state.saveProblemMessage = "";
+    if (!toast || toast.textContent !== message) return;
+    window.clearTimeout(state.toastTimer);
+    toast.classList.remove("is-visible", "is-error");
   }
 
   function showDraftBanner() {
@@ -1059,12 +1072,21 @@
     if (banner) banner.hidden = true;
   }
 
-  function showToast(message, isError) {
+  function showToast(message, isError, persistent) {
     const toast = $("toast");
-    toast.textContent = message;
+    if (!toast) return;
+    const next = String(message || "");
+    if (persistent && state.saveProblemMessage === next && toast.textContent === next && toast.classList.contains("is-visible") && toast.classList.contains("is-error")) return;
+    toast.textContent = next;
     toast.classList.toggle("is-error", Boolean(isError));
     toast.classList.add("is-visible");
     window.clearTimeout(state.toastTimer);
+    if (persistent) {
+      state.saveProblemMessage = next;
+      return;
+    }
+    state.saveProblemMessage = "";
+    state.saveProblemRecordName = "";
     state.toastTimer = window.setTimeout(function () { toast.classList.remove("is-visible"); }, 2800);
   }
 
@@ -6074,7 +6096,7 @@
       state.draftBaseline = null;
       state.bodyDirty = false;
       hideDraftBanner();
-      hideSaveState();
+      clearSaveProblem();
       frame.classList.remove("mobile-note-open", "mobile-editor-open");
       renderOpenNoteTabs();
       renderAccountGreeting();
@@ -6118,7 +6140,6 @@
       const loading = document.createElement("div");
       loading.className = "editor-load-state"; loading.textContent = "Opening note…";
       $("rich-editor").replaceChildren(loading);
-      setSaveState("Opening", "saving");
       const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : ensureWebTextBody(note);
       bodyPromise.then(function () {
         if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
@@ -6126,7 +6147,7 @@
         $("note-title").value = note.title === "Untitled" && !note.body ? "" : note.title;
         rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
         createEditor(note.editorBody);
-        if (!revealRecoveredDraft(note)) setSaveState("Saved", "saved");
+        revealRecoveredDraft(note);
         renderNotes();
       }).catch(function () {
         if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
@@ -6135,12 +6156,13 @@
         const retry = document.createElement("button"); retry.type = "button";
         retry.className = "editor-retry-button"; retry.textContent = "Try again";
         retry.addEventListener("click", function () { selectNote(note); });
-        message.append(label, retry); $("rich-editor").replaceChildren(message); setSaveState("Load failed", "error");
+        message.append(label, retry); $("rich-editor").replaceChildren(message);
+        showSaveProblem("Load failed. This note’s text could not load.", recordName);
       });
     } else {
       rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
       createEditor(note.editorBody);
-      if (!revealRecoveredDraft(note)) setSaveState(state.demo ? "Preview only" : "Saved", "saved");
+      revealRecoveredDraft(note);
       if (state.nativeSchema && state.bodyCache.has(note.recordName) &&
           typeof fieldValue(note.record, "text") !== "string" && !fieldValue(note.record, "text_ckAsset")) {
         ensureFullNativeRecord(note).catch(function (error) {
@@ -6375,7 +6397,7 @@
     rememberSyncBaseline(recordName, documentValue);
     state.editorHistoryBaseline = captureEditorHistorySnapshot({ editorBodyChanged: true });
     hideDraftBanner();
-    setSaveState("Saved", "saved");
+    clearSaveProblem(recordName);
     if (note) renderNoteDate(note);
     renderAboutPanel();
     return true;
@@ -7552,7 +7574,7 @@
     createEditor(draft.body);
     state.dirty = true;
     writeDraft(note.recordName, { title: title, body: draft.body });
-    setSaveState("Unsaved", "dirty");
+    if (browserOffline()) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, note.recordName);
     showDraftBanner();
     window.clearTimeout(state.saveTimer);
     return true;
@@ -7570,7 +7592,7 @@
     hideDraftBanner();
     state.draftBaseline = null;
     if (!baseline || baseline.recordName !== recordName) {
-      setSaveState(state.demo ? "Preview only" : "Saved", "saved");
+      clearSaveProblem(recordName);
       return;
     }
     const note = state.notes.find(function (item) { return item.recordName === recordName; });
@@ -7593,7 +7615,7 @@
         before: discardedDraft, after: restoredSnapshot, updatedAt: Date.now()
       });
     }
-    setSaveState(state.demo ? "Preview only" : "Saved", "saved");
+    clearSaveProblem(recordName);
     renderNotes();
   }
 
@@ -7637,7 +7659,7 @@
     }
     persistCurrentDraft();
     rememberPendingEdit(recordName, currentMarkdown());
-    setSaveState(browserOffline() ? "Offline" : "Unsaved", "dirty");
+    if (browserOffline()) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, recordName);
     window.clearTimeout(state.saveTimer);
     state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
     if (pendingCreation) renderNotes();
@@ -7804,30 +7826,27 @@
       const based = recordForPendingEdit(record, edit);
       if (!based) {
         if (state.selectedRecordName === edit.recordName) {
-          setSaveState("Needs attention", "error");
-          showToast("This note changed in iCloud. Arbor kept your edits on this browser.", true);
+          showSaveProblem("This note changed in iCloud. Arbor kept your edits on this browser.", edit.recordName);
         }
         continue;
       }
       try {
-        if (state.selectedRecordName === edit.recordName) setSaveState("Saving…", "saving");
         rememberPendingEditBaseline(edit);
         await saveRecord(based, edit.body);
         dropPendingEdit(edit.recordName);
         clearDraft(edit.recordName);
         rememberRecordBody(edit.recordName, typeof edit.body === "string" ? edit.body : edit.body.title + "\n\n" + edit.body.body, state.accountSession);
-        if (state.selectedRecordName === edit.recordName && !state.dirty) setSaveState("Saved", "saved");
+        if (state.selectedRecordName === edit.recordName && !state.dirty) clearSaveProblem(edit.recordName);
       } catch (error) {
         if (launchLibrary && launchLibrary.isNetworkSaveFailure(error) || browserOffline()) {
-          if (state.selectedRecordName === edit.recordName) setSaveState("Offline", "dirty");
+          if (state.selectedRecordName === edit.recordName) showSaveProblem(saveProblemMessage(error), edit.recordName);
           return;
         }
         if (error && error.arborPreservedDraft || isCloudKitRecordConflict(error)) {
-          if (state.selectedRecordName === edit.recordName) setSaveState("Needs attention", "error");
-          showToast(readableError(error), true);
+          showSaveProblem(saveProblemMessage(error), edit.recordName);
           continue;
         }
-        if (state.selectedRecordName === edit.recordName) setSaveState("Save failed", "error");
+        showSaveProblem(saveProblemMessage(error), edit.recordName);
       }
     }
   }
@@ -7836,7 +7855,7 @@
     window.clearTimeout(state.saveTimer);
     if (browserOffline()) {
       if (state.dirty && state.selectedRecordName) rememberPendingEdit(state.selectedRecordName, currentMarkdown());
-      if (state.dirty || state.editQueue.length) setSaveState("Offline", "dirty");
+      if (state.dirty || state.editQueue.length) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, state.selectedRecordName);
       return state.savePromise.catch(function () {});
     }
     if (!state.dirty || !state.selectedRecord || !state.database) return state.savePromise.catch(function () {});
@@ -7845,8 +7864,7 @@
     const queuedEdit = pendingEditFor(recordName);
     const basedRecord = recordForPendingEdit(state.records.get(recordName) || recordSnapshot, queuedEdit);
     if (!basedRecord) {
-      setSaveState("Needs attention", "error");
-      showToast("This note changed in iCloud. Arbor kept your edits on this browser.", true);
+      showSaveProblem("This note changed in iCloud. Arbor kept your edits on this browser.", recordName);
       return state.savePromise.catch(function () {});
     }
     const body = currentMarkdown();
@@ -7857,7 +7875,6 @@
     const superseded = function () { return generation !== state.saveGeneration || !accountSessionCurrent(session); };
     state.dirty = false;
     state.saveFlightCount += 1;
-    setSaveState("Saving…", "saving");
     state.savePromise = state.savePromise.catch(function () {}).then(async function () {
       try {
         if (generation !== state.saveGeneration) return;
@@ -7886,15 +7903,13 @@
             state.editorHistoryBaseline = captureEditorHistorySnapshot({ editorBodyChanged: true });
             rememberSyncBaseline(recordName, savedDocument);
             persistCurrentDraft();
-            setSaveState("Unsaved", "dirty");
             window.clearTimeout(state.saveTimer);
             state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
           } else {
             rememberSyncBaseline(recordName, submittedDocument);
             state.pendingRemoteRecords.set(recordName, saved);
             persistCurrentDraft();
-            showToast("A later edit overlaps with a change from another device. Arbor saved the earlier merge to iCloud and kept your latest text as a local draft.", true);
-            setSaveState("Needs attention", "error");
+            showSaveProblem("A later edit overlaps with a change from another device. Arbor saved the earlier merge to iCloud and kept your latest text as a local draft.", recordName);
           }
           newerEdit = true;
         }
@@ -7942,7 +7957,7 @@
           if (!state.dirty) {
             hideDraftBanner();
             state.draftBaseline = null;
-            setSaveState(state.demo ? "Preview only" : "Saved", "saved");
+            clearSaveProblem(recordName);
           }
           renderAll();
         }
@@ -7950,13 +7965,8 @@
         if (superseded()) return;
         const newerEdit = state.selectedRecordName === recordName && state.dirty;
         if (!newerEdit) persistDraftSnapshot(recordName, parts);
-        if (state.selectedRecordName === recordName) {
-          state.dirty = true;
-          const networkFailure = launchLibrary && launchLibrary.isNetworkSaveFailure(error);
-          const conflict = Boolean(error && error.arborPreservedDraft) || isCloudKitRecordConflict(error);
-          setSaveState(networkFailure ? "Offline" : conflict ? "Needs attention" : "Save failed", networkFailure ? "dirty" : "error");
-        }
-        showToast(readableError(error), true);
+        if (state.selectedRecordName === recordName) state.dirty = true;
+        showSaveProblem(saveProblemMessage(error), recordName);
         throw error;
       } finally {
         state.saveFlightCount = Math.max(0, state.saveFlightCount - 1);

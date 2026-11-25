@@ -437,7 +437,7 @@ button { color: inherit; }
 #apple-sign-in-button, #apple-sign-out-button { min-height: 26px; }
 #apple-sign-in-button div, #apple-sign-out-button div { display: inline-block; }
 .connection-line { display: flex; align-items: center; gap: 7px; margin-top: 9px; color: var(--muted-soft); font-size: 11px; }
-.connection-dot, .save-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--surface-control); }
+.connection-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--surface-control); }
 .connection-line.is-connected .connection-dot { background: var(--system-green); box-shadow: 0 0 8px var(--system-green); }
 
 .demo-badge { max-width: 180px; overflow: hidden; padding: 5px 7px; border: 1px solid var(--system-blue); border-radius: 7px; color: var(--system-blue); background: var(--fill-selection); font: 10px/1.1 var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
@@ -484,13 +484,6 @@ button { color: inherit; }
   border-radius: 28px;
   background: var(--surface-sidebar-solid);
 }
-
-.save-state { display: inline-flex; align-items: center; gap: 7px; color: var(--secondary-label); font-size: 12px; }
-.save-dot { width: 6px; height: 6px; background: var(--tertiary-label); }
-.save-state.is-saved .save-dot { background: var(--system-green); }
-.save-state.is-dirty .save-dot, .save-state.is-saving .save-dot { background: var(--system-orange); }
-.save-state.is-error { color: var(--system-red); }
-.save-state.is-error .save-dot { background: var(--system-red); }
 
 .back-to-list { display: none; align-items: center; gap: 4px; padding: 6px 7px 6px 2px; border: 0; color: var(--secondary-label); background: transparent; cursor: pointer; font-size: 12px; }
 .back-to-list svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }

@@ -182,6 +182,12 @@
     proofreadingCloseTimer: 0,
     proofreadingFocusSelection: null,
     proofreadingLastPointerType: "",
+    cascadeWorker: null,
+    cascadeTimer: 0,
+    cascadeRepaintPending: false,
+    cascadeGeneration: 0,
+    cascadeSentences: new Map(),
+    cascadeDownloadAnnounced: false,
     semanticRequestId: 0,
     semanticRequestedQuery: "",
     semanticTimer: 0,
@@ -4209,6 +4215,7 @@
       state.autoCorrectionReturnBoundary = null;
       const trigger = autoCorrection ? null : (autoCorrectionTrigger(body, event) || autoCorrectionReturnTrigger(body, event, returnBoundary));
       scheduleProofreading(body, trigger ? 0 : undefined, trigger);
+      scheduleCascadeProofreading(body, cascadeDelay(event));
       if (event.isComposing) window.clearTimeout(state.capitalizationContextTimer);
       else scheduleCapitalizationContextCheck(body);
       renderAboutPanel();
@@ -4265,6 +4272,7 @@
         if (selection) restoreEditorTextSelection(body, selection);
         body.scrollTop = scrollTop;
         scheduleProofreading(body, 120);
+        scheduleCascadeProofreading(body, 1000);
       },
       destroy: function () {
         body.removeEventListener("input", onInput);
@@ -4277,6 +4285,7 @@
     const worker = ensureProofreadingWorker();
     if (worker) worker.postMessage({ type: "warm" });
     scheduleProofreading(body, 450);
+    scheduleCascadeProofreading(body, 1000);
   }
 
   function ensureProofreadingWorker() {
@@ -4752,6 +4761,215 @@
     return true;
   }
 
+  function cascadeDelay(event) {
+    if (event && (event.inputType === "insertParagraph" || event.inputType === "insertLineBreak")) return 0;
+    if (event && typeof event.data === "string" && /[.!?]/.test(event.data)) return 0;
+    return 1000;
+  }
+
+  function ensureCascadeWorker() {
+    if (state.cascadeWorker) return state.cascadeWorker;
+    if (typeof Worker !== "function") return null;
+    try {
+      const worker = new Worker("./proofreading-cascade-worker.js?v=arb-always-on-proofreading-20261125-b", {
+        type: "module",
+        name: "arbor-always-on-proofreading"
+      });
+      worker.addEventListener("message", onCascadeMessage);
+      worker.addEventListener("error", function (event) {
+        console.warn("On-device proofreading could not start.", event.message || "Worker error");
+      });
+      state.cascadeWorker = worker;
+      worker.postMessage({ type: "warm", skipModels: navigator.webdriver === true });
+      return worker;
+    } catch (error) {
+      console.warn("On-device proofreading is unavailable.", error);
+      return null;
+    }
+  }
+
+  function noteCascadeDownload(progress) {
+    const update = progress || {};
+    if (!state.cascadeDownloadAnnounced && (update.phase === "download" || update.phase === "model")) {
+      state.cascadeDownloadAnnounced = true;
+      announceStatus("Arbor is loading proofreading on this device. The checkers come from Arbor. The note stays in this browser and is not sent anywhere.");
+    }
+    const entry = state.proofreadingActive;
+    if (!entry || entry.kind === "spelling" || entry.kind === "capitalization") return;
+    if (update.phase === "download" && Number(update.total) > 0) {
+      const percent = Math.max(0, Math.min(100, Math.round(Number(update.loaded) / Number(update.total) * 100)));
+      setSpellingContextStatus(entry, "Loading on-device proofreading · " + percent + "%. The note stays in this browser.", "loading");
+    }
+  }
+
+  function onCascadeMessage(event) {
+    const message = event.data || {};
+    if (message.type === "cascade-progress") {
+      noteCascadeDownload(message);
+      return;
+    }
+    if (message.type !== "cascade-partial" && message.type !== "cascade-final") return;
+    const current = state.cascadeSentences.get(message.key);
+    if (!current || current.generation !== message.requestId || current.text !== message.text) return;
+    if (current.recordName !== state.selectedRecordName) return;
+    if (current.phase === "final" && message.type === "cascade-partial") return;
+    current.spans = Array.isArray(message.spans) ? message.spans : [];
+    current.phase = message.type === "cascade-final" ? "final" : "partial";
+    flushCascadeRepaint($("note-body"));
+  }
+
+  function proofreadingUiBusy() {
+    return Boolean(state.proofreadingActive)
+      || (state.spellingContextRankRequests && state.spellingContextRankRequests.size > 0)
+      || (state.automaticSpellingRequests && state.automaticSpellingRequests.size > 0);
+  }
+
+  function cascadeHasUnpaintedSpan(body) {
+    let found = false;
+    state.cascadeSentences.forEach(function (item) {
+      if (found || !item || item.recordName !== state.selectedRecordName || !Array.isArray(item.spans)) return;
+      item.spans.forEach(function (span) {
+        if (found || !span || span.end <= span.start) return;
+        const word = item.text.slice(span.start, span.end);
+        if (!word) return;
+        const covered = Array.prototype.some.call(body.querySelectorAll(".correction-mark"), function (mark) {
+          return mark.textContent === word;
+        });
+        if (!covered) found = true;
+      });
+    });
+    return found;
+  }
+
+  function flushCascadeRepaint(body) {
+    if (!body || body !== $("note-body")) return;
+    if (proofreadingUiBusy()) {
+      state.cascadeRepaintPending = true;
+      return;
+    }
+    state.cascadeRepaintPending = false;
+    if (!cascadeHasUnpaintedSpan(body)) return;
+    scheduleProofreading(body, 0);
+  }
+
+  function blockCaretOffset(block, nodes, body) {
+    const selection = window.getSelection();
+    if (!selection || !selection.isCollapsed || !selection.anchorNode || !block.contains(selection.anchorNode)) return null;
+    if (selection.anchorNode.nodeType !== Node.TEXT_NODE) return null;
+    return proofreadingBlockOffset(block, selection.anchorNode, selection.anchorOffset, nodes, body);
+  }
+
+  function appendCascadeEntries(entries, nodes, body, recordName) {
+    const schedule = window.ArborProofreadingSchedule;
+    state.cascadeSentences.forEach(function (item) {
+      if (!item || item.recordName !== recordName || !Array.isArray(item.spans) || !item.spans.length) return;
+      const block = proofreadingElementAtPath(body, item.blockPath);
+      if (!block) return;
+      const blockText = proofreadingBlockText(block, nodes, body);
+      if (blockText.slice(item.sentenceStart, item.sentenceStart + item.text.length) !== item.text) return;
+      const caret = blockCaretOffset(block, nodes, body);
+      const active = schedule && caret != null ? schedule.typingWordRange(blockText, caret) : null;
+      const localActive = active ? { start: active.start - item.sentenceStart, end: active.end - item.sentenceStart } : null;
+      const spans = schedule ? schedule.filterActiveWord(item.spans, localActive) : item.spans;
+      spans.forEach(function (span) {
+        if (!span || !Number.isInteger(span.start) || !Number.isInteger(span.end) || span.end <= span.start) return;
+        const absStart = item.sentenceStart + span.start;
+        const length = span.end - span.start;
+        const position = proofreadingBlockPosition(block, absStart, nodes, body);
+        if (!position || position.offset + length > position.node.length) return;
+        const word = position.node.nodeValue.slice(position.offset, position.offset + length);
+        if (word !== item.text.slice(span.start, span.end)) return;
+        if (proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), word)) return;
+        const overlaps = entries.some(function (entry) {
+          return entry.nodeIndex === position.nodeIndex && entry.item.start < position.offset + length && entry.item.end > position.offset;
+        });
+        if (overlaps) return;
+        const replacement = span.replacement == null ? null : String(span.replacement);
+        const issue = {
+          start: position.offset,
+          end: position.offset + length,
+          kind: span.kind || "grammar",
+          word: word,
+          message: span.message || "Grammar suggestion",
+          options: span.detectOnly || replacement == null ? [] : [{
+            label: replacement === "" ? "Delete" : replacement,
+            replacement: replacement
+          }]
+        };
+        const ignored = state.proofreadingIgnored.get(recordName) || new Set();
+        const key = ignoredCorrectionKey(position.node.nodeValue, issue);
+        const sameOccurrenceIgnored = ignored.has(key) || ["spelling", "grammar", "capitalization"].some(function (kind) {
+          return ignored.has(ignoredCorrectionKey(position.node.nodeValue, Object.assign({}, issue, { kind: kind })));
+        });
+        if (sameOccurrenceIgnored) return;
+        entries.push({ nodeIndex: position.nodeIndex, source: position.node.nodeValue, item: issue, key: key });
+      });
+    });
+  }
+
+  function dispatchCascadeChecks(body, mode) {
+    const schedule = window.ArborProofreadingSchedule;
+    const worker = ensureCascadeWorker();
+    if (!schedule || !worker || state.preferences.checkGrammarSuggestions === false) return;
+    const nodes = proofreadingTextNodes(body);
+    const blocks = [];
+    nodes.forEach(function (node) {
+      const block = proofreadingBlockForNode(node, body);
+      if (block && !blocks.includes(block)) blocks.push(block);
+    });
+    const live = new Set();
+    blocks.forEach(function (block) {
+      const text = proofreadingBlockText(block, nodes, body);
+      const path = proofreadingBlockPath(block, body);
+      if (!path) return;
+      const caret = blockCaretOffset(block, nodes, body);
+      const due = schedule.dueSentences(text, caret, caret == null ? "idle" : mode);
+      due.forEach(function (sentence) {
+        if (!sentence.text || sentence.text.length > 2000) return;
+        const key = path.join(".") + "\u001f" + sentence.start + "\u001f" + sentence.text;
+        live.add(key);
+        const existing = state.cascadeSentences.get(key);
+        if (existing && existing.text === sentence.text && existing.phase === "final") return;
+        const generation = ++state.cascadeGeneration;
+        state.cascadeSentences.set(key, {
+          key: key,
+          generation: generation,
+          recordName: state.selectedRecordName,
+          blockPath: path,
+          sentenceStart: sentence.start,
+          text: sentence.text,
+          spans: existing && existing.text === sentence.text ? existing.spans : [],
+          phase: "pending"
+        });
+        worker.postMessage({
+          type: "check-sentence",
+          requestId: generation,
+          key: key,
+          text: sentence.text,
+          protectedTerms: dictionaryTerms(),
+          displayName: accountDisplayName(),
+          skipModels: navigator.webdriver === true
+        });
+      });
+    });
+    Array.from(state.cascadeSentences.keys()).forEach(function (key) {
+      const item = state.cascadeSentences.get(key);
+      if (item && item.recordName === state.selectedRecordName && !live.has(key)) state.cascadeSentences.delete(key);
+    });
+  }
+
+  function scheduleCascadeProofreading(body, delay) {
+    if (!body || body !== $("note-body") || !state.selectedRecordName || state.preferences.checkGrammarSuggestions === false) return;
+    window.clearTimeout(state.cascadeTimer);
+    const wait = delay == null ? 1000 : delay;
+    const recordName = state.selectedRecordName;
+    const mode = wait === 0 ? "boundary" : "idle";
+    state.cascadeTimer = window.setTimeout(function () {
+      if (state.selectedRecordName !== recordName || body !== $("note-body") || state.preferences.checkGrammarSuggestions === false) return;
+      dispatchCascadeChecks(body, mode);
+    }, wait);
+  }
+
   function scheduleProofreading(body, delay, autoCorrection) {
     if (!body || !state.selectedRecordName || body !== $("note-body")) return;
     window.clearTimeout(state.proofreadingTimer);
@@ -5141,6 +5359,7 @@
         if (!ignored.has(key)) entries.push({ nodeIndex: position.nodeIndex, source: position.node.nodeValue, item: item, key: key });
       });
     });
+    appendCascadeEntries(entries, nodes, pending.body, pending.recordName);
     entries.sort(function (left, right) { return left.nodeIndex - right.nodeIndex || right.item.start - left.item.start; });
     entries.forEach(function (entry, index) {
       const node = nodes[entry.nodeIndex];
@@ -5587,6 +5806,7 @@
         if (selection) restoreEditorSelection(body, selection);
       }
     }
+    if (state.cascadeRepaintPending) flushCascadeRepaint($("note-body"));
   }
 
   function handleCorrectionPopoverKeydown(event) {
@@ -10614,8 +10834,16 @@
         persistSettingsPreferences();
         syncSettingsControls();
         recordPreferenceChange(before, "Change grammar suggestions", "proofreading-grammar-suggestions");
+        if (!grammarSuggestions.checked) {
+          window.clearTimeout(state.cascadeTimer);
+          state.cascadeGeneration += 1;
+          state.cascadeSentences.clear();
+        }
         const body = $("note-body");
-        if (body) scheduleProofreading(body, 0);
+        if (body) {
+          scheduleProofreading(body, 0);
+          if (grammarSuggestions.checked) scheduleCascadeProofreading(body, 0);
+        }
       });
     }
     if (sentenceCapitalization) {

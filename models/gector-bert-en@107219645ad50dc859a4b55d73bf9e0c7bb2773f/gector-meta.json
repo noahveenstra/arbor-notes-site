@@ -1,0 +1,44 @@
+{
+  "base": "bert-base-cased",
+  "encoder": "bert-base-cased",
+  "precision": "fp32",
+  "tokenizer": "wordpiece",
+  "logits_labels_dim": 990,
+  "logits_d_dim": 2,
+  "onnx_inputs": [
+    "input_ids",
+    "attention_mask"
+  ],
+  "onnx_outputs": [
+    "logits_labels",
+    "logits_d"
+  ],
+  "defaults": {
+    "keep_confidence": 0.0,
+    "min_error_prob": 0.7,
+    "n_iteration": 5
+  },
+  "run_id": "2026-11-22-2313",
+  "exported_at": "2026-11-23T04:32:34+00:00",
+  "checkpoint": "ckpt_best.pt",
+  "git_commit": null,
+  "recipe_sha256": {
+    "build_dataset.py": "a1f251029f42",
+    "preprocess.py": "492da81057e5",
+    "train.py": "95db1a519035",
+    "export_onnx.py": "a9c856c4c34d",
+    "runrecord.py": "2cd8bc1c0e11",
+    "tatoeba_split.py": "7cf3f8b22747",
+    "selection.py": "b20862d4cb42",
+    "lanes.py": "2fed6c3e606d",
+    "europarl_split.py": "4bcf693a5331",
+    "drop_old_spelling.py": "cc92648c3f28",
+    "mine_patterns.py": "e6994aaf9929",
+    "cap_prefixes.py": "715cd72bbc5b",
+    "corrupt_en.py": "406ca0b54a5b",
+    "morph_en.py": "36292f712401",
+    "verb-form-vocab.en.txt": "5906804ec8a1",
+    "language-rules.en.json": "11e0c0a7501d",
+    "templates_en.txt": "a0959f214d9f"
+  }
+}

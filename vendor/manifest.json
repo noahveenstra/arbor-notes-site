@@ -227,6 +227,81 @@
       "path": "models/gec-t5-small@240e0e34d7638690212367d9ecfcd501c9327cc9/tokenizer_config.json",
       "bytes": 20996,
       "sha384": "DDIgEKNp+aysATvUG2rrx5mP7LubVOT+v49mhitYqfIl24yd+w+5hNYGAwcNXXcu"
+    },
+    {
+      "path": "vendor/harper/index.js",
+      "bytes": 142286,
+      "sha384": "zLvtQiJ9DyLR8tXTRcBTzH0TIWjj96R2/mjzTTtq8xg5wzAFXywgczCTti2MukxE"
+    },
+    {
+      "path": "vendor/harper/binary.js",
+      "bytes": 406,
+      "sha384": "reKDfMcjmCTU8LflW4WF9o3dbXrgqqqf3PByO8PtUPUu7PTntAN9zoxo/mBBR+SN"
+    },
+    {
+      "path": "vendor/harper/BinaryModule-DMhzYB6c.js",
+      "bytes": 90485,
+      "sha384": "9PwOw3J6iDwqlUsLHgCz6nomZ0WCs8ExZHWVEauKccHXAQsQkaJNlO/M/njUQSaY"
+    },
+    {
+      "path": "vendor/harper/harper_wasm_bg.wasm",
+      "bytes": 20624501,
+      "sha384": "4XHbFDLayutNH/Sgv55XRsU+6fxv1xBh5SvZN3/zfzIDuwA9eDAvYnbIm47AbnTb"
+    },
+    {
+      "path": "vendor/harper/LICENSE",
+      "bytes": 11345,
+      "sha384": "K/bXeI/ntmwE0+TUvdP5fk8exuLM3FjxiQQOUwSIxtKvWA0IC96Vx6Y8uoHbpS5G"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/config.json",
+      "bytes": 31089,
+      "sha384": "3I6FUT3Cr7KHA9NKQK98LAheerKuNarrxfDZIlqxWs4wze0zmrP/5t/AZ+udtQkL"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/gector-meta.json",
+      "bytes": 1241,
+      "sha384": "pwuaLovinH+pFye7Lnyo3KC1VklX5FaIYBlskeWRztb1Hr7gFdzhVVy2u2R3W1zq"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/language-rules.json",
+      "bytes": 1074,
+      "sha384": "DjAJGHLY+Lnf4bBiP4YzzeKbzs2zZHHFgJvxY21X+9ySojul/mkS/5NxsSCDWK1m"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/vocab.txt",
+      "bytes": 213450,
+      "sha384": "sTu3vWmVjPbUhqKRiU2QqGk63OoMsXfR++ZSAA3vKxadyCspLvUXNtH28V/uGrSG"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/verb-form-vocab.txt",
+      "bytes": 4390076,
+      "sha384": "8DsJs1/CSZtuhFfYvcLbWAzcuC2BFRsLK4cFwtIXMqLbrD+RBgV9s5xoJYgX3sZG"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/model.onnx",
+      "bytes": 509870,
+      "sha384": "51gme9Cqfj4/hRQFCXicIt1VSyE0oc0YmI/J0gmeXaUeXtK6dfCNhuHUqY/bjjDu"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-0.bin",
+      "bytes": 55299520,
+      "sha384": "6HTkUGoaXVb3iZGCUlWDV9ELm3amNRHLf1xpw1pcndE5mcewO32C2ech0gUM7FFE"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-1.bin",
+      "bytes": 55299202,
+      "sha384": "XdxmRoEQZ0YE/HTTvluax1RpODx0vwXbnCWq48PS1QQIwc3KFAK9tvHmdEsmN0oC"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/LICENSE",
+      "bytes": 11358,
+      "sha384": "II9e1ieUDl5AxyiVq3/FflTua1Sr0kMJ25e6imG7rXg7SiAsA2VemsvEqVsLqM7/"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/NOTICE",
+      "bytes": 616,
+      "sha384": "eWgPzccQO8PbPehIk5tKBcMnIfudBEGzMSOvBmRQRengXF1bJkSAA1+FYCJKec/6"
     }
   ],
   "fonts": {
@@ -242,5 +317,19 @@
     "onnxExportRevision": "240e0e34d7638690212367d9ecfcd501c9327cc9",
     "dtype": "int8",
     "license": "apache-2.0"
+  },
+  "harper": {
+    "name": "harper.js",
+    "version": "3.2.0",
+    "license": "apache-2.0",
+    "dialect": "American",
+    "note": "Rust/WASM rule checker. The browser loads LocalLinter from vendor/harper and the full wasm, American spelling. No slim wasm and no remote fetch."
+  },
+  "gectorModel": {
+    "id": "proofbird/gector-bert-en",
+    "revision": "107219645ad50dc859a4b55d73bf9e0c7bb2773f",
+    "license": "apache-2.0",
+    "published": "2026-11-22",
+    "note": "Published checkpoint is FP32 ONNX (434,210,042 bytes). This copy uses per-channel dynamic INT8 for MatMul and Gemm, and per-channel INT8 word embeddings with DequantizeLinear before Gather. Weights are split into weights-0.bin and weights-1.bin."
   }
 }

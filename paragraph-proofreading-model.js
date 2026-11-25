@@ -197,7 +197,18 @@ function ortInt64(values) {
   return new ort.Tensor("int64", BigInt64Array.from(values, BigInt), [1, values.length]);
 }
 
-async function runGreedy(encoder, decoder, inputIds, tokenizer, onProgress) {
+function chosenConfidence(data, offset, vocabSize, bestScore) {
+  let max = bestScore;
+  for (let token = 0; token < vocabSize; token += 1) {
+    const score = data[offset + token];
+    if (score > max) max = score;
+  }
+  let sum = 0;
+  for (let token = 0; token < vocabSize; token += 1) sum += Math.exp(data[offset + token] - max);
+  return Math.exp(bestScore - max) / (sum || 1);
+}
+
+async function runGreedy(encoder, decoder, inputIds, tokenizer, onProgress, withConfidence) {
   const attentionValues = inputIds.map(function () { return 1; });
   const encoderInputs = {
     input_ids: ortInt64(inputIds),
@@ -213,6 +224,8 @@ async function runGreedy(encoder, decoder, inputIds, tokenizer, onProgress) {
   const hiddenStates = encoded.last_hidden_state;
   if (!hiddenStates || hiddenStates.dims.length !== 3) throw new Error("invalid-encoder-output");
   const decoderIds = [Number(tokenizer.pad_token_id)];
+  const generatedIds = [];
+  const confidences = [];
   const encoderMask = ortInt64(attentionValues);
   let finished = false;
   try {
@@ -241,16 +254,26 @@ async function runGreedy(encoder, decoder, inputIds, tokenizer, onProgress) {
         const score = logits.data[offset + token];
         if (score > bestScore) { bestScore = score; bestId = token; }
       }
+      if (withConfidence) confidences.push(chosenConfidence(logits.data, offset, vocabSize, bestScore));
       logits.dispose();
       if (bestId === Number(tokenizer.eos_token_id)) {
         finished = true;
         break;
       }
       decoderIds.push(bestId);
+      generatedIds.push(bestId);
       if (onProgress && (index + 1) % 16 === 0) onProgress({ phase: "inference", generatedTokens: index + 1, maximumTokens: MAX_OUTPUT_TOKENS });
     }
     const text = tokenizer.decode(decoderIds.slice(1), { skip_special_tokens: true }).trim();
-    return { text: text, truncated: !finished, finishReason: finished ? "eos" : "length" };
+    if (!withConfidence) return { text: text, truncated: !finished, finishReason: finished ? "eos" : "length" };
+    let decoded = "";
+    const pieces = [];
+    for (let index = 0; index < generatedIds.length; index += 1) {
+      const next = tokenizer.decode(generatedIds.slice(0, index + 1), { skip_special_tokens: true });
+      pieces.push({ text: next.slice(decoded.length), confidence: confidences[index] });
+      decoded = next;
+    }
+    return { text: decoded.trim(), pieces: pieces, truncated: !finished, finishReason: finished ? "eos" : "length" };
   } finally {
     encoderMask.dispose();
     hiddenStates.dispose();
@@ -277,7 +300,7 @@ export function createLocalProofreadingRunner(options) {
       const inputIds = tokenIds(tokenizer, prompt);
       if (inputIds.length > MAX_INPUT_TOKENS) throw new Error("input-too-long");
       const sessions = await loadSessions(onProgress);
-      return runGreedy(sessions.encoder, sessions.decoder, inputIds, tokenizer, onProgress);
+      return runGreedy(sessions.encoder, sessions.decoder, inputIds, tokenizer, onProgress, Boolean(payload && payload.withConfidence));
     }
   });
 }

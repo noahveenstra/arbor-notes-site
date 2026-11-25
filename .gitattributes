@@ -1,5 +1,7 @@
 vendor/ort/*.wasm binary
+vendor/harper/*.wasm binary
 lexical-search.wasm binary
 vendor/ort/*.mjs binary
 models/**/*.onnx binary
+models/**/*.bin binary
 vendor/transformers/transformers.min.js linguist-generated

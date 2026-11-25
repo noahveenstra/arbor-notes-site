@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "language": "en",
+  "_comment": "Per-bundle language facts (see C# LanguageRules / ADR-004). stripTrailingTerminator true: the shippable EN model is GECToR BERT/WordPiece (same recipe as FIGS+PT, which is period-brittle) — validate at eval. NOTE: the non-shippable dev gector-roberta-base-en bundle is RoBERTa and NOT period-brittle; its locally-installed copy of this file keeps stripTrailingTerminator false. clauseConjunctions: connectors that, straight after a comma, mark an independent-clause boundary — GectorAnalyzer.Correct splits there and corrects each clause alone, recovering errors the model under-detects right before a comma (training gap; measured on Italian comma_context 14/6 -> 20/0). 'for' is deliberately absent (', for example' would false-split). Validate against lang/en/gold comma_context at eval.",
+  "stripTrailingTerminator": true,
+  "clauseConjunctions": ["but", "and", "or", "nor", "so", "yet", "then", "because", "while", "whereas", "although", "though", "however", "therefore", "meanwhile", "instead", "otherwise"]
+}

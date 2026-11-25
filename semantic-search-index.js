@@ -9,7 +9,10 @@ export const QUERY_PREFIX = "Represent this sentence for searching relevant pass
 export const EMBEDDING_DIMENSION = 384;
 export const TOKENIZER_REVISION = MODEL_REVISION;
 export const PREPROCESSING_VERSION = "arctic-passage-no-prefix-cls-l2-v1";
-export const MODEL_CACHE_KEY = MODEL_ID + "@" + MODEL_REVISION + "#tokenizer-" + TOKENIZER_REVISION + "#" + CHUNKER_VERSION + "#" + PREPROCESSING_VERSION + "#dim" + EMBEDDING_DIMENSION + "#index-v2";
+// Arctic Embed S truncates a sequence at 512 tokens, including [CLS] and [SEP].
+export const WHOLE_NOTE_TOKEN_LIMIT = 512;
+export const WHOLE_NOTE_CONTENT_TOKENS = WHOLE_NOTE_TOKEN_LIMIT - 2;
+export const MODEL_CACHE_KEY = MODEL_ID + "@" + MODEL_REVISION + "#tokenizer-" + TOKENIZER_REVISION + "#" + CHUNKER_VERSION + "#" + PREPROCESSING_VERSION + "#dim" + EMBEDDING_DIMENSION + "#whole-note-" + WHOLE_NOTE_TOKEN_LIMIT + "#index-v3";
 export const MAX_INDEX_BATCH_NOTES = 4;
 export const MAX_INDEX_BATCH_PASSAGES = 64;
 // Same name that account-cache.js deletes on sign-out and Apple ID change.
@@ -108,10 +111,15 @@ function readRequest(request) {
   });
 }
 
+function validVector(vector) {
+  return Array.isArray(vector) && vector.length === EMBEDDING_DIMENSION;
+}
+
 function validVectorRecord(record, document) {
   if (!record || record.status !== "indexed" || record.modelCacheKey !== MODEL_CACHE_KEY || !Array.isArray(record.vectors) || !Array.isArray(record.passages)) return false;
+  if (!validVector(record.wholeNoteVector)) return false;
   if (record.vectors.length !== record.passages.length || !record.vectors.length) return false;
-  if (record.vectors.some(function (vector) { return !Array.isArray(vector) || vector.length !== EMBEDDING_DIMENSION; })) return false;
+  if (record.vectors.some(function (vector) { return !validVector(vector); })) return false;
   if (document.sourceRevision) return record.sourceRevision === document.sourceRevision;
   return Boolean(document.signature && record.signature === document.signature);
 }
@@ -125,6 +133,7 @@ function validSkipRecord(record, document) {
 async function readVectors(documents, database) {
   const vectors = new Map();
   const ranges = new Map();
+  const wholeNoteVectors = new Map();
   const missing = [];
   const skipped = [];
   const unread = [];
@@ -133,6 +142,7 @@ async function readVectors(documents, database) {
     if (validVectorRecord(memory, document)) {
       vectors.set(document.note.id, memory.vectors);
       ranges.set(document.note.id, memory.passages);
+      wholeNoteVectors.set(document.note.id, memory.wholeNoteVector);
     } else if (validSkipRecord(memory, document)) skipped.push(memory);
     else unread.push(document);
   });
@@ -151,6 +161,7 @@ async function readVectors(documents, database) {
           memoryVectors.set(entry.key, cached);
           vectors.set(entry.note.id, cached.vectors);
           ranges.set(entry.note.id, cached.passages);
+          wholeNoteVectors.set(entry.note.id, cached.wholeNoteVector);
         } else if (validSkipRecord(cached, entry)) {
           memoryVectors.set(entry.key, cached);
           skipped.push(cached);
@@ -161,7 +172,7 @@ async function readVectors(documents, database) {
     }
   } else missing.push.apply(missing, unread);
 
-  return { vectors: vectors, ranges: ranges, missing: missing, skipped: skipped };
+  return { vectors: vectors, ranges: ranges, wholeNoteVectors: wholeNoteVectors, missing: missing, skipped: skipped };
 }
 
 async function pruneVectors(database, liveKeys, accountPrefix) {
@@ -176,12 +187,14 @@ async function pruneVectors(database, liveKeys, accountPrefix) {
     request.onsuccess = function () {
       request.result.forEach(function (key) {
         if (typeof key !== "string") return;
+        const currentModelKey = key.startsWith(MODEL_CACHE_KEY + ":");
         const currentAccountKey = key.startsWith(accountPrefix);
         // The prior cache used an unscoped key. It is derived data, so safely
         // discard it and rebuild rather than carrying vectors across accounts.
+        // A cache-key bump (whole-note vectors) drops older derived records too.
         const legacyPrefix = MODEL_ID + "@" + MODEL_REVISION + "#" + CHUNKER_VERSION + ":";
         const legacyKey = key.startsWith(legacyPrefix) && key.split(":").length === 2;
-        if ((currentAccountKey && !liveKeys.has(key)) || legacyKey) store.delete(key);
+        if (!currentModelKey || (currentAccountKey && !liveKeys.has(key)) || legacyKey) store.delete(key);
       });
     };
     await completed;
@@ -200,6 +213,161 @@ async function saveVectors(database, entries) {
 
 export function contentFor(note) {
   return passagesFor(note).map(function (passage) { return passage.text; });
+}
+
+let wordPieceVocabPromise;
+
+function loadWordPieceVocab() {
+  if (wordPieceVocabPromise) return wordPieceVocabPromise;
+  const url = new URL("./models/" + LOCAL_MODEL_ID + "/tokenizer.json", import.meta.url);
+  wordPieceVocabPromise = readTokenizerText(url).then(function (text) {
+    return new Set(Object.keys(JSON.parse(text).model.vocab));
+  }).catch(function (error) {
+    wordPieceVocabPromise = undefined;
+    throw error;
+  });
+  return wordPieceVocabPromise;
+}
+
+async function readTokenizerText(url) {
+  if (url.protocol === "file:") {
+    const fs = await import("node:fs/promises");
+    return fs.readFile(url, "utf8");
+  }
+  const response = await fetch(url.href);
+  if (!response.ok) throw new Error("The on-device tokenizer could not be read from Arbor");
+  return response.text();
+}
+
+function isBertControl(code) {
+  if (code === 0x09 || code === 0x0a || code === 0x0d) return false;
+  return /\p{C}/u.test(String.fromCodePoint(code));
+}
+
+function isBertWhitespace(code) {
+  if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d) return true;
+  return /\p{Zs}/u.test(String.fromCodePoint(code));
+}
+
+function isBertPunctuation(char) {
+  const code = char.codePointAt(0);
+  if ((code >= 33 && code <= 47) || (code >= 58 && code <= 64) || (code >= 91 && code <= 96) || (code >= 123 && code <= 126)) return true;
+  return /\p{P}/u.test(char);
+}
+
+function isChineseChar(code) {
+  return (code >= 0x4E00 && code <= 0x9FFF)
+    || (code >= 0x3400 && code <= 0x4DBF)
+    || (code >= 0x20000 && code <= 0x2A6DF)
+    || (code >= 0x2A700 && code <= 0x2B73F)
+    || (code >= 0x2B740 && code <= 0x2B81F)
+    || (code >= 0x2B820 && code <= 0x2CEAF)
+    || (code >= 0xF900 && code <= 0xFAFF)
+    || (code >= 0x2F800 && code <= 0x2FA1F);
+}
+
+function normalizeBertText(text) {
+  let cleaned = "";
+  for (const char of text) {
+    const code = char.codePointAt(0);
+    if (code === 0 || code === 0xFFFD || isBertControl(code)) continue;
+    if (isBertWhitespace(code)) { cleaned += " "; continue; }
+    if (isChineseChar(code)) { cleaned += " " + char + " "; continue; }
+    cleaned += char;
+  }
+  return cleaned.toLowerCase().normalize("NFD").replace(/\p{M}+/gu, "");
+}
+
+function basicBertTokens(text) {
+  const words = normalizeBertText(text).split(/\s+/).filter(Boolean);
+  const tokens = [];
+  words.forEach(function (word) {
+    let current = "";
+    for (const char of word) {
+      if (isBertPunctuation(char)) {
+        if (current) tokens.push(current);
+        tokens.push(char);
+        current = "";
+      } else current += char;
+    }
+    if (current) tokens.push(current);
+  });
+  return tokens;
+}
+
+function wordPieceTokens(word, vocab) {
+  if ([...word].length > 100) return ["[UNK]"];
+  const chars = [...word];
+  const pieces = [];
+  let start = 0;
+  while (start < chars.length) {
+    let end = chars.length;
+    let found = "";
+    while (start < end) {
+      const piece = (start === 0 ? "" : "##") + chars.slice(start, end).join("");
+      if (vocab.has(piece)) { found = piece; break; }
+      end -= 1;
+    }
+    if (!found) return ["[UNK]"];
+    pieces.push(found);
+    start = end;
+  }
+  return pieces;
+}
+
+function countWordPieces(text, vocab) {
+  return basicBertTokens(text).reduce(function (count, word) {
+    return count + wordPieceTokens(word, vocab).length;
+  }, 0);
+}
+
+export function wholeNoteSource(note) {
+  const title = String(note && note.title || "").trim();
+  const sourceBody = String(note && (note.indexedBody == null ? note.body || "" : note.indexedBody) || "").slice(0, BODY_CHARACTER_LIMIT);
+  const body = sourceBody.trim();
+  if (title && body) return title + "\n" + body;
+  return title || body || "Untitled note";
+}
+
+export async function countContentTokens(text) {
+  const vocab = await loadWordPieceVocab();
+  return countWordPieces(String(text || ""), vocab);
+}
+
+export async function wholeNoteTextFor(note) {
+  const source = wholeNoteSource(note);
+  if ([...source].length <= WHOLE_NOTE_CONTENT_TOKENS) return source;
+  const vocab = await loadWordPieceVocab();
+  if (countWordPieces(source, vocab) <= WHOLE_NOTE_CONTENT_TOKENS) return source;
+  let low = 0;
+  let high = [...source].length;
+  const chars = [...source];
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (countWordPieces(chars.slice(0, mid).join(""), vocab) <= WHOLE_NOTE_CONTENT_TOKENS) low = mid;
+    else high = mid - 1;
+  }
+  return chars.slice(0, low).join("");
+}
+
+function embedTextsFor(document) {
+  return [document.wholeNoteText].concat(document.chunks);
+}
+
+async function fillDocument(document) {
+  document.passages = passagesFor(document.note);
+  document.chunks = document.passages.map(function (passage) { return passage.text; });
+  document.wholeNoteText = await wholeNoteTextFor(document.note);
+  const payload = { cacheKey: MODEL_CACHE_KEY, chunks: document.chunks, wholeNote: document.wholeNoteText };
+  if (document.sourceRevision) payload.sourceRevision = document.sourceRevision;
+  document.signature = await fingerprint(JSON.stringify(payload));
+}
+
+function vectorSimilarity(left, right) {
+  let similarity = 0;
+  const length = Math.min(left.length, right.length);
+  for (let offset = 0; offset < length; offset += 1) similarity += left[offset] * right[offset];
+  return similarity;
 }
 
 function bodySegments(body) {
@@ -318,9 +486,7 @@ export async function prepareSemanticQuery(query, notes) {
   // notes can skip both chunking and hashing on warm searches.
   for (const document of documents) {
     if (document.sourceRevision) continue;
-    document.passages = passagesFor(document.note);
-    document.chunks = document.passages.map(function (passage) { return passage.text; });
-    document.signature = await fingerprint(JSON.stringify({ cacheKey: MODEL_CACHE_KEY, chunks: document.chunks }));
+    await fillDocument(document);
   }
   const database = await openDatabase();
   if (startedIn !== generation) {
@@ -360,12 +526,9 @@ export async function prepareSemanticQuery(query, notes) {
   }
   for (const document of candidates) {
     if (batch.length >= initialNoteLimit) break;
-    if (!document.passages) {
-      document.passages = passagesFor(document.note);
-      document.chunks = document.passages.map(function (passage) { return passage.text; });
-      document.signature = await fingerprint(JSON.stringify({ cacheKey: MODEL_CACHE_KEY, sourceRevision: document.sourceRevision, chunks: document.chunks }));
-    }
-    if (document.chunks.length > MAX_INDEX_BATCH_PASSAGES) {
+    if (!document.passages) await fillDocument(document);
+    const embedLength = embedTextsFor(document).length;
+    if (embedLength > MAX_INDEX_BATCH_PASSAGES) {
       newSkipped.push({
         key: document.key,
         signature: document.signature,
@@ -376,9 +539,9 @@ export async function prepareSemanticQuery(query, notes) {
       });
       continue;
     }
-    if (passageCount + document.chunks.length > initialPassageLimit && batch.length) break;
+    if (passageCount + embedLength > initialPassageLimit && batch.length) break;
     batch.push(document);
-    passageCount += document.chunks.length;
+    passageCount += embedLength;
   }
 
   if (startedIn !== generation) return { stale: true, generation: startedIn, queryText: "", documents: [], missing: [], vectors: new Map(), passages: [], indexedCount: 0, totalCount: 0, remainingCount: 0, skippedCount: 0 };
@@ -400,7 +563,8 @@ export async function prepareSemanticQuery(query, notes) {
     documents: documents,
     missing: batch,
     vectors: cached.vectors,
-    passages: batch.flatMap(function (entry) { return entry.chunks; }),
+    wholeNoteVectors: cached.wholeNoteVectors,
+    passages: batch.flatMap(function (entry) { return embedTextsFor(entry); }),
     indexedCount: documents.length - pending.length - cached.skipped.length,
     totalCount: documents.length,
     remainingCount: Math.max(0, pending.length - batch.length - newSkipped.length),
@@ -418,19 +582,24 @@ export async function completeSemanticQuery(prepared, rows) {
   const writes = [];
   const writeEntries = [];
   let vectorOffset = 1;
+  if (!prepared.wholeNoteVectors) prepared.wholeNoteVectors = new Map();
   prepared.missing.forEach(function (entry) {
-    const noteVectors = rows.slice(vectorOffset, vectorOffset + entry.chunks.length);
-    vectorOffset += entry.chunks.length;
+    const embedCount = 1 + entry.chunks.length;
+    const embedded = rows.slice(vectorOffset, vectorOffset + embedCount);
+    vectorOffset += embedCount;
+    const wholeNoteVector = embedded[0];
+    const passageVectors = embedded.slice(1);
     const record = {
       key: entry.key,
       signature: entry.signature,
       sourceRevision: entry.sourceRevision,
       modelCacheKey: MODEL_CACHE_KEY,
       status: "indexed",
-      vectors: noteVectors,
+      vectors: passageVectors,
+      wholeNoteVector: wholeNoteVector,
       passages: entry.passages.map(function (passage) { return { start: passage.start, end: passage.end }; })
     };
-    writeEntries.push({ entry: entry, record: record, vectors: noteVectors });
+    writeEntries.push({ entry: entry, record: record, vectors: passageVectors, wholeNoteVector: wholeNoteVector });
     writes.push(record);
   });
   if (prepared.generation !== generation) return { stale: true, results: [], queryVector: null, coverage: { indexed: 0, total: 0, remaining: 0, skipped: 0 } };
@@ -445,21 +614,37 @@ export async function completeSemanticQuery(prepared, rows) {
   if (prepared.generation !== generation) return { stale: true, results: [], queryVector: null, coverage: { indexed: 0, total: 0, remaining: 0, skipped: 0 } };
   writeEntries.forEach(function (written) {
     prepared.vectors.set(written.entry.note.id, written.vectors);
+    prepared.wholeNoteVectors.set(written.entry.note.id, written.wholeNoteVector);
     memoryVectors.set(written.entry.key, written.record);
     written.entry.passages = written.record.passages;
   });
 
   const results = await Promise.all(prepared.documents.map(async function (document) {
     const noteVectors = prepared.vectors.get(document.note.id);
-    if (!noteVectors || !noteVectors.length) return null;
-    let score = -1;
-    let bestIndex = -1;
+    const wholeNoteVector = prepared.wholeNoteVectors.get(document.note.id);
+    if (!noteVectors || !noteVectors.length || !validVector(wholeNoteVector)) return null;
+    let bestPassageScore = -Infinity;
+    let bestPassageIndex = -1;
     noteVectors.forEach(function (vector, index) {
-      let similarity = 0;
-      for (let index = 0; index < Math.min(queryVector.length, vector.length); index += 1) similarity += queryVector[index] * vector[index];
-      if (similarity > score) { score = similarity; bestIndex = index; }
+      const similarity = vectorSimilarity(queryVector, vector);
+      if (similarity > bestPassageScore) { bestPassageScore = similarity; bestPassageIndex = index; }
     });
+    const wholeScore = vectorSimilarity(queryVector, wholeNoteVector);
+    const wholeNoteWon = wholeScore > bestPassageScore;
+    const score = wholeNoteWon ? wholeScore : bestPassageScore;
     const passage = document.passages || document.note._semanticPassages;
+    let bestIndex = bestPassageIndex;
+    if (wholeNoteWon && passage) {
+      let bestBodyScore = -Infinity;
+      let bestBodyIndex = -1;
+      noteVectors.forEach(function (vector, index) {
+        const candidate = passage[index];
+        if (!candidate || !Number.isInteger(candidate.start) || !Number.isInteger(candidate.end)) return;
+        const similarity = vectorSimilarity(queryVector, vector);
+        if (similarity > bestBodyScore) { bestBodyScore = similarity; bestBodyIndex = index; }
+      });
+      if (bestBodyIndex >= 0) bestIndex = bestBodyIndex;
+    }
     const winningPassage = passage && passage[bestIndex];
     const winningChunkRange = winningPassage && Number.isInteger(winningPassage.start) && Number.isInteger(winningPassage.end)
       ? { start: winningPassage.start, end: winningPassage.end }
@@ -481,6 +666,7 @@ export async function completeSemanticQuery(prepared, rows) {
     return {
       id: document.note.id,
       score: score,
+      wholeNoteWon: wholeNoteWon,
       sourceRevision: document.sourceRevision,
       passage: source,
       winningChunkKind: winningChunkRange ? "body" : "title",
@@ -488,10 +674,13 @@ export async function completeSemanticQuery(prepared, rows) {
       sourceAnchorResolved: Boolean(source)
     };
   }));
-  if (prepared.generation !== generation) return { stale: true, results: [], queryVector: null, coverage: { indexed: 0, total: 0, remaining: 0, skipped: 0 } };
+  if (prepared.generation !== generation) return { stale: true, results: [], queryVector: null, topNoteScore: null, sixthBestNoteScore: null, coverage: { indexed: 0, total: 0, remaining: 0, skipped: 0 } };
+  const rankedScores = results.filter(Boolean).map(function (result) { return result.score; }).filter(Number.isFinite).sort(function (left, right) { return right - left; });
   return {
     results: results.filter(Boolean),
     queryVector: queryVector,
+    topNoteScore: rankedScores.length ? rankedScores[0] : null,
+    sixthBestNoteScore: rankedScores.length >= 6 ? rankedScores[5] : null,
     coverage: {
       indexed: Math.min(prepared.totalCount, prepared.indexedCount + prepared.missing.length),
       total: prepared.totalCount,

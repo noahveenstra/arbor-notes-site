@@ -4,6 +4,11 @@
   else root.ArborSearchLogic = api;
 })(globalThis, function createArborSearchLogic(root) {
   const SEMANTIC_SUGGESTION_SCORE_FLOOR = 0.65;
+  const SEMANTIC_SUGGESTION_MARGIN = 0.07;
+  const SEMANTIC_SUGGESTION_BAND = 0.02;
+  const SEMANTIC_SUGGESTION_LIMIT = 3;
+  const SEMANTIC_MARGIN_MIN_LIBRARY = 6;
+  const SEMANTIC_SCORE_EPSILON = 1e-9;
   let loggedFallback = false;
 
   function splitWhitespace(value) {
@@ -300,16 +305,31 @@
     });
   }
 
-  function semanticOnlySuggestions(notes, scores, lexicalNotes) {
+  function semanticOnlySuggestions(notes, scores, lexicalNotes, options) {
+    const settings = options || {};
+    const list = Array.isArray(notes) ? notes : [];
+    const librarySize = Number.isFinite(settings.librarySize) ? settings.librarySize : list.length;
     const exactIDs = new Set((Array.isArray(lexicalNotes) ? lexicalNotes : []).map(function (note) { return note.id; }));
     const scoreFor = scores && typeof scores.get === "function" ? function (id) { return scores.get(id); } : function () { return undefined; };
-    return (Array.isArray(notes) ? notes : []).map(function (note) {
+    const ranked = list.map(function (note) {
       return { note: note, score: scoreFor(note.id) };
     }).filter(function (entry) {
-      return Number.isFinite(entry.score) && entry.score >= SEMANTIC_SUGGESTION_SCORE_FLOOR && !exactIDs.has(entry.note.id);
+      return Number.isFinite(entry.score);
     }).sort(function (a, b) {
       return b.score - a.score || b.note.updatedAt - a.note.updatedAt;
-    }).slice(0, 3).map(function (entry) { return entry.note; });
+    });
+    if (librarySize < SEMANTIC_MARGIN_MIN_LIBRARY) {
+      return ranked.filter(function (entry) {
+        return entry.score >= SEMANTIC_SUGGESTION_SCORE_FLOOR && !exactIDs.has(entry.note.id);
+      }).slice(0, SEMANTIC_SUGGESTION_LIMIT).map(function (entry) { return entry.note; });
+    }
+    const top = Number.isFinite(settings.topScore) ? settings.topScore : (ranked[0] ? ranked[0].score : NaN);
+    const sixth = Number.isFinite(settings.sixthScore) ? settings.sixthScore : (ranked.length >= SEMANTIC_MARGIN_MIN_LIBRARY ? ranked[SEMANTIC_MARGIN_MIN_LIBRARY - 1].score : NaN);
+    if (!Number.isFinite(top) || !Number.isFinite(sixth)) return [];
+    if (top - sixth + SEMANTIC_SCORE_EPSILON < SEMANTIC_SUGGESTION_MARGIN) return [];
+    return ranked.filter(function (entry) {
+      return top - entry.score <= SEMANTIC_SUGGESTION_BAND + SEMANTIC_SCORE_EPSILON && !exactIDs.has(entry.note.id);
+    }).slice(0, SEMANTIC_SUGGESTION_LIMIT).map(function (entry) { return entry.note; });
   }
 
   return Object.freeze({
@@ -317,6 +337,9 @@
     rankLexical: rankLexical,
     createLexicalIndex: createLexicalIndex,
     semanticOnlySuggestions: semanticOnlySuggestions,
-    SEMANTIC_SUGGESTION_SCORE_FLOOR: SEMANTIC_SUGGESTION_SCORE_FLOOR
+    SEMANTIC_SUGGESTION_SCORE_FLOOR: SEMANTIC_SUGGESTION_SCORE_FLOOR,
+    SEMANTIC_SUGGESTION_MARGIN: SEMANTIC_SUGGESTION_MARGIN,
+    SEMANTIC_SUGGESTION_BAND: SEMANTIC_SUGGESTION_BAND,
+    SEMANTIC_MARGIN_MIN_LIBRARY: SEMANTIC_MARGIN_MIN_LIBRARY
   });
 });

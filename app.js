@@ -136,6 +136,8 @@
     semanticQueryVector: null,
     semanticScores: new Map(),
     semanticPassages: new Map(),
+    semanticTopScore: null,
+    semanticSixthScore: null,
     semanticResultRevisions: new Map(),
     semanticPendingNoteIds: new Set(),
     semanticCurrentRequest: null,
@@ -504,6 +506,8 @@
     state.semanticRequestedQuery = "";
     state.semanticScores = new Map();
     state.semanticPassages = new Map();
+    state.semanticTopScore = null;
+    state.semanticSixthScore = null;
     state.semanticResultRevisions = new Map();
     state.semanticPendingNoteIds = new Set();
     state.semanticCurrentRequest = null;
@@ -2857,6 +2861,9 @@
     if (!noteID || !state.semanticRequestedQuery || previousRevision == null || previousRevision === semanticSourceRevision(note)) return;
     state.semanticScores.delete(noteID);
     state.semanticPassages.delete(noteID);
+    const remainingScores = Array.from(state.semanticScores.values()).filter(Number.isFinite).sort(function (left, right) { return right - left; });
+    state.semanticTopScore = remainingScores.length ? remainingScores[0] : null;
+    state.semanticSixthScore = remainingScores.length >= 6 ? remainingScores[5] : null;
     if (!state.semanticPendingNoteIds.has(noteID)) {
       state.semanticPendingNoteIds.add(noteID);
       if (state.semanticProgress) {
@@ -2934,8 +2941,12 @@
     });
     if (state.semanticSearchQuery !== normalized) return lexical;
     const eligibleCorpus = corpus.filter(function (note) { return state.semanticResultRevisions.get(String(note.id)) === note.sourceRevision; });
-    const semantic = semanticOnlySuggestions(eligibleCorpus, state.semanticScores, lexical).map(function (note) {
-      return Object.assign({}, note, { _passageCandidate: state.semanticPassages.get(note.id) || null });
+    const semantic = semanticOnlySuggestions(eligibleCorpus, state.semanticScores, lexical, {
+      librarySize: corpus.length,
+      topScore: state.semanticTopScore,
+      sixthScore: state.semanticSixthScore
+    }).map(function (note) {
+      return Object.assign({}, note, { _passageCandidate: state.semanticPassages.get(note.id) || null, _related: true });
     });
     return lexical.concat(semantic);
   }
@@ -2989,6 +3000,7 @@
       if (state.semanticRequestedQuery) {
         state.semanticRequestedQuery = ""; state.semanticSearchQuery = ""; state.semanticLoadingQuery = ""; state.semanticErrorQuery = ""; state.semanticScores = new Map();
         state.semanticPassages = new Map();
+        state.semanticTopScore = null; state.semanticSixthScore = null;
         state.semanticProgress = null; state.semanticQueryVector = null;
         state.semanticResultRevisions = new Map(); state.semanticPendingNoteIds = new Set(); state.semanticCurrentRequest = null;
         state.semanticPendingRequest = null; state.semanticRequestId += 1; window.clearTimeout(state.semanticTimer); window.clearTimeout(state.semanticIndexTimer);
@@ -2998,6 +3010,7 @@
     if (normalized === state.semanticRequestedQuery) return;
     state.semanticRequestedQuery = normalized; state.semanticSearchQuery = ""; state.semanticErrorQuery = ""; state.semanticScores = new Map();
     state.semanticPassages = new Map();
+    state.semanticTopScore = null; state.semanticSixthScore = null;
     state.semanticProgress = null; state.semanticQueryVector = null;
     state.semanticResultRevisions = new Map(); state.semanticPendingNoteIds = new Set();
     state.semanticLoadingQuery = normalized;
@@ -3074,7 +3087,7 @@
 
   let semanticIndexPromise;
   function loadSemanticIndex() {
-    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-190-instant-launch-20261125-a");
+    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-related-margin-20261125-a");
     return semanticIndexPromise;
   }
 
@@ -3113,6 +3126,7 @@
     state.semanticErrorQuery = "";
     state.semanticScores = new Map();
     state.semanticPassages = new Map();
+    state.semanticTopScore = null; state.semanticSixthScore = null;
     state.semanticProgress = null; state.semanticQueryVector = null;
     state.semanticResultRevisions = new Map(); state.semanticPendingNoteIds = new Set(); state.semanticCurrentRequest = null;
     const input = $(state.searchPage ? "expanded-search-input" : "global-search-input");
@@ -3136,7 +3150,7 @@
   function startSemanticWorker() {
     if (state.semanticWorker) return state.semanticWorker;
     try {
-      const worker = new Worker("./semantic-search-worker.js?v=arb-190-instant-launch-20261125-a", { type: "module" });
+      const worker = new Worker("./semantic-search-worker.js?v=arb-related-margin-20261125-a", { type: "module" });
       worker.addEventListener("message", function (event) {
         const message = event.data || {};
         if (!state.semanticWorkerBusy || message.id !== state.semanticWorkerRequestId) return;
@@ -3164,6 +3178,8 @@
         state.semanticQueryVector = completion.queryVector;
         state.semanticScores = new Map(results.map(function (result) { return [result.id, result.score]; }));
         state.semanticPassages = new Map(results.filter(function (result) { return result.passage; }).map(function (result) { return [result.id, result.passage]; }));
+        state.semanticTopScore = Number.isFinite(completion.topNoteScore) ? completion.topNoteScore : null;
+        state.semanticSixthScore = Number.isFinite(completion.sixthBestNoteScore) ? completion.sixthBestNoteScore : null;
         state.semanticResultRevisions = new Map(results.map(function (result) { return [String(result.id), result.sourceRevision]; }));
         results.forEach(function (result) {
           if (state.semanticPendingNoteIds.has(String(result.id))) state.semanticPendingNoteIds.delete(String(result.id));
@@ -3192,6 +3208,8 @@
         if (semanticSearchIsCurrent(request)) {
           state.semanticScores = new Map();
           state.semanticPassages = new Map();
+          state.semanticTopScore = null;
+          state.semanticSixthScore = null;
           state.semanticResultRevisions = new Map();
           state.semanticPendingNoteIds = new Set();
           state.semanticSearchQuery = request.normalized; state.semanticLoadingQuery = ""; state.semanticErrorQuery = "";
@@ -3223,6 +3241,12 @@
     if (pending) sendSemanticSearch(pending);
   }
 
+  function relatedGroupLabel(query) {
+    if (!state.searchItems.some(function (note) { return note && note._related; })) return "";
+    const text = semanticProgressText(query);
+    return text.indexOf("Related results") === 0 ? text : "";
+  }
+
   function renderSearchSuggestions(query) {
     const list = $("search-suggestions"); const input = $("global-search-input"); const text = String(query || "").trim();
     scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
@@ -3235,16 +3259,25 @@
       return;
     }
     if (state.searchActiveIndex >= state.searchItems.length) state.searchActiveIndex = -1;
-    const progress = semanticProgressText(text);
+    const status = semanticProgressText(text);
+    const errorStatus = status.indexOf("Related-note search unavailable") === 0 ? status : "";
     if (!state.searchItems.length) {
       const message = state.semanticLoadingQuery === text.toLocaleLowerCase() ? "Looking for related notes…" : state.semanticErrorQuery === text.toLocaleLowerCase() ? "Related-note search unavailable" : "No matching notes";
-      list.innerHTML = '<div class="search-suggestions-empty" aria-live="polite">' + escapeHTML(progress || message) + "</div>";
-    } else list.innerHTML = state.searchItems.map(function (note, index) {
-      const folder = note.folder ? '<span class="search-suggestion-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(note.folder) + "</span>" : "";
-      const excerpt = note._passageCandidate && note._passageCandidate.excerpt || searchExcerpt(note, text);
-      return '<button id="search-suggestion-' + index + '" class="search-suggestion' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '" data-search-index="' + index + '"><span class="search-suggestion-title">' + highlightMatch(note.title, text) + '</span><span class="search-suggestion-excerpt">' + highlightMatch(excerpt, text) + '</span><span class="search-suggestion-footer">' + folder + '<span class="search-suggestion-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + "</span></span></button>";
-    }).join("");
-    if (progress && state.searchItems.length) list.insertAdjacentHTML("beforeend", '<div class="search-suggestions-empty" aria-live="polite">' + escapeHTML(progress) + "</div>");
+      list.innerHTML = '<div class="search-suggestions-empty" aria-live="polite">' + escapeHTML(errorStatus || message) + "</div>";
+    } else {
+      const label = relatedGroupLabel(text);
+      let opened = false;
+      list.innerHTML = state.searchItems.map(function (note, index) {
+        let prefix = "";
+        if (note._related && !opened) {
+          opened = true;
+          prefix = '<div class="search-related-group" role="group" aria-label="Related">' + (label ? '<p class="search-suggestions-empty search-related-label">' + escapeHTML(label) + "</p>" : "");
+        }
+        const folder = note.folder ? '<span class="search-suggestion-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(note.folder) + "</span>" : "";
+        const excerpt = note._passageCandidate && note._passageCandidate.excerpt || searchExcerpt(note, text);
+        return prefix + '<button id="search-suggestion-' + index + '" class="search-suggestion' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '" data-search-index="' + index + '"><span class="search-suggestion-title">' + highlightMatch(note.title, text) + '</span><span class="search-suggestion-excerpt">' + highlightMatch(excerpt, text) + '</span><span class="search-suggestion-footer">' + folder + '<span class="search-suggestion-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + "</span></span></button>";
+      }).join("") + (opened ? "</div>" : "");
+    }
     setMotionVisibility(list, true);
     const active = list.querySelector(".is-active");
     if (active) input.setAttribute("aria-activedescendant", active.id); else input.removeAttribute("aria-activedescendant");
@@ -3293,17 +3326,25 @@
       $("expanded-search-results").innerHTML = '<div class="search-page-empty">Search your notes by a word or phrase.</div>';
       return;
     }
-    const progress = semanticProgressText(query);
-    $("expanded-search-count").textContent = state.searchItems.length + (state.searchItems.length === 1 ? " result" : " results") + " for “" + query + "”" + (progress ? " · " + progress : "");
+    const status = semanticProgressText(query);
+    const label = relatedGroupLabel(query);
+    const countStatus = !label && status.indexOf("Related-note search unavailable") === 0 ? status : "";
+    $("expanded-search-count").textContent = state.searchItems.length + (state.searchItems.length === 1 ? " result" : " results") + " for “" + query + "”" + (countStatus ? " · " + countStatus : "");
     if (!state.searchItems.length) {
       const message = state.semanticLoadingQuery === query.toLocaleLowerCase() ? "Looking for related notes…" : state.semanticErrorQuery === query.toLocaleLowerCase() ? "Related-note search unavailable." : "No notes match this search.";
       $("expanded-search-results").innerHTML = '<div class="search-page-empty">' + message + "</div>"; return;
     }
+    let openedRelated = false;
     $("expanded-search-results").innerHTML = state.searchItems.map(function (note, index) {
+      let prefix = "";
+      if (note._related && !openedRelated) {
+        openedRelated = true;
+        prefix = '<div class="search-related-group" role="group" aria-label="Related">' + (label ? '<p class="search-related-label">' + escapeHTML(label) + "</p>" : "");
+      }
       const folder = note.folder || "Unfiled";
       const excerpt = note._passageCandidate && note._passageCandidate.excerpt || searchExcerpt(note, query);
-      return '<button class="search-page-row' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '"><span class="search-page-row-title">' + highlightMatch(note.title, query) + '</span><span class="search-page-row-meta"><span class="search-page-row-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + '</span><span class="search-page-row-excerpt">' + highlightMatch(excerpt, query) + '</span></span><span class="search-page-row-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(folder) + "</span></button>";
-    }).join("");
+      return prefix + '<button class="search-page-row' + (index === state.searchActiveIndex ? " is-active" : "") + '" type="button" role="option" aria-selected="' + (index === state.searchActiveIndex) + '" data-search-note-id="' + escapeHTML(note.id) + '"><span class="search-page-row-title">' + highlightMatch(note.title, query) + '</span><span class="search-page-row-meta"><span class="search-page-row-date">' + escapeHTML(formatDate(new Date(note.updatedAt))) + '</span><span class="search-page-row-excerpt">' + highlightMatch(excerpt, query) + '</span></span><span class="search-page-row-folder"><img src="./icons/folder-stroke.svg" alt="">' + escapeHTML(folder) + "</span></button>";
+    }).join("") + (openedRelated ? "</div>" : "");
   }
 
   function openCapture() {
@@ -10246,6 +10287,8 @@
       state.semanticQueryVector = null;
       state.semanticScores = new Map();
       state.semanticPassages = new Map();
+      state.semanticTopScore = null;
+      state.semanticSixthScore = null;
       state.semanticResultRevisions = new Map();
       state.semanticPendingNoteIds = new Set();
       state.semanticCurrentRequest = null;

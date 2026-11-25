@@ -337,6 +337,7 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .search-page-form input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--label); background: transparent; font: 620 36px/1.2 var(--font-sans); letter-spacing: -0.03em; }
 .search-page-form input::placeholder { color: var(--tertiary-label); }
 .search-page-count { min-height: 18px; margin: 13px 0 10px 88px; color: var(--secondary-label); font-size: 16px; line-height: 1.4; }
+.search-page-results .search-related-label { margin: 12px 0 0; color: var(--secondary-label); font-size: 16px; line-height: 1.4; }
 .search-page-results { width: calc(100% - 88px); margin: 0 0 0 88px; }
 .search-page-row { display: block; width: 100%; min-height: 84px; padding: 11px 0 10px; border: 0; border-radius: 4px; color: var(--label); background: transparent; text-align: left; cursor: pointer; transition: background-color var(--motion-fade-duration) ease, outline-color var(--motion-fade-duration) ease, box-shadow var(--motion-fade-duration) ease; }
 .search-page-row:hover { background: var(--surface-editor); }

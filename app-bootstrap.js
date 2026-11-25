@@ -18,8 +18,7 @@ const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
 const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-2-auth-header-rotation-20261124-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-135-loading-progress-20261125-a";
-const ARBOR_VIEW_URL = "./arbor-view.js?v=arb-178-voice-default-20261124-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-188-first-run-20261125-a";
 let startupStatusTimer = null;
 
 function clearStartupStatusTimer() {
@@ -221,8 +220,6 @@ async function startApp() {
   );
   await appendClassicScript(APP_SCRIPT_URL);
   clearStartupStatusTimer();
-  globalThis.ArborView = await importModule(ARBOR_VIEW_URL);
-  globalThis.ArborView.mountArborView({ api: window.arborWeb });
   document.documentElement.classList.remove("is-preparing-shell");
 }
 

@@ -97,7 +97,6 @@
     syncToken: null,
     syncBaselines: new Map(),
     pendingRemoteRecords: new Map(),
-    pendingArborDeletedNotes: new Map(),
     cacheDBPromise: null,
     bodyCache: new Map(),
     previewCache: new Map(),
@@ -534,9 +533,8 @@
         isCurrent: function () { return accountSessionCurrent(session); },
         onStatus: function (status) {
           state.arborSyncStatus = status;
-          document.dispatchEvent(new CustomEvent("arbor:sync-status-changed", { detail: status }));
         },
-        onState: function () { document.dispatchEvent(new Event("arbor:state-sync-updated")); }
+        onState: function () {}
       });
       state.arborStateSync = manager;
       manager.start();
@@ -1053,36 +1051,104 @@
     status.classList.toggle("is-pending", Boolean(pending));
   }
 
+  function showWelcomeStep(step) {
+    const screen = $("welcome-screen");
+    screen.hidden = false;
+    screen.dataset.step = step;
+    screen.dataset.state = step;
+    screen.setAttribute("aria-labelledby", step === "intro" ? "welcome-title" : step === "auth" ? "welcome-auth-title" : "welcome-note-title");
+    $("setup-screen").hidden = true;
+    $("welcome-step-intro").hidden = step !== "intro";
+    $("welcome-step-auth").hidden = step !== "auth";
+    $("welcome-step-note").hidden = step !== "note";
+    $("welcome-step-label").hidden = false;
+    $("welcome-step-label").textContent = step === "intro" ? "Step 1 of 3 · Welcome" : step === "auth" ? "Step 2 of 3 · Sign in" : "Step 3 of 3 · First note";
+    $("welcome-status").hidden = true;
+    $("welcome-status").classList.remove("is-pending");
+    $("welcome-retry").hidden = true;
+    const connected = Boolean(state.database && state.connectionUserID);
+    $("welcome-auth-title").textContent = connected ? "Your Apple Account is connected." : "Connect your Apple Account.";
+    $("welcome-auth-description").textContent = connected
+      ? "This browser is connected to your iCloud private database. Continue to make your first note."
+      : "Sign in to let this browser read and write notes in your iCloud private database.";
+    $("welcome-auth").hidden = connected;
+    $("welcome-connected").hidden = !connected;
+    $("welcome-auth-continue").hidden = !connected;
+    frame.hidden = true;
+    const headingId = step === "intro" ? "welcome-title" : step === "auth" ? "welcome-auth-title" : "welcome-note-title";
+    $(headingId).focus({ preventScroll: true });
+  }
+
+  function continueWelcome() {
+    showWelcomeStep("auth");
+    if (state.database && state.connectionUserID) $("welcome-auth-continue").textContent = "Continue";
+  }
+
+  const FIRST_RUN_KEY_PREFIX = "arbor.web.first-run.v1.";
+  function firstRunKey(accountId) { return FIRST_RUN_KEY_PREFIX + encodeURIComponent(String(accountId || "")); }
+  function firstRunComplete(accountId) {
+    try { return window.localStorage.getItem(firstRunKey(accountId)) === "1"; }
+    catch (_) { return false; }
+  }
+  function markFirstRunComplete(accountId) {
+    try { window.localStorage.setItem(firstRunKey(accountId), "1"); }
+    catch (_) {}
+  }
+
+  async function finishWelcomeNote(event) {
+    event.preventDefault();
+    const button = $("welcome-note-finish");
+    const title = String($("welcome-note-name").value || "").trim().slice(0, 180);
+    const body = String($("welcome-note-body").value || "").trim();
+    if (!title || !body) return;
+    button.disabled = true;
+    button.textContent = "Saving note…";
+    const created = await createNote(body, true, title);
+    button.disabled = false;
+    button.textContent = "Finish and open note";
+    if (!created) return;
+    markFirstRunComplete(state.connectionUserID);
+    showApp();
+  }
+
   function showWelcomeChecking() {
     const screen = $("welcome-screen");
     screen.hidden = false;
     screen.dataset.state = "checking";
+    screen.dataset.step = "checking";
+    screen.setAttribute("aria-labelledby", "welcome-status");
     $("setup-screen").hidden = true;
+    $("welcome-step-intro").hidden = true;
+    $("welcome-step-auth").hidden = true;
+    $("welcome-step-note").hidden = true;
+    $("welcome-step-label").hidden = true;
     setWelcomeStatus("Checking your Apple Account session…", true);
-    $("welcome-auth").hidden = true;
     $("welcome-retry").hidden = true;
     frame.hidden = true;
   }
 
   function showWelcomeSignedOut() {
-    const screen = $("welcome-screen");
-    screen.hidden = false;
-    screen.dataset.state = "signed-out";
-    $("setup-screen").hidden = true;
-    $("welcome-status").hidden = true;
-    $("welcome-status").classList.remove("is-pending");
-    $("welcome-auth").hidden = false;
-    $("welcome-retry").hidden = true;
-    frame.hidden = true;
+    state.database = null;
+    state.connectionUserID = null;
+    showWelcomeStep("intro");
   }
 
   function showWelcomeCheckError() {
     const screen = $("welcome-screen");
     screen.hidden = false;
     screen.dataset.state = "error";
+    screen.dataset.step = "auth";
+    screen.setAttribute("aria-labelledby", "welcome-auth-title");
     $("setup-screen").hidden = true;
+    $("welcome-step-intro").hidden = true;
+    $("welcome-step-auth").hidden = false;
+    $("welcome-step-note").hidden = true;
+    $("welcome-step-label").hidden = false;
+    $("welcome-step-label").textContent = "Step 2 of 3 · Sign in";
     setWelcomeStatus("Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple; reload Arbor to retry.", false);
     $("welcome-auth").hidden = true;
+    $("welcome-connected").hidden = true;
+    $("welcome-auth-continue").hidden = true;
     $("welcome-retry").hidden = false;
     frame.hidden = true;
   }
@@ -3376,33 +3442,6 @@
       if (target && target.scrollIntoView) target.scrollIntoView({ block: "center", behavior: "smooth" });
       return true;
     } catch (_) { return false; }
-  }
-
-  async function openArborPassage(recordName, anchor) {
-    const session = state.accountSession;
-    const opened = await openNote(recordName);
-    if (!opened || !anchor || !accountSessionCurrent(session)) return false;
-    const note = state.notes.find(function (item) { return item.recordName === recordName; });
-    if (!note || !accountSessionCurrent(session)) return false;
-    const resolved = await window.ArborPassageAnchor.resolvePassageAnchor(anchor, {
-      exists: true,
-      noteId: recordName,
-      archived: isArchived(note.record),
-      body: currentEditorBodyMarkdown()
-    });
-    if (!accountSessionCurrent(session)) return false;
-    if (resolved.resolutionStatus === "resolved") {
-      if (!selectSearchPassage(resolved)) showToast("The note opened, but its current Markdown could not place this passage exactly.", true);
-      renderAll();
-      return true;
-    }
-    showToast(resolved.resolutionStatus === "ambiguous"
-      ? "This passage now appears in more than one place. The note is open without a highlight."
-      : resolved.resolutionStatus === "archived"
-        ? "The source note is archived, so Arbor opened it without a passage highlight."
-        : "This passage changed since it was saved. The note is open without an approximate highlight.", true);
-    renderAll();
-    return false;
   }
 
   function selectionReviewContext() {
@@ -6394,6 +6433,7 @@
 
   async function connectUser(identity) {
     if (!identity) return;
+    const signedInDuringWelcome = !$("welcome-screen").hidden && $("welcome-screen").dataset.step === "auth";
     const userID = String(identity.userRecordName || "").trim();
     if (state.database && state.connectionUserID === userID && !state.accountCacheSuspended) {
       startArborStateSync(userID, state.accountSession);
@@ -6407,8 +6447,6 @@
       setWelcomeStatus("Arbor is still preparing your private notes on this browser. Your notes will load from iCloud next; keep this page open.", true);
     }, NOTE_LOAD_SLOW_NOTICE_MS);
     stopArborStateSync(false);
-    state.pendingArborDeletedNotes.clear();
-    document.dispatchEvent(new Event("arbor:account-change"));
     let ready = false;
     try {
       await enqueueAccountPersistence(async function () {
@@ -6519,6 +6557,14 @@
       await syncKeyboardShortcutPreferences(session);
       if (session !== state.accountSession) return;
       setConnection("Using your Apple Account.", true);
+      if (state.notes.length) {
+        markFirstRunComplete(userID);
+        showApp();
+      } else if (firstRunComplete(userID)) {
+        showApp();
+      } else {
+        showWelcomeStep(signedInDuringWelcome ? "note" : "intro");
+      }
     } catch (error) {
       if (session !== state.accountSession) return;
       window.clearTimeout(preparationSlowTimer);
@@ -6683,8 +6729,6 @@
         stopArborStateSync(true);
         const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts();
         const session = ++state.accountSession;
-        state.pendingArborDeletedNotes.clear();
-        document.dispatchEvent(new Event("arbor:account-change"));
         const undoClose = detachUndoHistory();
         // Wipe unsaved-edit drafts right away. The queued cache delete below also
         // calls clearDrafts, which is safe to run twice.
@@ -7507,7 +7551,10 @@
           state.selectedRecord = saved;
           if (!newerEdit) state.bodyDirty = false;
           const updated = state.notes.find(function (note) { return note.recordName === recordName; });
-          if (updated) renderNoteDate(updated);
+          if (updated) {
+            advanceSemanticRevision(updated);
+            renderNoteDate(updated);
+          }
           if (!state.dirty) {
             hideDraftBanner();
             state.draftBaseline = null;
@@ -7608,16 +7655,17 @@
     }
   }
 
-  async function createNote(initialBody, focusBody) {
-    if (!state.database) { showToast("Sign in with Apple before creating notes.", true); return; }
-    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return; }
+  async function createNote(initialBody, focusBody, initialTitle) {
+    if (!state.database) { showToast("Sign in with Apple before creating notes.", true); return false; }
+    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return false; }
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
     try {
       await flushSave();
       const id = crypto.randomUUID().toUpperCase();
+      const noteTitle = String(initialTitle || "Untitled").trim().slice(0, 180) || "Untitled";
       const noteBody = String(initialBody || "");
-      const legacyBody = "Untitled\n\n" + noteBody;
+      const legacyBody = noteTitle + "\n\n" + noteBody;
       let record;
       if (state.nativeSchema) {
         const folder = state.folders.find(function (item) { return item.path === state.selectedFolder; });
@@ -7629,7 +7677,7 @@
             CD_id: field(id),
             CD_text: field(noteBody),
             CD_derivedAssociations: field(""),
-            CD_userTitle: field("Untitled"),
+            CD_userTitle: field(noteTitle),
             CD_createdAt: field(new Date()),
             CD_modifiedAt: field(new Date())
           }
@@ -7640,11 +7688,11 @@
         setField(record, "contentFingerprint", await fingerprint(legacyBody));
       }
       const response = assertResponse(await saveToDatabase(record));
-      if (!accountSessionCurrent(session)) return;
+      if (!accountSessionCurrent(session)) return false;
       const saved = response.records && response.records[0] ? response.records[0] : record;
       state.records.set(saved.recordName, saved);
       syncDerivedCollections();
-      const content = { title: "Untitled", body: noteBody, userTitle: "Untitled" };
+      const content = { title: noteTitle, body: noteBody, userTitle: noteTitle };
       recordUndoAction({
         kind: "created-record", target: saved.recordName, label: "Create note",
         record: cloneRecord(saved), content: content,
@@ -7655,8 +7703,9 @@
       });
       state.skipNextListTransition = true;
       renderAll();
-      await openNote(saved.recordName, { tabIntent: "new" });
-      if (!accountSessionCurrent(session)) return;
+      const opened = await openNote(saved.recordName, { tabIntent: "new" });
+      if (!opened) return false;
+      if (!accountSessionCurrent(session)) return false;
       if (focusBody) {
         const body = $("note-body"); body.focus();
         const range = document.createRange(); range.selectNodeContents(body); range.collapse(false);
@@ -7664,8 +7713,10 @@
       } else {
         $("note-title").focus(); $("note-title").select();
       }
+      return true;
     } catch (error) {
       showToast(readableError(error), true);
+      return false;
     }
   }
 
@@ -9399,6 +9450,9 @@
   function wireEvents() {
     bindCorrectionPopover();
     bindSelectionReview();
+    $("welcome-continue").addEventListener("click", continueWelcome);
+    $("welcome-auth-continue").addEventListener("click", function () { showWelcomeStep("note"); });
+    $("welcome-note-form").addEventListener("submit", finishWelcomeNote);
     document.addEventListener("keydown", function (event) {
       if (event.key === "Tab" || event.metaKey || event.ctrlKey || event.altKey || !isTypingTarget(event.target)) {
         document.documentElement.classList.add("keyboard-navigation");
@@ -10179,35 +10233,22 @@
   function notifyArborNoteDeleted(recordName) {
     const context = getArborContext();
     if (!context.ready || !context.accountId) return;
-    state.pendingArborDeletedNotes.set(recordName, { accountId: context.accountId, session: context.session });
-    document.dispatchEvent(new CustomEvent("arbor:note-deleted", {
-      detail: { noteId: recordName, context: { accountId: context.accountId, session: context.session } }
-    }));
-  }
-
-  function takePendingArborDeletedNotes() {
-    const pending = Array.from(state.pendingArborDeletedNotes, function (entry) {
-      return { noteId: entry[0], context: entry[1] };
-    });
-    state.pendingArborDeletedNotes.clear();
-    return pending;
-  }
-
-  function showArborStatus(message) {
-    showToast(String(message || ""), false);
+    const store = getArborStateStore(context);
+    if (!store) return;
+    try {
+      store.redactDeletedNote(recordName);
+      state.arborStateSync.sync().catch(function (error) {
+        console.warn("Arbor state redaction will sync when the connection returns.", error && error.message || "sync unavailable");
+      });
+    } catch (error) {
+      console.warn("A deleted source could not be redacted from Arbor history.", error && error.message || "local state unavailable");
+    }
   }
 
   window.arborWeb = {
     clearDrafts: clearDrafts,
     prepareForShellUpdate: prepareForShellUpdate,
     cancelShellUpdatePreparation: cancelShellUpdatePreparation,
-    getArborContext: getArborContext,
-    getArborStateStore: getArborStateStore,
-    getArborSyncStatus: function () { return state.arborSyncStatus; },
-    syncArborState: function () { return state.arborStateSync ? state.arborStateSync.sync() : Promise.resolve(false); },
-    openNote: function (recordName) { return openNote(recordName); },
-    openPassage: openArborPassage,
-    getPendingDeletedNoteRedactions: takePendingArborDeletedNotes,
-    showArborStatus: showArborStatus
+    getArborContext: getArborContext
   };
 })();

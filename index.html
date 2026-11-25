@@ -32,9 +32,8 @@
   </style>
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
-  <link rel="stylesheet" href="./styles.css?v=arb-135-loading-progress-20261125-a">
+  <link rel="stylesheet" href="./styles.css?v=arb-188-first-run-20261125-a">
   <link rel="stylesheet" href="./ui.css?v=arb-179-settings-redesign-20261124-b">
-  <link rel="stylesheet" href="./arbor-view.css?v=arb-178-history-diff-4">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b"></script>
@@ -51,7 +50,7 @@
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
   <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
-  <script src="./app-bootstrap.js?v=arb-135-loading-progress-20261125-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-188-onboarding-shell-20261125-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -62,13 +61,36 @@
   <main class="welcome-screen" id="welcome-screen" aria-labelledby="welcome-title">
     <div class="welcome-content">
       <img class="welcome-mark" src="./icons/icon-monochrome-192.png" alt="">
-      <h1 id="welcome-title">Capture thoughts.<br>Find them later.</h1>
-      <p class="welcome-description" id="welcome-description">Connect Arbor to iCloud. Your browser can stay signed in to Apple; Arbor needs its own permission to read your private notes.</p>
+      <p class="welcome-step-label" id="welcome-step-label" aria-live="polite" hidden></p>
+      <section class="welcome-step" id="welcome-step-intro" aria-labelledby="welcome-title" hidden>
+        <h1 id="welcome-title" tabindex="-1">Capture thoughts.<br>Find them later.</h1>
+        <p class="welcome-description" id="welcome-description">Capture a thought now and find it when you need it. Your browser can stay signed in to Apple; Arbor needs its own permission to read your private notes.</p>
+        <button class="welcome-action" id="welcome-continue" type="button">Continue</button>
+      </section>
+      <section class="welcome-step welcome-step-auth" id="welcome-step-auth" aria-labelledby="welcome-auth-title" hidden>
+        <h1 id="welcome-auth-title" tabindex="-1">Connect your Apple Account.</h1>
+        <p class="welcome-description" id="welcome-auth-description">Sign in to let this browser read and write notes in your iCloud private database.</p>
+        <div class="welcome-auth" id="welcome-auth" hidden>
+          <div id="apple-sign-in-button"></div>
+          <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. This browser keeps a local cache for faster reopening; signing out clears the cache, not your iCloud notes.</p>
+        </div>
+        <p class="welcome-connected" id="welcome-connected" hidden>You’re connected with your Apple Account.</p>
+        <button class="welcome-action" id="welcome-auth-continue" type="button" hidden>Continue</button>
+      </section>
+      <section class="welcome-step welcome-step-note" id="welcome-step-note" aria-labelledby="welcome-note-title" hidden>
+        <h1 id="welcome-note-title" tabindex="-1">Make your first note.</h1>
+        <p class="welcome-description">Edit this example, then finish to open it in Arbor.</p>
+        <form class="welcome-note-form" id="welcome-note-form">
+          <label for="welcome-note-name">Note title</label>
+          <input id="welcome-note-name" name="title" maxlength="180" value="A thought worth keeping" required>
+          <label for="welcome-note-body">Your note</label>
+          <textarea id="welcome-note-body" name="body" rows="5" required>Capture a thought here. Later, search for a phrase you remember to find it again.
+
+Try replacing this example with something you want to remember.</textarea>
+          <button class="welcome-action" id="welcome-note-finish" type="submit">Finish and open note</button>
+        </form>
+      </section>
       <p class="welcome-status is-pending" id="welcome-status" role="status" aria-live="polite">Starting Arbor…</p>
-      <div class="welcome-auth" id="welcome-auth" hidden>
-        <div id="apple-sign-in-button"></div>
-        <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. This browser keeps a local cache for faster reopening; signing out clears the cache, not your iCloud notes.</p>
-      </div>
       <button class="welcome-retry" id="welcome-retry" type="button" hidden>Reload Arbor</button>
     </div>
   </main>
@@ -90,10 +112,6 @@
           <svg class="search-nav-icon" viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.7" cy="8.7" r="5.7"></circle><path d="m13 13 4 4"></path></svg>
           <span>Search</span>
         </button>
-        <button class="all-notes-link arbor-nav-button nav-row" id="arbor-view-open" type="button" aria-label="Open Arbors" title="Arbors" aria-expanded="false" aria-controls="arbor-view-panel">
-          <svg class="arbor-nav-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 17V8M10 12c-3.8 0-5.4-2-5.4-4.8C7.9 7.2 10 8.8 10 12Zm0-2.2c0-3.1 1.8-5.1 5.3-5.3 0 3.2-1.8 5.3-5.3 5.3Z"></path></svg>
-          <span>Arbors</span>
-        </button>
 
         <div class="section-label-row folders-heading">
           <span>Folders</span>
@@ -109,17 +127,6 @@
         <button class="settings-link" id="settings-open" type="button" title="Settings"><span>Settings</span></button>
       </div>
     </aside>
-    <section class="arbor-view-panel" id="arbor-view-panel" aria-label="Arbors" aria-hidden="true" inert hidden>
-      <aside class="arbor-view-navigation" data-arbor-nav aria-label="Arbor paths"></aside>
-      <div class="arbor-view-reading-area">
-        <header class="arbor-view-header">
-          <div class="arbor-view-breadcrumb"><span>Library</span><span aria-hidden="true">/</span><strong data-arbor-title>Arbors</strong></div>
-          <button type="button" class="arbor-view-close" data-action="close" aria-label="Back to notes" title="Back to notes">×</button>
-        </header>
-        <main class="arbor-view-content" data-arbor-content tabindex="-1" aria-live="polite" aria-atomic="true"></main>
-        <div class="arbor-view-status" data-arbor-status role="status" aria-live="polite" aria-atomic="true"></div>
-      </div>
-    </section>
     <div class="pane-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize folders sidebar" aria-valuemin="150" aria-valuemax="360" aria-valuenow="195" tabindex="0"></div>
 
     <section class="list-panel" id="list-panel" aria-labelledby="list-heading">

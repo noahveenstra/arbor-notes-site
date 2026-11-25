@@ -220,10 +220,7 @@ input[type="range"]:focus-visible {
   outline: 0;
 }
 
-.note-title:focus-visible,
-.note-body:focus-visible,
-.rich-editor .ProseMirror:focus-visible,
-.editor-fallback-input:focus-visible {
+.note-title:focus-visible, .note-body:focus-visible {
   outline: 0;
   box-shadow: none;
 }
@@ -234,18 +231,14 @@ input[type="range"]:focus-visible {
   transition: outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;
 }
 
-html.keyboard-navigation .search-field:focus-within,
-html.keyboard-navigation .quick-dialog-bar:focus-within,
-html.keyboard-navigation .search-page-form:focus-within {
+html.keyboard-navigation .quick-dialog-bar:focus-within, html.keyboard-navigation .search-page-form:focus-within {
   border-color: var(--focus-ring, var(--cyan, #078ba5));
   outline: 2px solid var(--focus-ring, var(--cyan, #078ba5));
   outline-offset: 3px;
   transition: border-color var(--motion-fade-duration) ease, outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;
 }
 
-html.keyboard-navigation .search-field:focus-within,
-html.keyboard-navigation .search-page-form:focus-within,
-html.keyboard-navigation .settings-field:has(input:not([type="range"]):focus-visible) {
+html.keyboard-navigation .search-page-form:focus-within {
   box-shadow: 0 0 0 4px var(--focus-ring-halo);
 }
 
@@ -253,8 +246,7 @@ html.keyboard-navigation .quick-dialog-bar:focus-within {
   box-shadow: 0 26px 80px #0009, 0 0 0 4px var(--focus-ring-halo);
 }
 
-html.keyboard-navigation .folder-dialog:focus-within,
-html.keyboard-navigation .settings-field:has(input:not([type="range"]):focus-visible) {
+html.keyboard-navigation .folder-dialog:focus-within {
   outline: 2px solid var(--focus-ring, var(--cyan, #078ba5));
   outline-offset: 3px;
   transition: outline-color var(--motion-fade-duration) ease, outline-offset var(--motion-fade-duration) ease;

@@ -22,7 +22,6 @@
   const state = {
     container: null,
     arborCloudKitTransport: null,
-    arborStateSync: null,
     arborSyncStatus: null,
     arborSignOutGuardInstalled: false,
     database: null,

@@ -12,7 +12,8 @@
   const noteRevisionStore = window.ArborNoteRevisions;
   const keyboardShortcutPreferences = window.ArborKeyboardShortcutPreferences;
   const keyboardShortcutSync = window.ArborKeyboardShortcutSync;
-  const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
+  const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions, createLexicalIndex } = window.ArborSearchLogic;
+  const lexicalIndex = createLexicalIndex();
   const launchLibrary = window.ArborLaunchLibrary;
   const config = window.ARBOR_CLOUDKIT_CONFIG || { demoMode: false };
   const previewMode = new URLSearchParams(window.location.search).get("preview");
@@ -481,6 +482,7 @@
     state.previewLoadErrors = new Set();
     state.notes = [];
     state.folders = [];
+    refreshLexicalIndex();
     state.syncToken = null;
     state.editQueue = [];
     state.syncBaselines.clear();
@@ -883,6 +885,8 @@
       current.body = body; current.title = parts.title; current.editorBody = parts.body;
       current.preview = previewText(parts.body); current.previewUnavailable = false;
     }
+    if (current) refreshLexicalNote(current);
+    if (state.searchPage || ($("search-dialog") && $("search-dialog").open)) rerenderActiveSearch();
     if (!state.cacheKey) return;
     scheduleLibraryCacheWrite();
   }
@@ -1471,6 +1475,7 @@
         note.path = (note.folderPath ? note.folderPath + "/" : "") + cleanFilenameStem(note.title) + ".md";
         return note;
       });
+      refreshLexicalIndex();
       return;
     }
     const noteRecords = [];
@@ -1497,6 +1502,7 @@
     state.folders = Array.from(byPath.values()).sort(function (a, b) {
       return a.path.localeCompare(b.path, undefined, { sensitivity: "base" });
     });
+    refreshLexicalIndex();
   }
 
   function formatDate(date) {
@@ -2778,20 +2784,68 @@
     return !state.nativeSchema && typeof fieldValue(note.record, "body") === "string";
   }
 
+  function searchableDocument(note) {
+    const modifiedAt = note.modifiedAt instanceof Date ? note.modifiedAt.getTime() : Number(note.updatedAt || 0);
+    const loaded = noteBodyLoaded(note);
+    return {
+      id: note.recordName,
+      title: note.title,
+      body: launchLibrary ? launchLibrary.searchBody(note, loaded) : (loaded ? (note.editorBody || note.body || "") : ""),
+      folder: note.folderPath || "",
+      createdAt: note.createdAt instanceof Date ? note.createdAt.getTime() : Number(note.createdAt || 0),
+      updatedAt: modifiedAt,
+      sourceRevision: semanticSourceRevision(note)
+    };
+  }
+
   function searchCorpus() {
-    return state.notes.filter(function (note) { return !isArchived(note.record); }).map(function (note) {
-      const modifiedAt = note.modifiedAt.getTime();
-      const loaded = noteBodyLoaded(note);
-      return {
-        id: note.recordName,
-        title: note.title,
-        body: launchLibrary ? launchLibrary.searchBody(note, loaded) : (loaded ? (note.editorBody || note.body || "") : ""),
-        folder: note.folderPath || "",
-        createdAt: note.createdAt.getTime(),
-        updatedAt: modifiedAt,
-        sourceRevision: semanticSourceRevision(note)
-      };
+    return state.notes.filter(function (note) { return !isArchived(note.record); }).map(searchableDocument);
+  }
+
+  function refreshLexicalIndex() {
+    if (!lexicalIndex) return;
+    lexicalIndex.sync(searchCorpus());
+  }
+
+  function refreshLexicalNote(note) {
+    if (!lexicalIndex || !note) return;
+    if (isArchived(note.record)) lexicalIndex.remove(note.recordName);
+    else lexicalIndex.upsert(searchableDocument(note));
+  }
+
+  let lexicalSearchGeneration = 0;
+  let activeLexicalQuery = null;
+
+  function rerenderActiveSearch() {
+    if (state.searchPage) renderSearchPage();
+    else if ($("search-dialog") && $("search-dialog").open) renderSearchSuggestions($("global-search-input").value);
+  }
+
+  function rankedLexicalNotes(query) {
+    const key = String(query || "");
+    if (lexicalIndex && lexicalIndex.isQueryPending() && activeLexicalQuery === key) return [];
+    refreshLexicalIndex();
+    if (!lexicalIndex) return searchLexically(searchCorpus(), query);
+    const generation = ++lexicalSearchGeneration;
+    const outcome = lexicalIndex.search(query);
+    if (!outcome.pending) {
+      activeLexicalQuery = null;
+      return outcome.results;
+    }
+    activeLexicalQuery = key;
+    outcome.promise.then(function () {
+      if (generation !== lexicalSearchGeneration) return;
+      activeLexicalQuery = null;
+      const input = state.searchPage ? $("expanded-search-input") : $("global-search-input");
+      const text = input && input.value || "";
+      const request = state.semanticCurrentRequest;
+      if (request && String(request.query || "") === text) {
+        const ready = lexicalIndex.search(text);
+        if (!ready.pending) request.priorityNoteIds = ready.results.slice(0, 12).map(function (note) { return note.id; });
+      }
+      rerenderActiveSearch();
     });
+    return [];
   }
 
   function advanceSemanticRevision(note) {
@@ -2867,14 +2921,14 @@
   }
 
   function lexicalSearchNotes(query) {
-    return searchLexically(searchCorpus(), query);
+    return rankedLexicalNotes(query);
   }
 
   function searchNotes(query) {
     const normalized = String(query || "").trim().toLocaleLowerCase();
     if (!normalized) return [];
     const corpus = searchCorpus();
-    const lexical = searchLexically(corpus, normalized).map(function (note) {
+    const lexical = rankedLexicalNotes(query).map(function (note) {
       const range = window.ArborPassageAnchor.findLexicalPassageRange(note.body, query);
       return Object.assign({}, note, { _passageCandidate: range ? { body: note.body, range: range } : null });
     });
@@ -3173,6 +3227,13 @@
     const list = $("search-suggestions"); const input = $("global-search-input"); const text = String(query || "").trim();
     scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
     if (!text) { state.searchActiveIndex = -1; input.removeAttribute("aria-activedescendant"); setMotionVisibility(list, false); list.innerHTML = ""; return; }
+    if (!state.searchItems.length && lexicalIndex && lexicalIndex.isQueryPending()) {
+      state.searchActiveIndex = -1;
+      input.removeAttribute("aria-activedescendant");
+      setMotionVisibility(list, false);
+      list.innerHTML = "";
+      return;
+    }
     if (state.searchActiveIndex >= state.searchItems.length) state.searchActiveIndex = -1;
     const progress = semanticProgressText(text);
     if (!state.searchItems.length) {
@@ -3222,6 +3283,11 @@
     if (document.activeElement !== input) input.value = state.searchQuery;
     const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query); scheduleCloudKitTitleSearch(query);
     state.searchItems = searchNotes(query).slice(0, 100);
+    if (query && lexicalIndex && lexicalIndex.isQueryPending()) {
+      $("expanded-search-count").textContent = "";
+      $("expanded-search-results").innerHTML = "";
+      return;
+    }
     if (!query) {
       $("expanded-search-count").textContent = "";
       $("expanded-search-results").innerHTML = '<div class="search-page-empty">Search your notes by a word or phrase.</div>';
@@ -7656,6 +7722,7 @@
       note.editorBody = note.body;
       note.preview = previewText(note.body);
       advanceSemanticRevision(note);
+      refreshLexicalNote(note);
     }
     persistCurrentDraft();
     rememberPendingEdit(recordName, currentMarkdown());

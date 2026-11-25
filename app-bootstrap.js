@@ -14,11 +14,11 @@ const CLOUDKIT_SCRIPT_URL = "https://cdn.apple-cloudkit.com/ck/2/cloudkit.js";
 const PWA_CLIENT_URL = "./pwa-client.js?v=arb-94-update-action-20261119-a";
 const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
 const PASSAGE_ANCHOR_URL = "./passage-anchor.js?v=recall-anchor-1";
-const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
+const RUST_SEARCH_URL = "./rust-search.js?v=arb-125-rust-index-20261125-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
 const CLOUDKIT_WEB_SERVICES_URL = "./cloudkit-encrypted-web-services.mjs?v=arb-190-instant-launch-20261125-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-save-indicator-20261125-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-125-rust-index-20261125-a";
 let startupStatusTimer = null;
 
 function clearStartupStatusTimer() {
@@ -173,6 +173,11 @@ async function prepareShell() {
 }
 
 async function startApp() {
+  const rustSearchPromise = globalThis.ArborRustSearchCore
+    ? Promise.resolve()
+    : appendClassicScript(RUST_SEARCH_URL).catch(function (error) {
+        console.warn("Arbor is starting with its browser lexical-search fallback.", error);
+      });
   setStartupStatus(
     "Starting Arbor…",
     "Arbor is still starting. It is preparing the workspace and Apple sign-in connection."
@@ -200,11 +205,7 @@ async function startApp() {
   globalThis.ArborPassageAnchor = await importModule(PASSAGE_ANCHOR_URL);
   globalThis.ArborCloudKitWebZone = await importModule(CLOUDKIT_WEB_ZONE_URL);
   globalThis.ArborCloudKitWebServices = await importModule(CLOUDKIT_WEB_SERVICES_URL);
-  try {
-    await appendClassicScript(RUST_SEARCH_URL);
-  } catch (error) {
-    console.warn("Arbor is starting with its browser lexical-search fallback.", error);
-  }
+  await rustSearchPromise;
   await appendClassicScript(NOTE_SORT_URL);
   if (!isSamplePreview && !cloudKitLoaded) {
     setStartupStatus(

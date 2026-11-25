@@ -5841,12 +5841,20 @@
     }, true);
   }
 
+  function noteEditInProgress(recordName) {
+    if (!recordName) return false;
+    if (state.editQueue.some(function (edit) { return edit.recordName === recordName; })) return true;
+    return state.selectedRecordName === recordName && (state.dirty || state.saveFlightCount > 0);
+  }
+
   function selectRestoredNote(note) {
     if (!note) {
+      if (noteEditInProgress(state.selectedRecordName)) return;
       selectNote(null);
       return;
     }
-    if (state.selectedRecordName === note.recordName && state.editor) return;
+    if (state.selectedRecordName === note.recordName && state.editor && noteEditInProgress(note.recordName)) return;
+    if (noteEditInProgress(state.selectedRecordName) && state.selectedRecordName !== note.recordName) return;
     selectNote(note);
   }
 
@@ -6134,10 +6142,10 @@
     const restoredState = restoreOpenTabsForLoadedNotes();
     const first = noteSorting.sortNotes(state.notes.filter(function (note) { return !isArchived(note.record); }), state.preferences.noteSortOrder)[0];
     const current = state.notes.find(function (note) { return note.recordName === state.selectedRecordName && !isArchived(note.record); });
-    if (state.preferences.tabsEnabled && restoredState.note) selectNote(restoredState.note);
-    else if (restoredState.hidden) selectNote(null);
-    else if (!state.preferences.tabsEnabled && currentNoteFromHistory()) selectNote(currentNoteFromHistory());
-    else if (current) selectNote(current); else if (first) selectNote(first); else selectNote(null);
+    if (state.preferences.tabsEnabled && restoredState.note) selectRestoredNote(restoredState.note);
+    else if (restoredState.hidden) selectRestoredNote(null);
+    else if (!state.preferences.tabsEnabled && currentNoteFromHistory()) selectRestoredNote(currentNoteFromHistory());
+    else if (current) selectRestoredNote(current); else if (first) selectRestoredNote(first); else selectRestoredNote(null);
     scheduleLibraryCacheWrite();
   }
 
@@ -7210,16 +7218,91 @@
     } catch (_) {}
   }
 
+  function jsonSafeModifiedAt(value) {
+    if (value instanceof Date) return value.toISOString();
+    if (value == null) return "";
+    if (typeof value === "object") return "";
+    return String(value);
+  }
+
+  function baseDocumentForEdit(recordName, record) {
+    const baseline = state.syncBaselines.get(recordName);
+    if (baseline && typeof baseline.title === "string" && typeof baseline.body === "string") {
+      return { title: baseline.title, body: baseline.body };
+    }
+    const cached = state.bodyCache.get(recordName);
+    if (typeof cached !== "string") return { title: "", body: "" };
+    if (record && isNativeModelRecord(record, "CapturedNote")) {
+      return {
+        title: normalizedTitle(fieldValue(record, "userTitle") || fieldValue(record, "generatedTitle") || firstLineTitle(cached)),
+        body: cached
+      };
+    }
+    return splitDocument(cached);
+  }
+
+  function captureEditBase(recordName) {
+    const record = state.records.get(recordName) || (state.selectedRecordName === recordName ? state.selectedRecord : null);
+    const documentValue = baseDocumentForEdit(recordName, record);
+    return {
+      recordChangeTag: String(record && record.recordChangeTag || ""),
+      modifiedAt: jsonSafeModifiedAt(record ? fieldValue(record, "modifiedAt") : ""),
+      contentFingerprint: String(record ? fieldValue(record, "contentFingerprint") || "" : ""),
+      title: documentValue.title,
+      body: documentValue.body
+    };
+  }
+
   function rememberPendingEdit(recordName, body) {
     if (!launchLibrary || !recordName || body == null) return;
     const documentValue = documentForSaveBody(body, state.records.get(recordName) || state.selectedRecord);
+    const existing = state.editQueue.find(function (edit) { return edit.recordName === recordName; });
+    const base = existing && existing.base ? existing.base : captureEditBase(recordName);
     state.editQueue = launchLibrary.upsertPendingEdit(state.editQueue, {
       recordName: recordName,
       title: documentValue.title,
       body: body,
-      updatedAt: Date.now()
+      updatedAt: Date.now(),
+      base: base
     });
     storeEditQueue();
+    if (!base.contentFingerprint && (base.title || base.body)) {
+      const stamp = base.recordChangeTag + "\n" + base.modifiedAt;
+      fingerprint(base.title + "\n" + base.body).then(function (hash) {
+        let changed = false;
+        state.editQueue = state.editQueue.map(function (edit) {
+          if (edit.recordName !== recordName || !edit.base) return edit;
+          if (edit.base.contentFingerprint) return edit;
+          if ((edit.base.recordChangeTag + "\n" + edit.base.modifiedAt) !== stamp) return edit;
+          changed = true;
+          return Object.assign({}, edit, { base: Object.assign({}, edit.base, { contentFingerprint: hash }) });
+        });
+        if (changed) storeEditQueue();
+      }).catch(function () {});
+    }
+  }
+
+  function pendingEditFor(recordName) {
+    return state.editQueue.find(function (edit) { return edit.recordName === recordName; }) || null;
+  }
+
+  function rememberPendingEditBaseline(edit) {
+    if (!edit || !edit.base || !edit.base.recordChangeTag) return;
+    if (typeof edit.base.title !== "string" || typeof edit.base.body !== "string") return;
+    rememberSyncBaseline(edit.recordName, { title: edit.base.title, body: edit.base.body });
+  }
+
+  function recordForPendingEdit(record, edit) {
+    if (!record) return null;
+    const base = edit && edit.base;
+    if (!base || !base.recordChangeTag) return record.recordChangeTag ? null : record;
+    const copy = cloneRecord(record);
+    copy.recordChangeTag = base.recordChangeTag;
+    if (base.modifiedAt) setField(copy, "modifiedAt", base.modifiedAt);
+    if (base.contentFingerprint && (record.recordType === "ArborNote" || fieldValue(record, "contentFingerprint") != null)) {
+      setField(copy, "contentFingerprint", base.contentFingerprint);
+    }
+    return copy;
   }
 
   function dropPendingEdit(recordName) {
@@ -7522,9 +7605,18 @@
       }
       const record = state.records.get(edit.recordName);
       if (!record) continue;
+      const based = recordForPendingEdit(record, edit);
+      if (!based) {
+        if (state.selectedRecordName === edit.recordName) {
+          setSaveState("Needs attention", "error");
+          showToast("This note changed in iCloud. Arbor kept your edits on this browser.", true);
+        }
+        continue;
+      }
       try {
         if (state.selectedRecordName === edit.recordName) setSaveState("Saving…", "saving");
-        await saveRecord(record, edit.body);
+        rememberPendingEditBaseline(edit);
+        await saveRecord(based, edit.body);
         dropPendingEdit(edit.recordName);
         clearDraft(edit.recordName);
         rememberRecordBody(edit.recordName, typeof edit.body === "string" ? edit.body : edit.body.title + "\n\n" + edit.body.body, state.accountSession);
@@ -7533,6 +7625,11 @@
         if (launchLibrary && launchLibrary.isNetworkSaveFailure(error) || browserOffline()) {
           if (state.selectedRecordName === edit.recordName) setSaveState("Offline", "dirty");
           return;
+        }
+        if (error && error.arborPreservedDraft || isCloudKitRecordConflict(error)) {
+          if (state.selectedRecordName === edit.recordName) setSaveState("Needs attention", "error");
+          showToast(readableError(error), true);
+          continue;
         }
         if (state.selectedRecordName === edit.recordName) setSaveState("Save failed", "error");
       }
@@ -7549,6 +7646,13 @@
     if (!state.dirty || !state.selectedRecord || !state.database) return state.savePromise.catch(function () {});
     const recordName = state.selectedRecordName;
     const recordSnapshot = state.selectedRecord;
+    const queuedEdit = pendingEditFor(recordName);
+    const basedRecord = recordForPendingEdit(state.records.get(recordName) || recordSnapshot, queuedEdit);
+    if (!basedRecord) {
+      setSaveState("Needs attention", "error");
+      showToast("This note changed in iCloud. Arbor kept your edits on this browser.", true);
+      return state.savePromise.catch(function () {});
+    }
     const body = currentMarkdown();
     const isFirstSaveForNewNote = state.pendingNewNoteRecords.has(recordName);
     const session = state.accountSession;
@@ -7564,7 +7668,8 @@
         const selectedNote = state.notes.find(function (note) { return note.recordName === recordName; });
         if (state.nativeSchema && selectedNote) await ensureFullNativeRecord(selectedNote);
         if (superseded()) return;
-        const latest = state.records.get(recordName) || recordSnapshot;
+        const latest = recordForPendingEdit(state.records.get(recordName) || recordSnapshot, pendingEditFor(recordName)) || basedRecord;
+        rememberPendingEditBaseline(pendingEditFor(recordName));
         const submittedDocument = documentForSaveBody(body, latest);
         const saved = await saveRecord(latest, body);
         if (superseded()) return;
@@ -7651,7 +7756,9 @@
         if (!newerEdit) persistDraftSnapshot(recordName, parts);
         if (state.selectedRecordName === recordName) {
           state.dirty = true;
-          setSaveState(launchLibrary && launchLibrary.isNetworkSaveFailure(error) ? "Offline" : "Save failed", launchLibrary && launchLibrary.isNetworkSaveFailure(error) ? "dirty" : "error");
+          const networkFailure = launchLibrary && launchLibrary.isNetworkSaveFailure(error);
+          const conflict = Boolean(error && error.arborPreservedDraft) || isCloudKitRecordConflict(error);
+          setSaveState(networkFailure ? "Offline" : conflict ? "Needs attention" : "Save failed", networkFailure ? "dirty" : "error");
         }
         showToast(readableError(error), true);
         throw error;

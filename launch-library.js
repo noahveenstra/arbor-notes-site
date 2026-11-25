@@ -41,7 +41,8 @@
         recordName: item.recordName,
         title: String(item.title || "Untitled"),
         body: typeof body === "string" ? body : { title: String(body.title || "Untitled"), body: String(body.body || "") },
-        updatedAt: Number(item.updatedAt) || 0
+        updatedAt: Number(item.updatedAt) || 0,
+        base: normalizeEditBase(item.base)
       });
     });
     return Array.from(byName.values()).sort(function (left, right) {
@@ -49,16 +50,29 @@
     }).slice(-EDIT_QUEUE_LIMIT);
   }
 
+  function normalizeEditBase(base) {
+    if (!base || typeof base !== "object") return null;
+    return {
+      recordChangeTag: String(base.recordChangeTag || ""),
+      modifiedAt: base.modifiedAt == null ? "" : String(base.modifiedAt),
+      contentFingerprint: String(base.contentFingerprint || ""),
+      title: String(base.title || ""),
+      body: typeof base.body === "string" ? base.body : ""
+    };
+  }
+
   function upsertPendingEdit(queue, edit, limit) {
     const cap = Number.isInteger(limit) && limit > 0 ? limit : EDIT_QUEUE_LIMIT;
     const name = edit && edit.recordName;
     if (!name) return normalizeEditQueue(queue);
+    const prior = normalizeEditQueue(queue).find(function (item) { return item.recordName === name; });
     const next = normalizeEditQueue(queue).filter(function (item) { return item.recordName !== name; });
     next.push({
       recordName: name,
       title: String(edit.title || "Untitled"),
       body: edit.body,
-      updatedAt: Number(edit.updatedAt) || Date.now()
+      updatedAt: Number(edit.updatedAt) || Date.now(),
+      base: prior && prior.base ? prior.base : normalizeEditBase(edit.base)
     });
     return normalizeEditQueue(next).slice(-cap);
   }
@@ -105,6 +119,7 @@
     cachedLibraryIsPaintable: cachedLibraryIsPaintable,
     editQueueKey: editQueueKey,
     normalizeEditQueue: normalizeEditQueue,
+    normalizeEditBase: normalizeEditBase,
     upsertPendingEdit: upsertPendingEdit,
     removePendingEdit: removePendingEdit,
     isNetworkSaveFailure: isNetworkSaveFailure,

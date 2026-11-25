@@ -32,7 +32,7 @@
   </style>
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
-  <link rel="stylesheet" href="./styles.css?v=arb-130-signed-out-welcome-20261122-a">
+  <link rel="stylesheet" href="./styles.css?v=arb-135-loading-progress-20261125-a">
   <link rel="stylesheet" href="./ui.css?v=arb-179-settings-redesign-20261124-b">
   <link rel="stylesheet" href="./arbor-view.css?v=arb-178-history-diff-4">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
@@ -51,7 +51,7 @@
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
   <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
-  <script src="./app-bootstrap.js?v=arb-auth-startup-recovery-20261125-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-135-loading-progress-20261125-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -64,7 +64,7 @@
       <img class="welcome-mark" src="./icons/icon-monochrome-192.png" alt="">
       <h1 id="welcome-title">Capture thoughts.<br>Find them later.</h1>
       <p class="welcome-description" id="welcome-description">Connect Arbor to iCloud. Your browser can stay signed in to Apple; Arbor needs its own permission to read your private notes.</p>
-      <p class="welcome-status" id="welcome-status" role="status" aria-live="polite">Starting Arbor…</p>
+      <p class="welcome-status is-pending" id="welcome-status" role="status" aria-live="polite">Starting Arbor…</p>
       <div class="welcome-auth" id="welcome-auth" hidden>
         <div id="apple-sign-in-button"></div>
         <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. This browser keeps a local cache for faster reopening; signing out clears the cache, not your iCloud notes.</p>
@@ -148,7 +148,7 @@
       <div class="note-editor-column" id="note-editor-column">
       <div class="note-tab-strip" id="note-tab-strip" role="group" aria-label="Open notes" hidden></div>
       <div class="editor-empty" id="empty-state">
-        <span>Choose a note to read it.</span>
+        <span id="empty-state-copy">Choose a note to read it.</span>
         <button id="empty-new-note-button" type="button" hidden>New note</button>
       </div>
 

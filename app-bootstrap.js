@@ -9,6 +9,7 @@ const SERVICE_WORKER_SCOPE = APP_BASE_URL.pathname;
 const WORKER_OPTIONS = { scope: SERVICE_WORKER_SCOPE, updateViaCache: "none" };
 const WORKER_READY_TIMEOUT_MS = 12_000;
 const STARTUP_DEPENDENCY_TIMEOUT_MS = 15_000;
+const STARTUP_SLOW_STATUS_MS = 10_000;
 const CLOUDKIT_SCRIPT_URL = "https://cdn.apple-cloudkit.com/ck/2/cloudkit.js";
 const PWA_CLIENT_URL = "./pwa-client.js?v=arb-94-update-action-20261119-a";
 const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
@@ -17,10 +18,31 @@ const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
 const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-2-auth-header-rotation-20261124-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-auth-startup-recovery-20261125-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-135-loading-progress-20261125-a";
 const ARBOR_VIEW_URL = "./arbor-view.js?v=arb-178-voice-default-20261124-a";
+let startupStatusTimer = null;
+
+function clearStartupStatusTimer() {
+  window.clearTimeout(startupStatusTimer);
+  startupStatusTimer = null;
+}
+
+function setStartupStatus(message, slowMessage) {
+  const status = document.getElementById("welcome-status");
+  if (!status) return;
+  clearStartupStatusTimer();
+  status.hidden = false;
+  status.classList.add("is-pending");
+  status.textContent = message;
+  if (slowMessage) {
+    startupStatusTimer = window.setTimeout(function () {
+      status.textContent = slowMessage;
+    }, STARTUP_SLOW_STATUS_MS);
+  }
+}
 
 function showBootError(error) {
+  clearStartupStatusTimer();
   const message = document.getElementById("shell-boot-error");
   if (message) {
     message.hidden = false;
@@ -113,6 +135,10 @@ function importModule(source) {
 }
 
 async function prepareShell() {
+  setStartupStatus(
+    "Preparing this browser…",
+    "Arbor is still setting up this browser. Keep this page open; it will show a retry option if setup fails."
+  );
   const serviceWorkers = navigator.serviceWorker;
   if (!serviceWorkers || window.location.protocol === "file:") return true;
 
@@ -148,13 +174,28 @@ async function prepareShell() {
 }
 
 async function startApp() {
+  setStartupStatus(
+    "Starting Arbor…",
+    "Arbor is still starting. It is preparing the workspace and Apple sign-in connection."
+  );
   if (!(await prepareShell())) return;
   if (window.__arborFirstControlReloadStarted) return;
   window.__arborFirstControlReloadStarted = true;
+  setStartupStatus(
+    "Loading Arbor’s workspace…",
+    "Arbor is still loading its workspace. Keep this page open; it will show a retry option if a required component fails."
+  );
   const isSamplePreview = new URLSearchParams(window.location.search).get("preview") === "sample";
+  let cloudKitLoaded = isSamplePreview;
   const cloudKitLoad = isSamplePreview
     ? Promise.resolve(null)
-    : appendClassicScript(CLOUDKIT_SCRIPT_URL).then(function () { return null; }, function (error) { return error; });
+    : appendClassicScript(CLOUDKIT_SCRIPT_URL).then(function () {
+      cloudKitLoaded = true;
+      return null;
+    }, function (error) {
+      cloudKitLoaded = true;
+      return error;
+    });
   await importModule(PWA_CLIENT_URL);
   globalThis.ArborUndoHistory = await importModule(UNDO_HISTORY_URL);
   globalThis.ArborPassageAnchor = await importModule(PASSAGE_ANCHOR_URL);
@@ -166,9 +207,20 @@ async function startApp() {
     console.warn("Arbor is starting with its browser lexical-search fallback.", error);
   }
   await appendClassicScript(NOTE_SORT_URL);
+  if (!isSamplePreview && !cloudKitLoaded) {
+    setStartupStatus(
+      "Connecting to Apple’s sign-in service…",
+      "Apple’s sign-in service is taking longer than usual. Arbor is still waiting and will offer a retry if the connection fails."
+    );
+  }
   const cloudKitError = await cloudKitLoad;
   if (cloudKitError) throw cloudKitError;
+  setStartupStatus(
+    "Checking your Apple Account…",
+    "Arbor is still checking your Apple Account session. Keep this page open; a retry option will appear if the check fails."
+  );
   await appendClassicScript(APP_SCRIPT_URL);
+  clearStartupStatusTimer();
   globalThis.ArborView = await importModule(ARBOR_VIEW_URL);
   globalThis.ArborView.mountArborView({ api: window.arborWeb });
   document.documentElement.classList.remove("is-preparing-shell");

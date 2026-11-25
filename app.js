@@ -32,6 +32,8 @@
     demo: false,
     largeDemo: false,
     loadingRecords: false,
+    libraryLoadSlow: false,
+    libraryLoadSlowMessage: "",
     loadRecordsErrorMessage: "",
     libraryLoadOperation: "",
     records: new Map(),
@@ -447,6 +449,8 @@
     state.saveTimer = null;
     state.dirty = false;
     state.loadingRecords = false;
+    state.libraryLoadSlow = false;
+    state.libraryLoadSlowMessage = "";
     state.loadRecordsErrorMessage = "";
     state.records = new Map();
     state.pendingNewNoteRecords.clear();
@@ -1041,13 +1045,20 @@
     frame.hidden = false;
   }
 
+  function setWelcomeStatus(text, pending) {
+    const status = $("welcome-status");
+    if (!status) return;
+    status.hidden = false;
+    status.textContent = text;
+    status.classList.toggle("is-pending", Boolean(pending));
+  }
+
   function showWelcomeChecking() {
     const screen = $("welcome-screen");
     screen.hidden = false;
     screen.dataset.state = "checking";
     $("setup-screen").hidden = true;
-    $("welcome-status").hidden = false;
-    $("welcome-status").textContent = "Restoring Arbor’s iCloud session…";
+    setWelcomeStatus("Checking your Apple Account session…", true);
     $("welcome-auth").hidden = true;
     $("welcome-retry").hidden = true;
     frame.hidden = true;
@@ -1059,6 +1070,7 @@
     screen.dataset.state = "signed-out";
     $("setup-screen").hidden = true;
     $("welcome-status").hidden = true;
+    $("welcome-status").classList.remove("is-pending");
     $("welcome-auth").hidden = false;
     $("welcome-retry").hidden = true;
     frame.hidden = true;
@@ -1069,8 +1081,7 @@
     screen.hidden = false;
     screen.dataset.state = "error";
     $("setup-screen").hidden = true;
-    $("welcome-status").hidden = false;
-    $("welcome-status").textContent = "Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple; reload Arbor to retry.";
+    setWelcomeStatus("Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple; reload Arbor to retry.", false);
     $("welcome-auth").hidden = true;
     $("welcome-retry").hidden = false;
     frame.hidden = true;
@@ -1616,7 +1627,11 @@
       const dateField = noteSorting.dateFieldFor(state.preferences.noteSortOrder);
       if (state.loadingRecords && state.notes.length === 0) {
         renderNoteSkeleton(list, dateField);
-        setListMessage("Loading notes…", true, false, false, true);
+        setListMessage(state.libraryLoadSlowMessage || "Loading notes…", true, false, false, !state.libraryLoadSlow);
+        return;
+      }
+      if (state.loadingRecords && state.libraryLoadSlow) {
+        setListMessage(state.libraryLoadSlowMessage || "Still checking iCloud for notes in this view. Arbor will update the list when they arrive.", true, false, false);
         return;
       }
       if (state.loadRecordsErrorMessage) {
@@ -1628,7 +1643,9 @@
       return;
     }
     if (state.loadRecordsErrorMessage) setListMessage(state.loadRecordsErrorMessage, true, true, true);
-    else setListMessage("", false, false);
+    else if (state.loadingRecords && state.libraryLoadSlow) {
+      setListMessage(state.libraryLoadSlowMessage || "Your loaded notes remain available while Arbor checks iCloud for updates.", true, false, false);
+    } else setListMessage("", false, false);
     const dateField = noteSorting.dateFieldFor(state.preferences.noteSortOrder);
     if (!dateField) {
       visible.forEach(function (note) {
@@ -1942,6 +1959,14 @@
     renderNotes();
     applyLayout();
     applyAppearance();
+    const emptyStateCopy = $("empty-state-copy");
+    if (emptyStateCopy) {
+      if (state.loadingRecords && !state.selectedRecordName) {
+        emptyStateCopy.textContent = state.libraryLoadSlow
+          ? (state.libraryLoadSlowMessage || (state.notes.length ? "Still checking iCloud for updates…" : "Still loading your notes from iCloud…"))
+          : (state.notes.length ? "Refreshing your notes…" : "Loading your notes…");
+      } else emptyStateCopy.textContent = "Choose a note to read it.";
+    }
     const showingAllNotes = !state.searchPage && !state.showingArchive && state.selectedFolder === "";
     $("all-notes-button").classList.toggle("is-selected", showingAllNotes);
     $("all-notes-button").classList.toggle("is-active", showingAllNotes);
@@ -5983,7 +6008,7 @@
 
   async function loadZoneRecords(session) {
     if (!accountSessionCurrent(session)) return;
-    state.loadingRecords = true; state.loadRecordsErrorMessage = ""; state.libraryLoadOperation = ""; renderNotes();
+    state.loadingRecords = true; state.libraryLoadSlow = false; state.libraryLoadSlowMessage = ""; state.loadRecordsErrorMessage = ""; state.libraryLoadOperation = ""; renderNotes();
     if (config.schemaMode === "web") {
       state.nativeSchema = false;
       if (!state.arborCloudKitTransport || typeof state.arborCloudKitTransport.createClient !== "function") {
@@ -6061,7 +6086,7 @@
       syncDerivedCollections(); renderAll(); await fetchChanges(null);
     }
     if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
-    state.libraryLoadOperation = ""; state.loadingRecords = false;
+    state.libraryLoadOperation = ""; state.loadingRecords = false; state.libraryLoadSlow = false; state.libraryLoadSlowMessage = "";
     syncDerivedCollections(); renderAll();
     const restoredState = restoreOpenTabsForLoadedNotes();
     const first = noteSorting.sortNotes(state.notes.filter(function (note) { return !isArchived(note.record); }), state.preferences.noteSortOrder)[0];
@@ -6375,6 +6400,12 @@
       return;
     }
     const session = ++state.accountSession;
+    showWelcomeChecking();
+    setWelcomeStatus("Preparing your private notes…", true);
+    const accountPreparationSlowTimer = window.setTimeout(function () {
+      if (session !== state.accountSession) return;
+      setWelcomeStatus("Arbor is still preparing your private notes on this browser. Your notes will load from iCloud next; keep this page open.", true);
+    }, NOTE_LOAD_SLOW_NOTICE_MS);
     stopArborStateSync(false);
     state.pendingArborDeletedNotes.clear();
     document.dispatchEvent(new Event("arbor:account-change"));
@@ -6432,6 +6463,7 @@
         ready = true;
       });
     } catch (error) {
+      window.clearTimeout(accountPreparationSlowTimer);
       if (session !== state.accountSession) return;
       setConnection("Signed in · Sync needs attention", false);
       showApp();
@@ -6439,14 +6471,29 @@
       showToast(readableError(error), true);
       return;
     }
+    window.clearTimeout(accountPreparationSlowTimer);
     if (!ready || session !== state.accountSession) return;
+    state.loadingRecords = true;
+    state.libraryLoadSlow = false;
+    state.libraryLoadSlowMessage = "";
+    state.loadRecordsErrorMessage = "";
+    setConnection("Preparing your private notes…", false);
+    updateArborName();
+    showApp();
+    renderAll();
+    let preparationSlowTimer = window.setTimeout(function () {
+      if (session !== state.accountSession || !state.loadingRecords) return;
+      state.libraryLoadSlow = true;
+      state.libraryLoadSlowMessage = state.notes.length
+        ? "Still preparing your notes on this browser. Notes already loaded remain available."
+        : "Still preparing your notes on this browser. They will appear here as soon as they are ready.";
+      setConnection("Still preparing your notes…", false);
+      renderAll();
+    }, NOTE_LOAD_SLOW_NOTICE_MS);
     startArborStateSync(userID, session);
     try { await openUndoHistoryForAccount(state.cacheKey, false); }
     catch (_) { showToast("Undo history could not be loaded from this browser.", true); }
     if (session !== state.accountSession) return;
-    setConnection("Connecting to iCloud…", false);
-    updateArborName();
-    showApp();
     try {
       const restored = await restoreLibraryCache();
       if (session !== state.accountSession) return;
@@ -6458,8 +6505,12 @@
         else if (currentNoteFromHistory()) selectNote(currentNoteFromHistory());
         else selectNote(null);
         setConnection("Connected · refreshing notes…", true);
-      }
+      } else setConnection("Loading your notes from iCloud…", false);
       if (session !== state.accountSession) return;
+      window.clearTimeout(preparationSlowTimer);
+      preparationSlowTimer = null;
+      state.libraryLoadSlow = false;
+      state.libraryLoadSlowMessage = "";
       if (!(await loadZoneRecordsWithFeedback(session))) return;
       if (session !== state.accountSession) return;
       startRealtimeSync(session);
@@ -6470,29 +6521,56 @@
       setConnection("Using your Apple Account.", true);
     } catch (error) {
       if (session !== state.accountSession) return;
+      window.clearTimeout(preparationSlowTimer);
+      if (state.loadingRecords) {
+        state.loadingRecords = false;
+        state.libraryLoadSlow = false;
+        state.libraryLoadSlowMessage = "";
+        state.loadRecordsErrorMessage = readableError(error);
+        renderAll();
+        setListMessage(state.loadRecordsErrorMessage, true, true, true);
+      }
       setConnection("Signed in · Sync needs attention", false);
-      if (!state.notes.length) {
-        setListMessage(readableError(error), true, true);
+      if (!state.notes.length && !state.loadingRecords) {
+        setListMessage(readableError(error), true, true, true);
       }
       showToast(readableError(error), true);
     }
   }
 
+  const NOTE_LOAD_SLOW_NOTICE_MS = 10_000;
+
   async function loadZoneRecordsWithFeedback(session) {
+    const slowNoticeTimer = window.setTimeout(function () {
+      if (!accountSessionCurrent(session) || !state.loadingRecords) return;
+      state.libraryLoadSlow = true;
+      state.libraryLoadSlowMessage = state.notes.length
+        ? "Your loaded notes remain available while Arbor checks iCloud for updates. This is taking longer than usual."
+        : "Still loading your notes from iCloud. This is taking longer than usual; Arbor will show them here as soon as they arrive.";
+      setConnection(state.notes.length ? "Still checking iCloud for note updates…" : "Still loading your notes from iCloud…", false);
+      renderAll();
+    }, NOTE_LOAD_SLOW_NOTICE_MS);
     try {
       await loadZoneRecords(session);
+      if (!accountSessionCurrent(session)) return false;
+      state.libraryLoadSlow = false;
+      state.libraryLoadSlowMessage = "";
       return true;
     } catch (error) {
       if (!accountSessionCurrent(session)) return false;
       if (error && !error.operation && state.libraryLoadOperation) error = withCloudKitOperation(error, state.libraryLoadOperation);
       state.loadingRecords = false;
+      state.libraryLoadSlow = false;
+      state.libraryLoadSlowMessage = "";
       state.libraryLoadOperation = "";
       state.loadRecordsErrorMessage = readableError(error);
-      renderNotes();
+      renderAll();
       setListMessage(state.loadRecordsErrorMessage, true, true, true);
       setConnection("Signed in · Sync needs attention", false);
       showToast(readableError(error), true);
       return false;
+    } finally {
+      window.clearTimeout(slowNoticeTimer);
     }
   }
 
@@ -6508,6 +6586,7 @@
   }
 
   const AUTH_RESTORE_TIMEOUT_MS = 15_000;
+  const AUTH_RESTORE_SLOW_NOTICE_MS = 10_000;
 
   function initializeCloudKit() {
     if (demoMode) {
@@ -6566,16 +6645,22 @@
         }]
       });
       state.container = CloudKit.getDefaultContainer();
-      setConnection("Restoring Arbor’s iCloud session…", false);
+      setConnection("Checking your Apple Account session…", false);
       showWelcomeChecking();
       let authRestoreSettled = false;
+      const authRestoreSlowTimer = window.setTimeout(function () {
+        if (authRestoreSettled) return;
+        setWelcomeStatus("Still checking your Apple Account session. This is taking longer than usual; keep this page open.", true);
+      }, AUTH_RESTORE_SLOW_NOTICE_MS);
       const authRestoreTimer = window.setTimeout(function () {
         if (authRestoreSettled) return;
+        window.clearTimeout(authRestoreSlowTimer);
         setConnection("Sign-in needs attention", false);
         showWelcomeCheckError();
       }, AUTH_RESTORE_TIMEOUT_MS);
       const finishAuthRestore = function () {
         authRestoreSettled = true;
+        window.clearTimeout(authRestoreSlowTimer);
         window.clearTimeout(authRestoreTimer);
       };
       state.container.setUpAuth().then(function (identity) {

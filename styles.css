@@ -792,6 +792,9 @@ html[data-theme="light"] .welcome-mark { filter: none; }
 .welcome-content h1 { margin: 0; font: 580 clamp(34px, 5vw, 48px)/1.08 var(--font-sans); letter-spacing: -.048em; }
 .welcome-description { max-width: 390px; margin: 19px 0 0; color: var(--secondary-label); font: 16px/1.55 var(--font-sans); }
 .welcome-status { margin: 28px 0 0; color: var(--secondary-label); font: 13px/1.45 var(--font-sans); }
+.welcome-status.is-pending::before { display: inline-block; width: 11px; height: 11px; margin-right: 8px; border: 1.5px solid var(--separator); border-top-color: var(--secondary-label); border-radius: 50%; content: ""; vertical-align: -1px; animation: arbor-welcome-spinner .85s linear infinite; }
+@keyframes arbor-welcome-spinner { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .welcome-status.is-pending::before { animation: none; } }
 .welcome-auth { display: flex; width: 100%; flex-direction: column; align-items: center; gap: 18px; margin-top: 30px; }
 .welcome-auth #apple-sign-in-button { display: flex; min-height: 44px; align-items: center; justify-content: center; }
 .welcome-auth #apple-sign-in-button > div { display: inline-flex; }

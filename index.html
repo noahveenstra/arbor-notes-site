@@ -33,7 +33,7 @@
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-188-first-run-20261125-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-179-settings-redesign-20261124-b">
+  <link rel="stylesheet" href="./ui.css?v=arb-display-name-20261125-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b"></script>
@@ -47,6 +47,8 @@
   <script src="./autocorrect.js?v=arb-109-context-autocorrect-20261123-a" defer></script>
   <script src="./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b" defer></script>
   <script src="./note-history.js?v=arb-136-restore-20261123-a" defer></script>
+  <script src="./display-name.js?v=arb-display-name-20261125-a" defer></script>
+  <script src="./note-revisions.js?v=arb-display-name-20261125-a" defer></script>
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
   <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
@@ -156,8 +158,11 @@ Try replacing this example with something you want to remember.</textarea>
       <div class="note-editor-column" id="note-editor-column">
       <div class="note-tab-strip" id="note-tab-strip" role="group" aria-label="Open notes" hidden></div>
       <div class="editor-empty" id="empty-state">
-        <span id="empty-state-copy">Choose a note to read it.</span>
-        <button id="empty-new-note-button" type="button" hidden>New note</button>
+        <div class="editor-empty-stack">
+          <p class="editor-greeting" id="editor-greeting" hidden></p>
+          <span id="empty-state-copy">Choose a note to read it.</span>
+          <button id="empty-new-note-button" type="button" hidden>New note</button>
+        </div>
       </div>
 
       <div class="note-workspace editor-view" id="note-workspace" hidden>
@@ -173,6 +178,7 @@ Try replacing this example with something you want to remember.</textarea>
               <p>Recovered an unsaved edit from this browser.</p>
               <button type="button" id="draft-discard">Discard</button>
             </div>
+            <p class="editor-greeting" id="note-greeting" hidden></p>
             <textarea class="note-title" id="note-title" rows="1" maxlength="180" aria-label="Note title" placeholder="Untitled note"></textarea>
             <div id="rich-editor"></div>
           </article>
@@ -226,6 +232,10 @@ Try replacing this example with something you want to remember.</textarea>
             <section class="about-note-data-section" aria-labelledby="about-location-heading">
               <h3 id="about-location-heading">Location</h3>
               <div class="about-note-empty" id="about-location">No location is saved with this note.</div>
+            </section>
+            <section class="about-note-data-section" aria-labelledby="about-history-heading">
+              <h3 id="about-history-heading">History</h3>
+              <div id="about-history"></div>
             </section>
           </section>
           <section id="about-style" class="about-note-section" role="tabpanel" aria-labelledby="about-tab-style" hidden>
@@ -479,7 +489,7 @@ Try replacing this example with something you want to remember.</textarea>
           <div class="settings-group">
             <h3>Profile</h3>
             <div class="settings-card">
-              <div class="settings-setting-row" data-setting-label="Name" data-setting-search="name profile display name"><div class="settings-setting-copy"><label for="settings-display-name">Name</label><small>Your display name in Arbor.</small></div><input id="settings-display-name" type="text" value="Noah" autocomplete="name" maxlength="80"></div>
+              <div class="settings-setting-row" data-setting-label="Name" data-setting-search="name profile display name"><div class="settings-setting-copy"><label for="settings-display-name">Name</label><small id="settings-display-name-note">Shown in greetings and in this browser’s note revision history. The name stays on this device. Each word is added to your personal dictionary, which syncs with your Apple Account.</small></div><input id="settings-display-name" type="text" value="Noah" autocomplete="name" maxlength="80"></div>
               <div class="settings-setting-row" data-setting-label="Apple account" data-setting-search="apple account sign in sign out icloud connected sync"><div class="settings-setting-copy"><span>Apple account</span><small class="connection-line" id="settings-connection-line"><span class="connection-dot"></span><span id="settings-connection-label" aria-live="polite">Not connected</span></small></div><div class="auth-buttons"><div id="apple-sign-out-button"></div></div></div>
             </div>
           </div>
@@ -492,6 +502,7 @@ Try replacing this example with something you want to remember.</textarea>
             <details class="settings-card settings-data-disclosure" data-setting-label="Data and privacy" data-setting-search="privacy data stored notes local browser icloud cloudkit sign out cache model">
               <summary>How Arbor handles your data</summary>
               <p>Arbor reads and writes notes, proofreading dictionary entries, and keyboard shortcut preferences in the Apple account you sign in with. Shortcut preferences contain Arbor command names and key combinations, not note content. Signing out of this browser removes notes, metadata, dictionary entries, shortcut preferences, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
+              <p>The name in Settings stays in this browser. It is not written to iCloud. Each word of that name is added to the proofreading dictionary, and those dictionary entries sync with the Apple Account you sign in with. A note’s revision history on this browser keeps the name you were using when that revision was saved.</p>
               <p>Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. A few edits that have not reached iCloud yet are also kept unencrypted here until they save or you sign out.</p>
               <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
             </details>

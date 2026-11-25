@@ -8,6 +8,8 @@
   const cloudKitWebZone = window.ArborCloudKitWebZone;
   const proofreadingDictionary = window.ArborPersonalProofreadingDictionary;
   const proofreadingDictionarySync = window.ArborProofreadingDictionarySync;
+  const displayNameTools = window.ArborDisplayName;
+  const noteRevisionStore = window.ArborNoteRevisions;
   const keyboardShortcutPreferences = window.ArborKeyboardShortcutPreferences;
   const keyboardShortcutSync = window.ArborKeyboardShortcutSync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
@@ -52,6 +54,8 @@
     openNoteTabs: Array.isArray(savedNoteTabs.recordNames) ? savedNoteTabs.recordNames.filter(function (name) { return typeof name === "string" && name.length <= 256; }).slice(0, 100) : [],
     activeNoteTabName: typeof savedNoteTabs.activeRecordName === "string" ? savedNoteTabs.activeRecordName : "",
     noteHistory: { recordNames: [], index: -1 },
+    noteRevisions: [],
+    nameDictionaryTimer: 0,
     noteHistoryAccountKey: "",
     skipNextListTransition: false,
     editor: null,
@@ -343,6 +347,9 @@
     state.preferences.autoCorrectHighConfidence = state.preferences.autoCorrectHighConfidence !== false;
     state.preferences.noteSortOrder = noteSorting.normalizeOrder(state.preferences.noteSortOrder);
     state.accountSettings.name = String(state.accountSettings.name || "").slice(0, 80);
+    if (!state.accountSettings.nameDictionary || typeof state.accountSettings.nameDictionary !== "object" || Array.isArray(state.accountSettings.nameDictionary)) {
+      state.accountSettings.nameDictionary = {};
+    }
   }
 
   function libraryCacheKey(userID) {
@@ -766,6 +773,89 @@
       renderPersonalDictionarySettings();
     });
     return state.dictionarySyncPromise;
+  }
+
+  function nameDictionaryLedger() {
+    const ledger = state.accountSettings.nameDictionary;
+    return ledger && typeof ledger === "object" && !Array.isArray(ledger) ? ledger : {};
+  }
+
+  function claimManualDictionaryTerm(rawTerm) {
+    const normalized = proofreadingDictionary.normalizeDictionaryEntry(rawTerm);
+    if (!normalized) return;
+    const ledger = nameDictionaryLedger();
+    if (!ledger[normalized.key]) return;
+    const next = Object.assign({}, ledger);
+    delete next[normalized.key];
+    state.accountSettings.nameDictionary = next;
+    persistAccountSettings();
+  }
+
+  function suppressAutoDictionaryTerm(rawTerm) {
+    const normalized = proofreadingDictionary.normalizeDictionaryEntry(rawTerm);
+    if (!normalized) return;
+    const ledger = nameDictionaryLedger();
+    const current = ledger[normalized.key];
+    if (!current || current.suppressed) return;
+    const next = Object.assign({}, ledger);
+    next[normalized.key] = { term: current.term, suppressed: true };
+    state.accountSettings.nameDictionary = next;
+    persistAccountSettings();
+  }
+
+  function applySilentDictionaryOperations(operations) {
+    if (!operations.length) return Promise.resolve(false);
+    let pending = proofreadingDictionary.normalizeSnapshotEntries(state.dictionaryPending);
+    operations.forEach(function (operation) {
+      const normalized = proofreadingDictionary.normalizeDictionaryEntry(operation.term);
+      if (!normalized) return;
+      const existing = state.dictionaryEntries.find(function (item) { return item.normalizedTerm === normalized.key; });
+      if (operation.isDeleted && (!existing || existing.isDeleted)) return;
+      if (!operation.isDeleted && existing && !existing.isDeleted) return;
+      pending = pending.filter(function (item) { return item.normalizedTerm !== normalized.key; });
+      pending.push({
+        term: existing && !operation.isDeleted ? existing.term : normalized.term,
+        normalizedTerm: normalized.key,
+        isDeleted: Boolean(operation.isDeleted),
+        modifiedAt: Date.now()
+      });
+    });
+    const changed = pending.some(function (operation) {
+      return !state.dictionaryPending.some(function (current) { return sameDictionaryOperation(current, operation); });
+    }) || pending.length !== state.dictionaryPending.length;
+    if (!changed) return Promise.resolve(false);
+    updateDictionaryState(state.dictionaryEntries, pending);
+    if (state.demo) {
+      const merged = state.dictionaryEntries;
+      state.dictionaryPending = [];
+      state.dictionarySyncStatus = "Preview only; dictionary changes are not synced.";
+      updateDictionaryState(merged, []);
+      return Promise.resolve(true);
+    }
+    if (!state.database || state.accountCacheSuspended) {
+      state.dictionarySyncStatus = "Saved on this browser. Sign in to sync it with iCloud.";
+      renderPersonalDictionarySettings();
+      return Promise.resolve(false);
+    }
+    const run = function () { return syncPersonalDictionary(state.accountSession); };
+    if (state.dictionarySyncPromise) return state.dictionarySyncPromise.then(run, run);
+    return run();
+  }
+
+  function reconcileDisplayNameDictionary() {
+    if (!displayNameTools) return Promise.resolve(false);
+    const plan = displayNameTools.planNameDictionary(state.dictionaryEntries, nameDictionaryLedger(), accountDisplayName());
+    state.accountSettings.nameDictionary = plan.ledger;
+    persistAccountSettings();
+    const operations = [];
+    plan.removals.forEach(function (term) { operations.push({ term: term, isDeleted: true }); });
+    plan.additions.forEach(function (term) { operations.push({ term: term, isDeleted: false }); });
+    return applySilentDictionaryOperations(operations);
+  }
+
+  function scheduleNameDictionaryReconcile() {
+    window.clearTimeout(state.nameDictionaryTimer);
+    state.nameDictionaryTimer = window.setTimeout(function () { reconcileDisplayNameDictionary(); }, 400);
   }
 
   function accountSessionCurrent(session) {
@@ -1211,11 +1301,42 @@
     return given || "Noah";
   }
 
+  function accountDisplayName() {
+    const saved = String(state.accountSettings.name || "").trim();
+    if (saved) return saved.slice(0, 80);
+    const given = state.user && state.user.nameComponents && String(state.user.nameComponents.givenName || "").trim();
+    return given ? given.slice(0, 80) : "";
+  }
+
+  function renderAccountGreeting() {
+    const text = displayNameTools ? displayNameTools.greetingText(accountDisplayName(), new Date()) : "";
+    const loading = Boolean(state.loadingRecords && !state.selectedRecordName);
+    const emptyGreeting = $("editor-greeting");
+    if (emptyGreeting) {
+      emptyGreeting.textContent = text;
+      emptyGreeting.hidden = loading || !text;
+    }
+    const noteGreeting = $("note-greeting");
+    if (!noteGreeting) return;
+    const title = $("note-title");
+    const titleText = title ? title.value.trim() : "";
+    const defaultTitle = !titleText || titleText === "Untitled";
+    let body = "";
+    if (state.selectedRecordName) {
+      try { body = currentEditorBodyMarkdown(); }
+      catch (_) { body = ""; }
+    }
+    const blank = Boolean(state.selectedRecordName) && !state.searchPage && defaultTitle && !String(body || "").trim();
+    noteGreeting.textContent = blank ? text : "";
+    noteGreeting.hidden = !blank || !text;
+  }
+
   function updateArborName() {
     const brand = $("sidebar-brand");
     if (brand) brand.setAttribute("aria-label", "Arbor");
     const accountName = $("settings-display-name");
     if (accountName && document.activeElement !== accountName) accountName.value = settingsAccountName();
+    renderAccountGreeting();
   }
 
   function toNote(record) {
@@ -2171,6 +2292,40 @@
     host.append(list, previewNotice);
   }
 
+  function renderAboutHistory(recordName) {
+    const host = $("about-history");
+    if (!host) return;
+    const noteId = recordName || state.selectedRecordName;
+    host.replaceChildren();
+    const rows = noteRevisionStore ? noteRevisionStore.forNote(state.noteRevisions, noteId) : [];
+    if (!rows.length) {
+      const empty = document.createElement("div");
+      empty.className = "about-note-empty";
+      empty.textContent = "Saves on this note appear here.";
+      host.appendChild(empty);
+      return;
+    }
+    const list = document.createElement("ol");
+    list.className = "about-note-history";
+    list.setAttribute("aria-label", "Revisions");
+    rows.forEach(function (revision) {
+      const item = document.createElement("li");
+      const author = noteRevisionStore.revisionAuthorLabel(revision);
+      if (author) {
+        const name = document.createElement("span");
+        name.className = "about-note-history-author";
+        name.textContent = author;
+        item.appendChild(name);
+      }
+      const when = document.createElement("span");
+      when.className = "about-note-history-when";
+      when.textContent = editorDate(new Date(revision.savedAt));
+      item.appendChild(when);
+      list.appendChild(item);
+    });
+    host.appendChild(list);
+  }
+
   function renderAboutPanel() {
     const panel = $("about-note-panel");
     if (!panel) return;
@@ -2191,6 +2346,7 @@
     $("about-word-count").textContent = count.toLocaleString() + (count === 1 ? " word" : " words");
     $("about-read-time").textContent = readTimeLabel(count);
     renderAboutAttachments(note);
+    renderAboutHistory(note.recordName);
     const location = fieldValue(note.record, "locationData") || fieldValue(note.record, "location");
     $("about-location").textContent = location
       ? "Location details are saved, but an interactive map isn’t available in the current web client."
@@ -2364,6 +2520,7 @@
     if (noteSortOrder) noteSortOrder.value = state.preferences.noteSortOrder;
     const name = $("settings-display-name");
     if (name && document.activeElement !== name) name.value = settingsAccountName();
+    renderAccountGreeting();
     const sentenceCapitalization = $("proofreading-sentence-capitalization");
     const grammarSuggestions = $("proofreading-grammar-suggestions");
     if (grammarSuggestions) grammarSuggestions.checked = state.preferences.checkGrammarSuggestions;
@@ -2416,6 +2573,7 @@
   function loadNoteHistory(accountKey) {
     state.noteHistoryAccountKey = String(accountKey || "");
     state.noteHistory = window.ArborNoteHistory.load(localStorage, state.noteHistoryAccountKey);
+    state.noteRevisions = noteRevisionStore ? noteRevisionStore.load(localStorage, state.noteHistoryAccountKey) : [];
     renderOpenNoteTabs();
   }
 
@@ -2428,6 +2586,33 @@
     if (!state.noteHistoryAccountKey || !recordName) return;
     state.noteHistory = window.ArborNoteHistory.visit(state.noteHistory, recordName);
     persistNoteHistory();
+  }
+
+  function currentRevisionAuthor() {
+    const userRecordName = state.user && state.user.userRecordName ? String(state.user.userRecordName).trim() : "";
+    return {
+      id: state.demo ? "sample-preview" : (userRecordName || state.deviceID || "local"),
+      name: accountDisplayName()
+    };
+  }
+
+  function rememberSavedRevision(recordName, body, saved) {
+    if (!noteRevisionStore || !recordName || !saved) return;
+    const nextDocument = documentForSaveBody(body, saved);
+    const previousDocument = state.syncBaselines.get(recordName);
+    if (sameSyncDocument(previousDocument, nextDocument)) return;
+    const author = currentRevisionAuthor();
+    state.noteRevisions = noteRevisionStore.append(state.noteRevisions, {
+      id: window.crypto && crypto.randomUUID ? crypto.randomUUID() : "rev-" + Date.now(),
+      noteId: recordName,
+      savedAt: Date.now(),
+      authorId: author.id,
+      authorName: author.name
+    });
+    if (state.noteHistoryAccountKey) {
+      state.noteRevisions = noteRevisionStore.save(localStorage, state.noteHistoryAccountKey, state.noteRevisions);
+    }
+    if (state.selectedRecordName === recordName) renderAboutHistory(recordName);
   }
 
   function currentNoteFromHistory() {
@@ -4795,7 +4980,7 @@
       const source = pending.blocks[nodeIndex] || "";
       (items || []).forEach(function (item) {
         const key = ignoredCorrectionKey(source, item);
-        if (item.kind === "spelling" && proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), item.word)) return;
+        if ((item.kind === "spelling" || item.kind === "grammar") && proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), item.word)) return;
         if (!ignored.has(key)) entries.push({ nodeIndex: nodeIndex, source: source, item: item, key: key });
       });
     });
@@ -5376,6 +5561,7 @@
         if (!active || active.kind !== "spelling") return;
         const word = active.word;
         closeCorrectionPopover(false);
+        claimManualDictionaryTerm(word);
         queuePersonalDictionaryOperation(word, false);
       }
     });
@@ -5891,6 +6077,7 @@
       hideSaveState();
       frame.classList.remove("mobile-note-open", "mobile-editor-open");
       renderOpenNoteTabs();
+      renderAccountGreeting();
       return;
     }
     state.selectedRecord = note.record;
@@ -5963,6 +6150,7 @@
     }
     if (window.matchMedia("(max-width: 820px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
     renderNotes();
+    renderAccountGreeting();
   }
 
   async function openNote(recordName, options) {
@@ -6563,6 +6751,7 @@
       startRealtimeSync(session);
       configureRealtimeNotifications(session);
       await syncPersonalDictionary(session);
+      if (session === state.accountSession) reconcileDisplayNameDictionary();
       await syncKeyboardShortcutPreferences(session);
       if (session !== state.accountSession) return;
       setConnection("Using your Apple Account.", true);
@@ -6636,6 +6825,7 @@
     if (!(await loadZoneRecordsWithFeedback(session))) return;
     if (session !== state.accountSession) return;
     await syncPersonalDictionary(session);
+    if (session === state.accountSession) reconcileDisplayNameDictionary();
     await syncKeyboardShortcutPreferences(session);
     if (session === state.accountSession) setConnection("Using your Apple Account.", true);
   }
@@ -6755,6 +6945,9 @@
         renderSettingsShortcuts();
         state.noteHistory = { recordNames: [], index: -1 };
         state.noteHistoryAccountKey = "";
+        state.noteRevisions = [];
+        state.accountSettings = { name: "", nameDictionary: {} };
+        persistAccountSettings();
         state.nativeSchema = false;
         discardInMemoryLibrary();
         renderAll();
@@ -7000,6 +7193,7 @@
     else if (restoredState.hidden) selectNote(null);
     else if (currentNoteFromHistory()) selectNote(currentNoteFromHistory());
     else if (first) selectNote(first);
+    reconcileDisplayNameDictionary();
   }
 
   function currentEditorBodyMarkdown() {
@@ -7447,6 +7641,7 @@
     window.clearTimeout(state.saveTimer);
     state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
     if (pendingCreation) renderNotes();
+    renderAccountGreeting();
   }
 
   function setField(record, name, value) {
@@ -7546,6 +7741,7 @@
       if (!isCurrent()) return saved;
       state.records.set(saved.recordName, saved);
       if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(saved.recordName);
+      rememberSavedRevision(saved.recordName, body, saved);
       rememberSyncBaseline(saved.recordName, documentForSaveBody(body, saved));
       syncDerivedCollections();
       return saved;
@@ -7588,6 +7784,7 @@
     if (!isCurrent()) return saved;
     state.records.set(saved.recordName, saved);
     if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(saved.recordName);
+    rememberSavedRevision(saved.recordName, body, saved);
     rememberSyncBaseline(saved.recordName, documentForSaveBody(body, saved));
     syncDerivedCollections();
     return saved;
@@ -8462,7 +8659,9 @@
       layout: Object.assign({}, state.layout),
       appearance: Object.assign({}, state.appearance),
       preferences: Object.assign({}, state.preferences),
-      accountSettings: Object.assign({}, state.accountSettings)
+      accountSettings: Object.assign({}, state.accountSettings, {
+        nameDictionary: Object.assign({}, state.accountSettings.nameDictionary || {})
+      })
     };
   }
 
@@ -8484,6 +8683,7 @@
     persistAppearance();
     persistSettingsPreferences();
     persistAccountSettings();
+    reconcileDisplayNameDictionary();
     reconcileNoteTabPreference();
     applyLayout();
     applyAppearanceWithMotion();
@@ -10263,6 +10463,7 @@
       if (!dictionaryInput || !dictionaryInput.value.trim()) return;
       const value = dictionaryInput.value;
       dictionaryInput.value = "";
+      claimManualDictionaryTerm(value);
       queuePersonalDictionaryOperation(value, false);
     }
     if (dictionaryAdd) dictionaryAdd.addEventListener("click", addDictionaryFromSettings);
@@ -10273,7 +10474,9 @@
     });
     if (dictionaryList) dictionaryList.addEventListener("click", function (event) {
       const button = event.target.closest("[data-dictionary-remove]");
-      if (button) queuePersonalDictionaryOperation(button.dataset.dictionaryRemove, true);
+      if (!button) return;
+      suppressAutoDictionaryTerm(button.dataset.dictionaryRemove);
+      queuePersonalDictionaryOperation(button.dataset.dictionaryRemove, true);
     });
     if (autoCorrect) {
       autoCorrect.addEventListener("change", function () {
@@ -10322,8 +10525,12 @@
     settingsName.addEventListener("input", function () {
       state.accountSettings.name = this.value.slice(0, 80);
       persistAccountSettings();
+      renderAccountGreeting();
+      scheduleNameDictionaryReconcile();
     });
     settingsName.addEventListener("change", function () {
+      window.clearTimeout(state.nameDictionaryTimer);
+      reconcileDisplayNameDictionary();
       recordPreferenceChange(accountSettingsBefore, "Change account display name", "settings-account-name");
       accountSettingsBefore = null;
     });

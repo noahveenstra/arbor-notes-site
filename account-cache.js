@@ -26,8 +26,8 @@ export const LIBRARY_CACHE_DATABASE = "arbor-web-library-cache";
 export const SEMANTIC_VECTOR_DATABASE = "arbor-browser-semantic-index-arctic-e596f50-sentence-list-32w26-max32-even-v2";
 export const UNDO_HISTORY_DATABASE = "arbor-web-undo-history";
 export const ACCOUNT_RECORD_NAME_KEY = "arbor.web.account-id";
-export const ACCOUNT_LOCAL_STORAGE_KEYS = ["arbor.web.open-tabs.v1"];
-export const ACCOUNT_LOCAL_STORAGE_PREFIXES = ["arbor.web.note-history.v1::", "arbor.web.shortcut-preferences.v1."];
+export const ACCOUNT_LOCAL_STORAGE_KEYS = ["arbor.web.open-tabs.v1", "arbor.web.account.v1"];
+export const ACCOUNT_LOCAL_STORAGE_PREFIXES = ["arbor.web.note-history.v1::", "arbor.web.note-revisions.v1::", "arbor.web.shortcut-preferences.v1."];
 
 export const DRAFT_NAME_PREFIXES = [
   "arbor.web.draft",

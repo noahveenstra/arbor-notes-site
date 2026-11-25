@@ -8,6 +8,8 @@
   const cloudKitWebZone = window.ArborCloudKitWebZone;
   const proofreadingDictionary = window.ArborPersonalProofreadingDictionary;
   const proofreadingDictionarySync = window.ArborProofreadingDictionarySync;
+  const keyboardShortcutPreferences = window.ArborKeyboardShortcutPreferences;
+  const keyboardShortcutSync = window.ArborKeyboardShortcutSync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
   const config = window.ARBOR_CLOUDKIT_CONFIG || { demoMode: false };
   const previewMode = new URLSearchParams(window.location.search).get("preview");
@@ -82,6 +84,14 @@
     dictionarySyncPromise: null,
     dictionarySyncStatus: "Sign in to sync your dictionary.",
     dictionarySyncError: null,
+    shortcutOperations: [],
+    shortcutStorageKey: "",
+    shortcutBindings: [],
+    shortcutSyncPromise: null,
+    shortcutSyncTimer: 0,
+    shortcutSyncStatus: "Sign in to sync shortcuts with your Apple Account.",
+    shortcutSyncError: null,
+    shortcutRecordingId: "",
     syncToken: null,
     syncBaselines: new Map(),
     pendingRemoteRecords: new Map(),
@@ -180,9 +190,13 @@
   const MARGIN_OPTIONS = { condensed: 84, compact: 70, normal: 64, roomy: 58, spacious: 52 };
   const TEXT_SIZE_OPTIONS = { xsmall: 14, small: 18, medium: 20, large: 22, xlarge: 24 };
   const OPEN_NOTE_TABS_KEY = "arbor.web.open-tabs.v1";
+  const SHORTCUT_PREFERENCE_PREFIX = (keyboardShortcutPreferences ? keyboardShortcutPreferences.contract.storageKey : "arbor.web.shortcut-preferences.v1") + ".";
+  const SHORTCUT_SYNC_INTERVAL_MS = 30000;
   state.openNoteTabs = Array.from(new Set(state.openNoteTabs)).slice(-100);
   if (!state.openNoteTabs.includes(state.activeNoteTabName)) state.activeNoteTabName = state.openNoteTabs[state.openNoteTabs.length - 1] || "";
   normalizeSettingsPreferences();
+  if (keyboardShortcutPreferences) state.shortcutOperations = keyboardShortcutPreferences.normalizeOperations(state.shortcutOperations);
+  if (window.ArborShortcuts) state.shortcutBindings = window.ArborShortcuts.resolveShortcutBindings(state.shortcutOperations);
   let captureResizeAnimation = null;
   let layoutMotionReadyScheduled = false;
   let shortcutCloseTimer = 0;
@@ -261,7 +275,7 @@
     if (!accountCacheModulePromise) {
       const script = document.querySelector("script[src*='app.js']");
       const base = script && script.src ? script.src : window.location.href;
-      accountCacheModulePromise = import(new URL("./account-cache.js?v=arb-note-history-signout-20261124-a", base).href);
+      accountCacheModulePromise = import(new URL("./account-cache.js?v=arb-179-shortcut-account-cache-20261124-b", base).href);
     }
     return accountCacheModulePromise;
   }
@@ -282,6 +296,13 @@
       const value = JSON.parse(localStorage.getItem(key) || "null");
       return value && typeof value === "object" ? Object.assign({}, fallback, value) : Object.assign({}, fallback);
     } catch (_) { return Object.assign({}, fallback); }
+  }
+
+  function loadShortcutOperations(key) {
+    try {
+      const value = JSON.parse(window.localStorage.getItem(key) || "null");
+      return Array.isArray(value) ? value : [];
+    } catch (_) { return []; }
   }
 
   function normalizeSettingsPreferences() {
@@ -319,6 +340,10 @@
 
   function libraryCacheKey(userID) {
     return [config.containerIdentifier || "arbor", config.environment || "development", config.schemaMode || "auto", userID].join("::");
+  }
+
+  function shortcutPreferenceStorageKey(userID) {
+    return SHORTCUT_PREFERENCE_PREFIX + encodeURIComponent(String(userID || ""));
   }
 
   function openLibraryCacheDB() {
@@ -6369,6 +6394,12 @@
             state.accountCacheSuspended = true;
             state.cacheKey = null;
             state.database = null;
+            state.shortcutStorageKey = "";
+            state.shortcutOperations = [];
+            state.shortcutBindings = window.ArborShortcuts ? window.ArborShortcuts.resolveShortcutBindings([]) : [];
+            state.shortcutSyncStatus = "Loading shortcut preferences…";
+            state.shortcutSyncError = null;
+            renderSettingsShortcuts();
             discardInMemoryLibrary();
             renderAll();
             await detachUndoHistory();
@@ -6380,6 +6411,15 @@
           cache.rememberAccountRecordName(window.localStorage, userID);
           state.accountCacheSuspended = false;
           state.cacheKey = libraryCacheKey(userID);
+          state.shortcutStorageKey = shortcutPreferenceStorageKey(userID);
+          state.shortcutOperations = keyboardShortcutPreferences
+            ? keyboardShortcutPreferences.normalizeOperations(loadShortcutOperations(state.shortcutStorageKey))
+            : [];
+          state.shortcutBindings = window.ArborShortcuts
+            ? window.ArborShortcuts.resolveShortcutBindings(state.shortcutOperations)
+            : [];
+          state.shortcutSyncStatus = "Loading shortcut preferences…";
+          state.shortcutSyncError = null;
         }
         if (session !== state.accountSession) return;
         state.user = identity;
@@ -6425,6 +6465,7 @@
       startRealtimeSync(session);
       configureRealtimeNotifications(session);
       await syncPersonalDictionary(session);
+      await syncKeyboardShortcutPreferences(session);
       if (session !== state.accountSession) return;
       setConnection("Using your Apple Account.", true);
     } catch (error) {
@@ -6462,6 +6503,7 @@
     if (!(await loadZoneRecordsWithFeedback(session))) return;
     if (session !== state.accountSession) return;
     await syncPersonalDictionary(session);
+    await syncKeyboardShortcutPreferences(session);
     if (session === state.accountSession) setConnection("Using your Apple Account.", true);
   }
 
@@ -6551,6 +6593,13 @@
         updateUndoControls();
         state.connectionUserID = null;
         state.user = null;
+        state.shortcutStorageKey = "";
+        state.shortcutOperations = [];
+        state.shortcutBindings = window.ArborShortcuts ? window.ArborShortcuts.resolveShortcutBindings([]) : [];
+        state.shortcutRecordingId = "";
+        state.shortcutSyncStatus = "Sign in to sync shortcuts with your Apple Account.";
+        state.shortcutSyncError = null;
+        renderSettingsShortcuts();
         state.noteHistory = { recordNames: [], index: -1 };
         state.noteHistoryAccountKey = "";
         state.nativeSchema = false;
@@ -6572,17 +6621,35 @@
         if (state.database && !state.accountCacheSuspended) {
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
+          syncKeyboardShortcutPreferences(state.accountSession);
         }
       });
       document.addEventListener("visibilitychange", function () {
         if (document.visibilityState === "visible" && state.database && !state.accountCacheSuspended) {
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
+          syncKeyboardShortcutPreferences(state.accountSession);
         }
       });
       window.addEventListener("focus", function () {
-        if (state.database && !state.accountCacheSuspended) refreshZoneRecords(state.accountSession);
+        if (state.database && !state.accountCacheSuspended) {
+          refreshZoneRecords(state.accountSession);
+          syncKeyboardShortcutPreferences(state.accountSession);
+        }
       });
+      window.addEventListener("storage", function (event) {
+        if (!keyboardShortcutPreferences || !event.key || event.key !== state.shortcutStorageKey || !state.connectionUserID || state.accountCacheSuspended) return;
+        const operations = loadShortcutOperations(event.key);
+        applyShortcutOperations(keyboardShortcutPreferences.mergeOperations(state.shortcutOperations, operations));
+        syncKeyboardShortcutPreferences(state.accountSession);
+      });
+      if (!state.shortcutSyncTimer) {
+        state.shortcutSyncTimer = window.setInterval(function () {
+          if (document.visibilityState === "visible" && state.database && !state.accountCacheSuspended) {
+            syncKeyboardShortcutPreferences(state.accountSession);
+          }
+        }, SHORTCUT_SYNC_INTERVAL_MS);
+      }
     } catch (error) {
       showSetup("CloudKit could not be configured: " + readableError(error));
     }
@@ -8603,6 +8670,7 @@
     const modal = $("settings-modal");
     if (!modal.hidden) { focusSettingsStart(); return; }
     pushFocus();
+    renderSettingsShortcuts();
     setMotionVisibility(modal, true);
     document.body.classList.add("settings-open");
     frame.inert = true;
@@ -8612,6 +8680,7 @@
   function closeSettings() {
     const modal = $("settings-modal");
     if (modal.hidden) return;
+    state.shortcutRecordingId = "";
     document.body.classList.remove("settings-open");
     setMotionVisibility(modal, false, function () {
       frame.inert = false;
@@ -8625,7 +8694,7 @@
     if (!api || !body) return;
     const apple = api.usesCommandModifier((navigator.platform || "") + " " + (navigator.userAgent || ""));
     body.replaceChildren();
-    api.shortcutHelpRows(apple).forEach(function (row) {
+    api.shortcutHelpRows(apple, state.shortcutBindings).forEach(function (row) {
       const tr = document.createElement("tr");
       const name = document.createElement("th");
       name.scope = "row";
@@ -8636,6 +8705,125 @@
       body.appendChild(tr);
     });
     updateUndoControls();
+  }
+
+  function shortcutPlatformIsApple() {
+    const api = window.ArborShortcuts;
+    return Boolean(api && api.usesCommandModifier((navigator.platform || "") + " " + (navigator.userAgent || "")));
+  }
+
+  function setShortcutSyncStatus(message, error) {
+    state.shortcutSyncStatus = String(message || "");
+    state.shortcutSyncError = error ? String(error) : null;
+    const status = $("settings-shortcut-status");
+    if (status) {
+      status.textContent = state.shortcutSyncStatus;
+      status.dataset.state = error ? "error" : "ready";
+      if (error) status.title = error;
+      else status.removeAttribute("title");
+    }
+  }
+
+  function renderSettingsShortcuts() {
+    const api = window.ArborShortcuts;
+    const list = $("settings-shortcut-rows");
+    if (!api || !list) return;
+    const apple = shortcutPlatformIsApple();
+    const query = String($("settings-shortcut-search") && $("settings-shortcut-search").value || "").trim().toLowerCase();
+    list.replaceChildren();
+    api.shortcutHelpRows(apple, state.shortcutBindings).forEach(function (row) {
+      const chord = row.chords.join(" or ");
+      if (query && !(row.label + " " + row.id + " " + chord).toLowerCase().includes(query)) return;
+      const line = document.createElement("div");
+      line.className = "settings-shortcut-row";
+      const label = document.createElement("span");
+      label.textContent = row.label;
+      const button = document.createElement("button");
+      button.type = "button";
+      button.dataset.shortcutId = row.id;
+      button.classList.toggle("is-recording", state.shortcutRecordingId === row.id);
+      button.textContent = state.shortcutRecordingId === row.id ? "Press shortcut…" : chord;
+      button.setAttribute("aria-label", state.shortcutRecordingId === row.id ? "Recording a shortcut for " + row.label + ". Press Escape to cancel." : "Change shortcut for " + row.label + ": " + chord);
+      line.append(label, button);
+      list.appendChild(line);
+    });
+    if (!list.childElementCount) {
+      const empty = document.createElement("p");
+      empty.className = "settings-shortcut-empty";
+      empty.textContent = query ? "No Arbor commands match that search." : "No shortcut commands are available.";
+      list.appendChild(empty);
+    }
+    const reset = $("settings-shortcut-reset");
+    if (reset) reset.disabled = !state.shortcutOperations.some(function (operation) { return !operation.reset; });
+    setShortcutSyncStatus(state.shortcutSyncStatus, state.shortcutSyncError);
+  }
+
+  function persistShortcutOperations() {
+    if (state.demo || !state.connectionUserID || !state.shortcutStorageKey) return false;
+    try {
+      window.localStorage.setItem(state.shortcutStorageKey, JSON.stringify(state.shortcutOperations));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function applyShortcutOperations(operations) {
+    const api = window.ArborShortcuts;
+    state.shortcutOperations = keyboardShortcutPreferences.normalizeOperations(operations);
+    state.shortcutBindings = api ? api.resolveShortcutBindings(state.shortcutOperations) : [];
+    persistShortcutOperations();
+    renderSettingsShortcuts();
+  }
+
+  function saveShortcutOperation(id, binding, reset) {
+    const timestamps = state.shortcutOperations.map(function (operation) { return operation.modifiedAt; });
+    const newest = timestamps.length ? Math.max.apply(Math, timestamps) : 0;
+    const operation = keyboardShortcutPreferences.createOperation(id, binding, reset, newest + 1);
+    applyShortcutOperations(keyboardShortcutPreferences.mergeOperations(state.shortcutOperations, [operation]));
+    if (state.demo) {
+      setShortcutSyncStatus("Preview only. Shortcut changes reset when you reload.");
+      return;
+    }
+    setShortcutSyncStatus("Saved on this browser. Syncing with iCloud…");
+    if (state.database && !state.accountCacheSuspended) syncKeyboardShortcutPreferences(state.accountSession);
+  }
+
+  async function syncKeyboardShortcutPreferences(session) {
+    if (state.demo) return true;
+    if (!state.database || state.accountCacheSuspended || session !== state.accountSession || !keyboardShortcutSync) return false;
+    if (state.shortcutSyncPromise) return state.shortcutSyncPromise;
+    const database = state.database;
+    const run = (async function () {
+      try {
+        const result = await keyboardShortcutSync.synchronize(database, state.shortcutOperations);
+        if (session !== state.accountSession || database !== state.database) return false;
+        const merged = keyboardShortcutPreferences.mergeOperations(result.operations || [], state.shortcutOperations);
+        const hasPending = !keyboardShortcutPreferences.sameSnapshot(merged, result.operations || []);
+        applyShortcutOperations(merged);
+        setShortcutSyncStatus(hasPending ? "Synced newer changes; sending the latest shortcut edit…" : "Synced with your Apple Account.");
+        if (hasPending) window.setTimeout(function () { syncKeyboardShortcutPreferences(session); }, 0);
+        return !hasPending;
+      } catch (error) {
+        if (session !== state.accountSession || database !== state.database) return false;
+        setShortcutSyncStatus("Saved on this browser. Waiting for iCloud.", readableError(error));
+        renderSettingsShortcuts();
+        return false;
+      }
+    })();
+    state.shortcutSyncPromise = run.finally(function () {
+      state.shortcutSyncPromise = null;
+      renderSettingsShortcuts();
+    });
+    return state.shortcutSyncPromise;
+  }
+
+  function beginShortcutRecording(id) {
+    state.shortcutRecordingId = id;
+    setShortcutSyncStatus("Press the key combination you want. Press Escape to cancel.");
+    renderSettingsShortcuts();
+    const button = Array.from($("settings-shortcut-rows").querySelectorAll("[data-shortcut-id]")).find(function (item) { return item.dataset.shortcutId === id; });
+    if (button) button.focus();
   }
 
   function openShortcutHelp() {
@@ -9016,13 +9204,40 @@
 
   function handleShortcut(event) {
     if (event.key === "Tab" && !$("settings-modal").hidden && !$("shortcut-help").open) trapFocus(event, $("settings-modal"));
+    const api = window.ArborShortcuts;
+    if (state.shortcutRecordingId && api) {
+      if (event.key === "Escape") {
+        event.preventDefault(); event.stopPropagation();
+        state.shortcutRecordingId = "";
+        setShortcutSyncStatus("Shortcut recording canceled.");
+        renderSettingsShortcuts();
+        return;
+      }
+      if (["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      const captured = api.captureShortcut(event, shortcutPlatformIsApple());
+      if (!captured.binding) {
+        setShortcutSyncStatus(captured.error || "Arbor could not record that shortcut.", captured.error);
+        return;
+      }
+      const validation = api.validateShortcut(state.shortcutRecordingId, captured.binding, state.shortcutBindings, shortcutPlatformIsApple());
+      if (validation) {
+        setShortcutSyncStatus(validation, validation);
+        return;
+      }
+      const id = state.shortcutRecordingId;
+      state.shortcutRecordingId = "";
+      saveShortcutOperation(id, captured.binding, false);
+      setShortcutSyncStatus(state.demo ? "Shortcut changed for this preview." : "Shortcut changed. Syncing with iCloud…");
+      renderSettingsShortcuts();
+      return;
+    }
     if (event.key === "Escape" && !event.isComposing && $("note-context-menu") && !$("note-context-menu").hidden && !$("note-folder-submenu").hidden) {
       event.preventDefault();
       event.stopPropagation();
       closeFolderSubmenu(true);
       return;
     }
-    const api = window.ArborShortcuts;
     if (!api) {
       if (event.key === "Escape" && !event.isComposing) dismissTopSurface();
       return;
@@ -9030,6 +9245,7 @@
     const target = event.target;
     const id = api.matchArborShortcut(event, {
       applePlatform: api.usesCommandModifier((navigator.platform || "") + " " + (navigator.userAgent || "")),
+      bindings: state.shortcutBindings,
       typing: isTypingTarget(target),
       listNavigation: listNavigationAllowed(target)
     });
@@ -9499,7 +9715,8 @@
     });
     $("settings-open").addEventListener("click", openSettings);
     $("settings-close").addEventListener("click", closeSettings);
-    $("shortcut-help-open").addEventListener("click", openShortcutHelp);
+    const shortcutHelpOpen = $("shortcut-help-open");
+    if (shortcutHelpOpen) shortcutHelpOpen.addEventListener("click", openShortcutHelp);
     $("shortcut-help-close").addEventListener("click", closeShortcutHelp);
     $("undo-action-button").addEventListener("click", function () { performHistoryCommand("undo"); });
     $("redo-action-button").addEventListener("click", function () { performHistoryCommand("redo"); });
@@ -9521,6 +9738,7 @@
       document.querySelectorAll("[data-settings-page]").forEach(function (page) {
         setMotionVisibility(page, page.dataset.settingsPage === section);
       });
+      clearSettingsSearch();
     }
     const settingsTabs = Array.from(document.querySelectorAll("[data-settings-section]"));
     settingsTabs.forEach(function (button, index) {
@@ -9536,6 +9754,106 @@
         activateSettingsSection(settingsTabs[nextIndex]);
         settingsTabs[nextIndex].focus();
       });
+    });
+    const settingsSearch = $("settings-search");
+    const settingsSearchResults = $("settings-search-results");
+    const settingsSectionsNav = document.querySelector(".settings-sections");
+    function clearSettingsSearch() {
+      if (!settingsSearch || !settingsSearchResults) return;
+      settingsSearch.value = "";
+      settingsSearch.setAttribute("aria-expanded", "false");
+      settingsSearchResults.replaceChildren();
+      settingsSearchResults.hidden = true;
+      if (settingsSectionsNav) settingsSectionsNav.hidden = false;
+    }
+    function focusSettingTarget(target) {
+      if (!target) return;
+      target.scrollIntoView({ block: "center", behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+      const focusable = target.querySelector('[aria-checked="true"], input, select, summary, button');
+      if (focusable) focusable.focus({ preventScroll: true });
+      else {
+        target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+      }
+    }
+    function renderSettingsSearch() {
+      if (!settingsSearch || !settingsSearchResults) return;
+      const query = settingsSearch.value.trim().toLowerCase();
+      settingsSearchResults.replaceChildren();
+      settingsSearchResults.hidden = !query;
+      settingsSearch.setAttribute("aria-expanded", String(Boolean(query)));
+      if (settingsSectionsNav) settingsSectionsNav.hidden = Boolean(query);
+      if (!query) return;
+      const matches = Array.from(document.querySelectorAll("[data-setting-label]"))
+        .filter(function (item) { return !item.hidden && !(item.id === "pwa-settings-field" && item.hidden); })
+        .map(function (item) {
+          const page = item.closest("[data-settings-page]");
+          const section = page && page.dataset.settingsPage;
+          const tab = settingsTabs.find(function (button) { return button.dataset.settingsSection === section; });
+          const category = tab ? tab.textContent.trim() : "Settings";
+          const text = [item.dataset.settingLabel, item.dataset.settingSearch, category].join(" ").toLowerCase();
+          return text.includes(query) ? { item: item, section: section, category: category, label: item.dataset.settingLabel } : null;
+        }).filter(Boolean).slice(0, 10);
+      if (!matches.length) {
+        const empty = document.createElement("p");
+        empty.className = "settings-search-empty";
+        empty.textContent = "No settings match that search.";
+        settingsSearchResults.appendChild(empty);
+        return;
+      }
+      matches.forEach(function (match) {
+        const result = document.createElement("button");
+        result.type = "button";
+        result.className = "settings-search-result";
+        const title = document.createElement("strong");
+        title.textContent = match.label;
+        const category = document.createElement("small");
+        category.textContent = match.category;
+        result.append(title, category);
+        result.addEventListener("click", function () {
+          const tab = settingsTabs.find(function (button) { return button.dataset.settingsSection === match.section; });
+          if (tab) activateSettingsSection(tab);
+          clearSettingsSearch();
+          window.requestAnimationFrame(function () { focusSettingTarget(match.item); });
+        });
+        settingsSearchResults.appendChild(result);
+      });
+    }
+    settingsSearch.addEventListener("input", renderSettingsSearch);
+    settingsSearch.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && settingsSearch.value) { event.preventDefault(); event.stopPropagation(); clearSettingsSearch(); return; }
+      if (event.key === "ArrowDown") {
+        const first = settingsSearchResults.querySelector(".settings-search-result");
+        if (first) { event.preventDefault(); first.focus(); }
+      } else if (event.key === "Enter") {
+        const results = settingsSearchResults.querySelectorAll(".settings-search-result");
+        if (results.length === 1) { event.preventDefault(); results[0].click(); }
+      }
+    });
+    $("settings-shortcut-search").addEventListener("input", renderSettingsShortcuts);
+    $("settings-shortcut-rows").addEventListener("click", function (event) {
+      const button = event.target.closest("[data-shortcut-id]");
+      if (!button) return;
+      const id = button.dataset.shortcutId;
+      if (state.shortcutRecordingId === id) {
+        state.shortcutRecordingId = "";
+        setShortcutSyncStatus("Shortcut recording canceled.");
+        renderSettingsShortcuts();
+      } else beginShortcutRecording(id);
+    });
+    $("settings-shortcut-reset").addEventListener("click", function () {
+      const api = window.ArborShortcuts;
+      if (!api) return;
+      let timestamp = Math.max(Date.now(), ...state.shortcutOperations.map(function (operation) { return operation.modifiedAt + 1; }));
+      const resets = api.SHORTCUT_BINDINGS.map(function (binding) {
+        const operation = keyboardShortcutPreferences.createOperation(binding.id, null, true, timestamp);
+        timestamp = operation.modifiedAt + 1;
+        return operation;
+      });
+      state.shortcutRecordingId = "";
+      applyShortcutOperations(keyboardShortcutPreferences.mergeOperations(state.shortcutOperations, resets));
+      setShortcutSyncStatus(state.demo ? "Preview only. Shortcut changes reset when you reload." : "Saved on this browser. Syncing with iCloud…");
+      if (!state.demo && state.database) syncKeyboardShortcutPreferences(state.accountSession);
     });
     document.querySelectorAll("[data-setting-group]").forEach(function (button) {
       button.addEventListener("click", function () {

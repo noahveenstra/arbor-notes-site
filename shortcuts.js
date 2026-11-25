@@ -45,6 +45,72 @@ function bindingShift(binding, applePlatform) {
   return applePlatform && typeof binding.appleShift === "boolean" ? binding.appleShift : Boolean(binding.shift);
 }
 
+export function resolveShortcutBindings(operations) {
+  const byId = new Map();
+  (Array.isArray(operations) ? operations : []).forEach(function (operation) {
+    if (operation && typeof operation.id === "string") byId.set(operation.id, operation);
+  });
+  return SHORTCUT_BINDINGS.map(function (base) {
+    const override = byId.get(base.id);
+    if (!override || override.reset) return Object.assign({}, base);
+    const binding = Object.assign({}, base, {
+      key: override.key,
+      code: override.code,
+      alt: Boolean(override.alt),
+      shift: Boolean(override.shift),
+      plain: Boolean(override.plain)
+    });
+    delete binding.appleShift;
+    return binding;
+  });
+}
+
+export function captureShortcut(event, applePlatform) {
+  if (!event || event.isComposing) return { error: "Finish text composition before recording a shortcut." };
+  const key = String(event.key || "");
+  if (!key || ["Alt", "AltGraph", "Control", "Meta", "Shift"].includes(key)) return { error: "Press a key combination to record it." };
+  const primary = applePlatform ? Boolean(event.metaKey) : Boolean(event.ctrlKey);
+  const wrongPrimary = applePlatform ? Boolean(event.ctrlKey) : Boolean(event.metaKey);
+  if (wrongPrimary) return { error: applePlatform ? "Use Command as the main modifier." : "Use Control as the main modifier." };
+  const plain = !primary && !event.altKey && !event.shiftKey;
+  const normalizedKey = key === " " ? "Space" : key.length === 1 ? key.toLowerCase() : key;
+  if (plain && !["ArrowUp", "ArrowDown", "Enter", "Escape"].includes(normalizedKey)) {
+    return { error: "Use Command or Control with Option/Alt or Shift. Plain typing keys cannot be shortcuts." };
+  }
+  if (!plain && !primary) return { error: "Use Command or Control with Option/Alt or Shift." };
+  if (!event.code) return { error: "Arbor could not identify that key. Try another combination." };
+  return {
+    binding: {
+      key: normalizedKey,
+      code: String(event.code),
+      alt: Boolean(event.altKey),
+      shift: Boolean(event.shiftKey),
+      plain: plain
+    }
+  };
+}
+
+export function validateShortcut(id, candidate, bindings, applePlatform) {
+  if (!candidate || !candidate.key || !candidate.code) return "Choose a key combination first.";
+  const base = SHORTCUT_BINDINGS.find(function (binding) { return binding.id === id; });
+  if (!base) return "Arbor cannot change that command.";
+  if (candidate.plain && !base.plain) return "This command needs a modifier so it does not interrupt typing.";
+  const key = candidate.key.toLowerCase();
+  const browserKeys = new Set(["a", "d", "e", "f", "g", "h", "j", "k", "l", "n", "o", "p", "r", "s", "t", "u", "w", "x", "y", ",", ".", "/"]);
+  if (!candidate.plain && !candidate.alt && browserKeys.has(key) && !((id === "undo" && key === "z" && !candidate.shift) || (id === "redo" && key === "z" && candidate.shift))) {
+    return "That combination is reserved by common browser or system commands. Add Option/Alt or choose another key.";
+  }
+  const collision = (Array.isArray(bindings) ? bindings : SHORTCUT_BINDINGS).find(function (binding) {
+    return binding.id !== id
+      && Boolean(binding.plain) === Boolean(candidate.plain)
+      && String(binding.key).toLowerCase() === key
+      && String(binding.code) === String(candidate.code)
+      && Boolean(binding.alt) === Boolean(candidate.alt)
+      && bindingShift(binding, applePlatform) === Boolean(candidate.shift);
+  });
+  return collision ? "That combination is already assigned to “" + collision.label + ".”" : "";
+}
+
 export function matchArborShortcut(event, context) {
   if (!event || event.isComposing) return null;
   if (typeof event.getModifierState === "function" && event.getModifierState("AltGraph")) return null;
@@ -55,8 +121,9 @@ export function matchArborShortcut(event, context) {
   const shift = Boolean(event.shiftKey);
   const hasCode = Boolean(event.code);
 
-  for (let index = 0; index < SHORTCUT_BINDINGS.length; index += 1) {
-    const binding = SHORTCUT_BINDINGS[index];
+  const bindings = Array.isArray(ctx.bindings) ? ctx.bindings : SHORTCUT_BINDINGS;
+  for (let index = 0; index < bindings.length; index += 1) {
+    const binding = bindings[index];
     if (binding.plain) {
       if (event.metaKey || event.ctrlKey || alt || shift) continue;
     } else if (!primary || alt !== Boolean(binding.alt) || shift !== bindingShift(binding, apple)) {
@@ -94,11 +161,11 @@ export function formatShortcut(binding, applePlatform) {
   return parts.join("+") + "+" + keyLabel;
 }
 
-export function shortcutHelpRows(applePlatform) {
+export function shortcutHelpRows(applePlatform, bindings) {
   const apple = Boolean(applePlatform);
   const rows = [];
   const byId = new Map();
-  SHORTCUT_BINDINGS.forEach(function (binding) {
+  (Array.isArray(bindings) ? bindings : SHORTCUT_BINDINGS).forEach(function (binding) {
     if (!binding.help) return;
     let row = byId.get(binding.id);
     if (!row) {
@@ -114,6 +181,9 @@ export function shortcutHelpRows(applePlatform) {
 
 const arborShortcutApi = {
   SHORTCUT_BINDINGS: SHORTCUT_BINDINGS,
+  resolveShortcutBindings: resolveShortcutBindings,
+  captureShortcut: captureShortcut,
+  validateShortcut: validateShortcut,
   matchArborShortcut: matchArborShortcut,
   shortcutHelpRows: shortcutHelpRows,
   formatShortcut: formatShortcut,

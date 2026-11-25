@@ -35,6 +35,10 @@ DEFINE SCHEMA
         entriesJSON STRING
     );
 
+    RECORD TYPE ArborKeyboardShortcuts (
+        shortcutsJSON STRING
+    );
+
     RECORD TYPE ArborMetadataState (
         payloadJSON ENCRYPTED STRING
     );

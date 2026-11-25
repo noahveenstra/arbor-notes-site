@@ -33,16 +33,18 @@
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-130-signed-out-welcome-20261122-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-177-static-autocorrect-highlight-20261124-b">
+  <link rel="stylesheet" href="./ui.css?v=arb-179-settings-redesign-20261124-b">
   <link rel="stylesheet" href="./arbor-view.css?v=arb-178-history-diff-4">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b"></script>
   <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
-  <script type="module" src="./shortcuts.js?v=arb-100-global-undo-20261119-a"></script>
+  <script type="module" src="./shortcuts.js?v=arb-179-custom-shortcuts-20261124-a"></script>
   <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" defer></script>
   <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
   <script src="./proofreading-dictionary-sync.js?v=arb-112-dictionary-sync-20261120-a" defer></script>
+  <script src="./keyboard-shortcut-preferences.js?v=arb-179-shortcut-preferences-20261124-a" defer></script>
+  <script src="./keyboard-shortcut-sync.js?v=arb-179-shortcut-sync-20261124-a" defer></script>
   <script src="./proofreading.js?v=arb-140-capitalization-whole-word-20261123-c" defer></script>
   <script src="./autocorrect.js?v=arb-109-context-autocorrect-20261123-a" defer></script>
   <script src="./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b" defer></script>
@@ -327,175 +329,182 @@
           <h2 id="settings-title">Settings</h2>
           <button class="settings-close" id="settings-close" type="button" aria-label="Close settings">×</button>
         </div>
+        <div class="settings-search-shell">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3"></path></svg>
+          <label class="sr-only" for="settings-search">Find a setting</label>
+          <input id="settings-search" type="search" placeholder="Find a setting" autocomplete="off" aria-controls="settings-search-results" aria-expanded="false">
+        </div>
+        <div class="settings-search-results" id="settings-search-results" role="group" aria-label="Matching settings" hidden></div>
         <nav class="settings-sections" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
-          <button class="is-selected" id="settings-tab-account" type="button" role="tab" aria-selected="true" aria-controls="settings-page-account" data-settings-section="account">Account</button>
-          <button id="settings-tab-appearance" type="button" role="tab" aria-selected="false" aria-controls="settings-page-appearance" tabindex="-1" data-settings-section="appearance">Appearance</button>
-          <button id="settings-tab-preferences" type="button" role="tab" aria-selected="false" aria-controls="settings-page-preferences" tabindex="-1" data-settings-section="preferences">Preferences</button>
+          <button class="is-selected" id="settings-tab-general" type="button" role="tab" aria-selected="true" aria-controls="settings-page-general" data-settings-section="general">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M19 13.4a7 7 0 0 0 0-2.8l1.5-1.1-1.5-2.6-1.8.7a7 7 0 0 0-2.4-1.4L14.5 4h-3l-.3 2.2A7 7 0 0 0 8.8 7.6L7 6.9 5.5 9.5 7 10.6a7 7 0 0 0 0 2.8l-1.5 1.1L7 17.1l1.8-.7a7 7 0 0 0 2.4 1.4l.3 2.2h3l.3-2.2a7 7 0 0 0 2.4-1.4l1.8.7 1.5-2.6L19 13.4Z"></path></svg>
+            <span>General</span>
+          </button>
+          <button id="settings-tab-appearance" type="button" role="tab" aria-selected="false" aria-controls="settings-page-appearance" tabindex="-1" data-settings-section="appearance">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m14 4 6 6M4 20l4.4-1 10.8-10.8a2.1 2.1 0 0 0-3-3L5.4 16 4 20Z"></path><path d="m12 6 6 6"></path></svg>
+            <span>Appearance</span>
+          </button>
+          <button id="settings-tab-writing" type="button" role="tab" aria-selected="false" aria-controls="settings-page-writing" tabindex="-1" data-settings-section="writing">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z"></path></svg>
+            <span>Writing</span>
+          </button>
+          <button id="settings-tab-account" type="button" role="tab" aria-selected="false" aria-controls="settings-page-account" tabindex="-1" data-settings-section="account">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="3.3"></circle><path d="M5.5 20a6.5 6.5 0 0 1 13 0"></path></svg>
+            <span>Account</span>
+          </button>
+          <button id="settings-tab-keyboard" type="button" role="tab" aria-selected="false" aria-controls="settings-page-keyboard" tabindex="-1" data-settings-section="keyboard">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"></rect><path d="M7 9h.01M10 9h.01M13 9h.01M16 9h.01M7 12h.01M10 12h.01M13 12h.01M16 12h.01M8 15h8"></path></svg>
+            <span>Keyboard &amp; Mouse</span>
+          </button>
         </nav>
-        <button class="settings-shortcut-link" id="shortcut-help-open" type="button" aria-haspopup="dialog" aria-controls="shortcut-help">Keyboard shortcuts</button>
       </aside>
-      <div class="settings-content">
-        <section id="settings-page-account" role="tabpanel" aria-labelledby="settings-tab-account" data-settings-page="account">
+      <div class="settings-content" id="settings-content">
+        <section id="settings-page-general" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-general" data-settings-page="general">
+          <header class="settings-page-heading"><h1>General</h1><p>Shape how notes open and how your library is arranged.</p></header>
           <div class="settings-group">
-            <h3>Profile</h3>
-          <div class="settings-field">
-            <label for="settings-display-name">Name</label>
-            <input id="settings-display-name" type="text" value="Noah" autocomplete="name" maxlength="80">
-          </div>
-          <div class="settings-field">
-            <div class="settings-field-label">Account</div>
-            <div class="settings-auth-row">
-              <span class="connection-line" id="settings-connection-line">
-                <span class="connection-dot"></span>
-                <span id="settings-connection-label" aria-live="polite">Not connected</span>
-              </span>
-              <div class="auth-buttons">
-                <div id="apple-sign-out-button"></div>
-              </div>
+            <h3>Window</h3>
+            <div class="settings-card">
+              <fieldset class="settings-setting-row settings-choice-field" data-setting-label="Tabs" data-setting-search="tabs open notes in tabs keep multiple notes open">
+                <legend><span>Tabs</span><small>Keep more than one note open at a time.</small></legend>
+                <div class="settings-segment" role="radiogroup" aria-label="Tabs">
+                  <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="tabs" data-setting-value="enabled">Enabled</button>
+                  <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="tabs" data-setting-value="disabled">Disabled</button>
+                </div>
+              </fieldset>
             </div>
-          </div>
-          </div>
-          <div class="settings-group">
-            <h3>Plan</h3>
-          <div class="settings-field">
-            <div class="settings-field-label">Billing</div>
-            <p class="settings-description settings-billing-copy">You’re currently on the <span class="settings-plan">Free</span> plan. <span class="settings-inline-link" aria-disabled="true" title="Billing is not available in the web client yet.">Upgrade</span> to get more.</p>
-          </div>
-          </div>
-          <details class="settings-data-disclosure">
-            <summary>Data &amp; privacy</summary>
-            <p>Arbor reads and writes notes and proofreading dictionary entries in the Apple account you sign in with. Signing out of this browser removes notes, metadata, dictionary entries, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
-            <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
-          </details>
-        </section>
-        <section id="settings-page-appearance" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-page="appearance" hidden>
-          <div class="settings-group">
-            <h3>Interface</h3>
-          <fieldset class="settings-field settings-choice-field">
-            <legend>Color Theme</legend>
-            <div class="settings-segment" role="radiogroup" aria-label="Color Theme">
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="theme" data-setting-value="system">System</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="theme" data-setting-value="dark">Dark</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="theme" data-setting-value="light">Light</button>
-            </div>
-          </fieldset>
-          </div>
-          <div class="settings-group">
-            <h3>Reading</h3>
-          <fieldset class="settings-field settings-choice-field">
-            <legend>Header Font</legend>
-            <div class="settings-segment" role="radiogroup" aria-label="Header Font">
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="headerFont" data-setting-value="sans">Sans</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="serif">Serif</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="mono">Mono</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="pixel">Pixel</button>
-            </div>
-          </fieldset>
-          <fieldset class="settings-field settings-choice-field">
-            <legend>Body Font</legend>
-            <div class="settings-segment" role="radiogroup" aria-label="Body Font">
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="bodyFont" data-setting-value="sans">Sans</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="serif">Serif</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="mono">Mono</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="pixel">Pixel</button>
-            </div>
-          </fieldset>
-          <fieldset class="settings-field settings-choice-field">
-            <legend>Note Text Size</legend>
-            <div class="settings-segment" role="radiogroup" aria-label="Note Text Size">
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="xsmall">XSmall</button>
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="textSize" data-setting-value="small">Small</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="medium">Medium</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="large">Large</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="xlarge">XLarge</button>
-            </div>
-          </fieldset>
-          <fieldset class="settings-field settings-choice-field">
-            <legend>Margins</legend>
-            <div class="settings-segment" role="radiogroup" aria-label="Margins">
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="condensed">Condensed</button>
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="margins" data-setting-value="compact">Compact</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="normal">Normal</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="roomy">Roomy</button>
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="spacious">Spacious</button>
-            </div>
-          </fieldset>
-          </div>
-          <div class="settings-group">
-            <h3>Preview</h3>
-          <div class="settings-preview-field">
-            <div class="settings-note-preview" id="settings-note-preview" aria-label="Note appearance preview">
-              <h3>Title</h3>
-              <p>The quick brown fox jumps over the lazy dog and runs away.</p>
-            </div>
-          </div>
-          </div>
-        </section>
-        <section id="settings-page-preferences" role="tabpanel" aria-labelledby="settings-tab-preferences" data-settings-page="preferences" hidden>
-          <div class="settings-group">
-            <h3>Tabs</h3>
-          <fieldset class="settings-field settings-choice-field">
-            <legend class="sr-only">Tabs</legend>
-            <div class="settings-segment" role="radiogroup" aria-label="Tabs">
-              <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="tabs" data-setting-value="enabled">Enabled</button>
-              <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="tabs" data-setting-value="disabled">Disabled</button>
-            </div>
-          </fieldset>
           </div>
           <div class="settings-group">
             <h3>Note list</h3>
-            <div class="settings-field">
-              <label for="note-sort-order">Sort notes by</label>
-              <select id="note-sort-order" aria-label="Sort notes by">
-                <option value="created-newest">Created · newest first</option>
-                <option value="created-oldest">Created · oldest first</option>
-                <option value="modified-newest">Last modified · newest first</option>
-                <option value="modified-oldest">Last modified · oldest first</option>
-                <option value="title-ascending">Title · A to Z</option>
-                <option value="title-descending">Title · Z to A</option>
-              </select>
-              <p class="settings-description">Applies to All Notes, folders, and Archive.</p>
+            <div class="settings-card">
+              <div class="settings-setting-row" data-setting-label="Sort notes by" data-setting-search="sort order created creation date modified last edited title alphabetical newest oldest">
+                <div class="settings-setting-copy"><label for="note-sort-order">Sort notes by</label><small>Applies to All Notes, folders, and Archive.</small></div>
+                <select id="note-sort-order" aria-label="Sort notes by">
+                  <option value="created-newest">Created · newest first</option>
+                  <option value="created-oldest">Created · oldest first</option>
+                  <option value="modified-newest">Last modified · newest first</option>
+                  <option value="modified-oldest">Last modified · oldest first</option>
+                  <option value="title-ascending">Title · A to Z</option>
+                  <option value="title-descending">Title · Z to A</option>
+                </select>
+              </div>
+            </div>
+          </div>
+          <div class="settings-card settings-setting-row settings-install-row" id="pwa-settings-field" data-setting-label="Install Arbor" data-setting-search="install app dock home screen progressive web app" hidden>
+            <div class="settings-setting-copy"><div class="settings-field-label">Install Arbor</div><small id="pwa-settings-copy"></small></div>
+            <button type="button" id="pwa-settings-install">Install</button>
+          </div>
+        </section>
+
+        <section id="settings-page-appearance" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-appearance" data-settings-page="appearance" hidden>
+          <header class="settings-page-heading"><h1>Appearance</h1><p>Make Arbor comfortable to read and write in.</p></header>
+          <div class="settings-group">
+            <h3>Light and dark</h3>
+            <div class="settings-card">
+              <fieldset class="settings-theme-row settings-choice-field" data-setting-label="Color theme" data-setting-search="appearance light dark system automatic theme">
+                <legend><span>Appearance</span><small>Choose a look or follow your device.</small></legend>
+                <div class="settings-theme-options settings-segment" role="radiogroup" aria-label="Color Theme">
+                  <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="theme" data-setting-value="system"><span class="theme-preview theme-preview-system" aria-hidden="true"><i></i><b></b></span><span>System</span></button>
+                  <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="theme" data-setting-value="dark"><span class="theme-preview theme-preview-dark" aria-hidden="true"><i></i><b></b></span><span>Dark</span></button>
+                  <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="theme" data-setting-value="light"><span class="theme-preview theme-preview-light" aria-hidden="true"><i></i><b></b></span><span>Light</span></button>
+                </div>
+              </fieldset>
             </div>
           </div>
           <div class="settings-group">
-            <h3>Writing</h3>
-          <label class="settings-toggle-row" for="proofreading-autocorrect">
-            <span>Auto-correct high-confidence spelling as you type</span>
-            <input id="proofreading-autocorrect" type="checkbox" checked>
-          </label>
-          <label class="settings-toggle-row" for="proofreading-sentence-capitalization">
-            <span>Suggest sentence and name capitalization
-              <small>Name checks run in your browser on this device. The first use loads a local model from Arbor (about 97 MB); note text is not sent to an AI service.</small>
-            </span>
-            <input id="proofreading-sentence-capitalization" type="checkbox" checked>
-          </label>
-          <label class="settings-toggle-row" for="proofreading-grammar-suggestions">
-            <span>Check grammar as I write</span>
-            <input id="proofreading-grammar-suggestions" type="checkbox" checked>
-          </label>
+            <h3>Reading</h3>
+            <div class="settings-card">
+              <fieldset class="settings-setting-row settings-choice-field" data-setting-label="Header font" data-setting-search="header title typeface sans serif mono pixel font">
+                <legend><span>Header font</span><small>Used for note titles.</small></legend>
+                <div class="settings-segment" role="radiogroup" aria-label="Header Font">
+                  <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="headerFont" data-setting-value="sans">Sans</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="serif">Serif</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="mono">Mono</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="headerFont" data-setting-value="pixel">Pixel</button>
+                </div>
+              </fieldset>
+              <fieldset class="settings-setting-row settings-choice-field" data-setting-label="Body font" data-setting-search="body text typeface sans serif mono pixel font">
+                <legend><span>Body font</span><small>Used for note text.</small></legend>
+                <div class="settings-segment" role="radiogroup" aria-label="Body Font">
+                  <button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="bodyFont" data-setting-value="sans">Sans</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="serif">Serif</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="mono">Mono</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="bodyFont" data-setting-value="pixel">Pixel</button>
+                </div>
+              </fieldset>
+              <fieldset class="settings-setting-row settings-choice-field" data-setting-label="Note text size" data-setting-search="font size text size smaller larger">
+                <legend><span>Note text size</span><small>Adjust note text size.</small></legend>
+                <div class="settings-segment settings-size-segment" role="radiogroup" aria-label="Note Text Size">
+                  <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="xsmall" aria-label="Extra small">XS</button><button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="textSize" data-setting-value="small" aria-label="Small">S</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="medium" aria-label="Medium">M</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="large" aria-label="Large">L</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="textSize" data-setting-value="xlarge" aria-label="Extra large">XL</button>
+                </div>
+              </fieldset>
+              <fieldset class="settings-setting-row settings-choice-field" data-setting-label="Margins" data-setting-search="margins page width line length condensed compact roomy spacious">
+                <legend><span>Margins</span><small>Set the width of your note.</small></legend>
+                <div class="settings-segment settings-margin-segment" role="radiogroup" aria-label="Margins">
+                  <button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="condensed">Condensed</button><button type="button" role="radio" aria-checked="true" tabindex="0" data-setting-group="margins" data-setting-value="compact">Compact</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="normal">Normal</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="roomy">Roomy</button><button type="button" role="radio" aria-checked="false" tabindex="-1" data-setting-group="margins" data-setting-value="spacious">Spacious</button>
+                </div>
+              </fieldset>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>Preview</h3>
+            <div class="settings-note-preview" id="settings-note-preview" aria-label="Note appearance preview"><h2>Title</h2><p>The quick brown fox jumps over the lazy dog and runs away.</p></div>
+          </div>
+        </section>
+
+        <section id="settings-page-writing" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-writing" data-settings-page="writing" hidden>
+          <header class="settings-page-heading"><h1>Writing</h1><p>Choose how Arbor helps while you write.</p></header>
+          <div class="settings-group">
+            <h3>Typing</h3>
+            <div class="settings-card">
+              <label class="settings-toggle-row" for="proofreading-autocorrect" data-setting-label="Auto-correct spelling" data-setting-search="autocorrect spelling correct typos as you type"><span><strong>Auto-correct high-confidence spelling</strong><small>Correct likely typing mistakes when a word is complete.</small></span><input id="proofreading-autocorrect" type="checkbox" checked></label>
+              <label class="settings-toggle-row" for="proofreading-sentence-capitalization" data-setting-label="Capitalization suggestions" data-setting-search="capitalize names first word sentence proper nouns"><span><strong>Suggest sentence and name capitalization</strong><small>Name checks run locally in this browser. The first use loads an Arbor model (about 97 MB); note text is not sent to an AI service.</small></span><input id="proofreading-sentence-capitalization" type="checkbox" checked></label>
+              <label class="settings-toggle-row" for="proofreading-grammar-suggestions" data-setting-label="Grammar suggestions" data-setting-search="grammar check grammar as i write suggestions"><span><strong>Check grammar as I write</strong><small>Show lightweight grammar suggestions inline.</small></span><input id="proofreading-grammar-suggestions" type="checkbox" checked></label>
+            </div>
           </div>
           <div class="settings-group">
             <h3>Personal dictionary</h3>
-          <div class="settings-field personal-dictionary-settings">
-            <p class="settings-description">Words sync through your private iCloud account. Note text stays on this device.</p>
-            <div class="personal-dictionary-add-row">
-              <input id="personal-dictionary-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="120" aria-label="Word to add to personal dictionary">
-              <button id="personal-dictionary-add" type="button">Add</button>
+            <div class="settings-card settings-dictionary-card" data-setting-label="Personal dictionary" data-setting-search="dictionary add words saved words ignore spelling across devices icloud">
+              <p class="settings-description">Words sync through your private iCloud account. Note text stays on this device.</p>
+              <div class="personal-dictionary-add-row"><input id="personal-dictionary-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="120" aria-label="Word to add to personal dictionary"><button id="personal-dictionary-add" type="button">Add</button></div>
+              <p class="personal-dictionary-status" id="personal-dictionary-status" role="status" aria-live="polite">Sign in to sync your dictionary.</p>
+              <ul class="personal-dictionary-entries" id="personal-dictionary-entries" aria-label="Personal dictionary words"></ul>
             </div>
-            <p class="personal-dictionary-status" id="personal-dictionary-status" role="status" aria-live="polite">Sign in to sync your dictionary.</p>
-            <ul class="personal-dictionary-entries" id="personal-dictionary-entries" aria-label="Personal dictionary words"></ul>
           </div>
+        </section>
+
+        <section id="settings-page-account" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-account" data-settings-page="account" hidden>
+          <header class="settings-page-heading"><h1>Account</h1><p>Your Apple account and how Arbor handles this browser’s data.</p></header>
+          <div class="settings-group">
+            <h3>Profile</h3>
+            <div class="settings-card">
+              <div class="settings-setting-row" data-setting-label="Name" data-setting-search="name profile display name"><div class="settings-setting-copy"><label for="settings-display-name">Name</label><small>Your display name in Arbor.</small></div><input id="settings-display-name" type="text" value="Noah" autocomplete="name" maxlength="80"></div>
+              <div class="settings-setting-row" data-setting-label="Apple account" data-setting-search="apple account sign in sign out icloud connected sync"><div class="settings-setting-copy"><span>Apple account</span><small class="connection-line" id="settings-connection-line"><span class="connection-dot"></span><span id="settings-connection-label" aria-live="polite">Not connected</span></small></div><div class="auth-buttons"><div id="apple-sign-out-button"></div></div></div>
+            </div>
           </div>
-          <div class="settings-field" id="pwa-settings-field" hidden>
-            <div class="settings-field-label">Install</div>
-            <p class="settings-description" id="pwa-settings-copy"></p>
-            <button type="button" id="pwa-settings-install">Install Arbor</button>
+          <div class="settings-group">
+            <h3>Plan</h3>
+            <div class="settings-card"><div class="settings-setting-row" data-setting-label="Billing" data-setting-search="billing plan upgrade subscription"><div class="settings-setting-copy"><span>Plan</span><small>Billing is not available in the web client yet.</small></div><p class="settings-billing-copy"><span class="settings-plan">Free</span><span class="settings-inline-link" aria-disabled="true" title="Billing is not available in the web client yet.">Upgrade</span></p></div></div>
+          </div>
+          <div class="settings-group">
+            <h3>Data &amp; privacy</h3>
+            <details class="settings-card settings-data-disclosure" data-setting-label="Data and privacy" data-setting-search="privacy data stored notes local browser icloud cloudkit sign out cache model">
+              <summary>How Arbor handles your data</summary>
+              <p>Arbor reads and writes notes, proofreading dictionary entries, and keyboard shortcut preferences in the Apple account you sign in with. Shortcut preferences contain Arbor command names and key combinations, not note content. Signing out of this browser removes notes, metadata, dictionary entries, shortcut preferences, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
+              <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
+            </details>
+          </div>
+        </section>
+
+        <section id="settings-page-keyboard" class="settings-page" role="tabpanel" aria-labelledby="settings-tab-keyboard" data-settings-page="keyboard" hidden>
+          <header class="settings-page-heading"><h1>Keyboard &amp; Mouse</h1><p>Search and customize the shortcuts Arbor uses in this browser.</p></header>
+          <div class="settings-group" data-setting-label="Keyboard shortcuts" data-setting-search="keyboard customize Arbor command key binding">
+            <h3>Shortcuts</h3>
+            <div class="settings-card settings-shortcut-list">
+              <label class="sr-only" for="settings-shortcut-search">Search commands or keys</label>
+              <input id="settings-shortcut-search" type="search" placeholder="Search commands or keys" autocomplete="off">
+              <div class="settings-shortcut-rows" id="settings-shortcut-rows" aria-live="polite"></div>
+            </div>
+            <div class="settings-shortcut-footer"><p class="settings-description settings-shortcut-note" id="settings-shortcut-status" role="status" aria-live="polite">Sign in to sync shortcuts with your Apple Account.</p><button id="shortcut-help-open" type="button">Keyboard shortcut guide</button><button class="settings-reset-shortcuts" id="settings-shortcut-reset" type="button">Reset to defaults</button></div>
+            <p class="settings-description settings-shortcut-note">Only Arbor commands appear here. Browser and system shortcuts stay under their control.</p>
           </div>
         </section>
       </div>
     </section>
   </div>
-
   <dialog class="shortcut-sheet" id="shortcut-help" aria-labelledby="shortcut-help-title">
     <div class="shortcut-sheet-card">
       <header class="shortcut-sheet-header">

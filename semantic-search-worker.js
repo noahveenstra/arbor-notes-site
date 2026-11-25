@@ -1,4 +1,4 @@
-import { embedTexts } from "./semantic-search.js?v=arb-160-incremental-20261124";
+import { embedTexts } from "./semantic-search.js?v=arb-190-instant-launch-20261125-a";
 
 self.addEventListener("message", async function (event) {
   const request = event.data || {};

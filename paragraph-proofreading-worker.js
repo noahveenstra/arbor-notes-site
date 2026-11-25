@@ -1,4 +1,4 @@
-import "./paragraph-proofreader.js";
+import "./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b";
 import { MAX_INPUT_TOKENS, createLocalProofreadingRunner } from "./paragraph-proofreading-model.js";
 
 const proofreader = globalThis.ArborParagraphProofreader.createParagraphProofreader({

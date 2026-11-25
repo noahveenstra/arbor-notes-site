@@ -11,6 +11,7 @@
   const keyboardShortcutPreferences = window.ArborKeyboardShortcutPreferences;
   const keyboardShortcutSync = window.ArborKeyboardShortcutSync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions } = window.ArborSearchLogic;
+  const launchLibrary = window.ArborLaunchLibrary;
   const config = window.ARBOR_CLOUDKIT_CONFIG || { demoMode: false };
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const largeDemoMode = previewMode === "large";
@@ -106,6 +107,12 @@
     previewQueuedNames: new Set(),
     previewActiveCount: 0,
     cacheWriteTimer: null,
+    editQueue: [],
+    titleQueryTimer: 0,
+    titleQueryRequest: 0,
+    paintedFromCache: false,
+    paintPromise: null,
+    startupFinished: false,
     accountSession: 0,
     accountCacheSuspended: false,
     layout: loadPreference("arbor.web.layout.v1", { sidebarWidth: 195, listWidth: 340, sidebarCollapsed: false }),
@@ -276,7 +283,7 @@
     if (!accountCacheModulePromise) {
       const script = document.querySelector("script[src*='app.js']");
       const base = script && script.src ? script.src : window.location.href;
-      accountCacheModulePromise = import(new URL("./account-cache.js?v=arb-179-shortcut-account-cache-20261124-b", base).href);
+      accountCacheModulePromise = import(new URL("./account-cache.js?v=arb-190-instant-launch-20261125-a", base).href);
     }
     return accountCacheModulePromise;
   }
@@ -467,6 +474,7 @@
     state.notes = [];
     state.folders = [];
     state.syncToken = null;
+    state.editQueue = [];
     state.syncBaselines.clear();
     state.pendingRemoteRecords.clear();
     state.nativeZoneID = null;
@@ -512,42 +520,6 @@
       onBlocked: onAccountCacheBlocked,
       prepareForDelete: releaseAccountCacheConnections
     };
-  }
-
-  function stopArborStateSync(clearToken) {
-    if (state.arborStateSync) state.arborStateSync.dispose();
-    state.arborStateSync = null;
-    state.arborSyncStatus = null;
-    if (clearToken && state.arborCloudKitTransport) state.arborCloudKitTransport.clearToken();
-  }
-
-  function startArborStateSync(accountId, session) {
-    if (demoMode || !window.ArborCloudKitSync || !state.arborCloudKitTransport || !accountId) return;
-    if (state.arborStateSync && state.arborStateSync.accountId === accountId) return;
-    stopArborStateSync(false);
-    try {
-      const manager = window.ArborCloudKitSync.createArborStateSync({
-        storage: window.localStorage,
-        accountId: accountId,
-        client: state.arborCloudKitTransport.createClient(),
-        isCurrent: function () { return accountSessionCurrent(session); },
-        onStatus: function (status) {
-          state.arborSyncStatus = status;
-        },
-        onState: function () {}
-      });
-      state.arborStateSync = manager;
-      manager.start();
-    } catch (error) {
-      state.arborSyncStatus = "error";
-      console.warn("Arbor state sync could not start.", error && error.message || "local state unavailable");
-    }
-  }
-
-  function getArborStateStore(context) {
-    if (!context || context.demo || !state.arborStateSync) return null;
-    if (state.arborStateSync.accountId !== context.accountId || context.session !== state.accountSession) return null;
-    return state.arborStateSync.store;
   }
 
   async function openUndoHistoryForAccount(accountKey, memoryOnly) {
@@ -804,7 +776,8 @@
   function rememberRecordBody(recordName, body, session) {
     if ((session != null && session !== state.accountSession) || state.accountCacheSuspended) return;
     state.bodyCache.delete(recordName); state.bodyCache.set(recordName, body);
-    while (state.bodyCache.size > 30) state.bodyCache.delete(state.bodyCache.keys().next().value);
+    const bodyLimit = launchLibrary && launchLibrary.OPENED_BODY_LIMIT || 30;
+    while (state.bodyCache.size > bodyLimit) state.bodyCache.delete(state.bodyCache.keys().next().value);
     const preview = previewText(body);
     const current = state.notes.find(function (note) { return note.recordName === recordName; });
     if (current && isNativeModelRecord(current.record, "CapturedNote")) {
@@ -871,34 +844,11 @@
     }
   }
 
-  function queueNativePreview(recordName) {
-    if (!state.database || !recordName || state.previewCache.has(recordName) ||
-        state.bodyCache.has(recordName) || state.previewLoadErrors.has(recordName) || state.previewQueuedNames.has(recordName)) return;
-    state.previewQueuedNames.add(recordName);
-    state.previewQueue.push({ recordName: recordName, session: state.accountSession });
-    drainPreviewQueue();
+  function queueNativePreview() {
+    // Note text is fetched when the note is opened, not while the list is scrolling.
   }
 
-  function observeNativePreview(card, note) {
-    if (note.preview || state.previewCache.has(note.recordName) ||
-        state.bodyCache.has(note.recordName) || state.previewLoadErrors.has(note.recordName)) return;
-    // Keep the change feed metadata-only; load each text asset as its row approaches the viewport.
-    if (typeof window.IntersectionObserver !== "function") {
-      queueNativePreview(note.recordName);
-      return;
-    }
-    if (!state.previewObserver) {
-      const observer = new window.IntersectionObserver(function (entries) {
-        entries.forEach(function (entry) {
-          if (!entry.isIntersecting) return;
-          observer.unobserve(entry.target);
-          queueNativePreview(entry.target.dataset.recordName);
-        });
-      }, { root: $("note-list"), rootMargin: "240px 0px" });
-      state.previewObserver = observer;
-    }
-    state.previewObserver.observe(card);
-  }
+  function observeNativePreview() {}
 
   function getDeviceID() {
     if (demoMode) return "demo-device";
@@ -1001,7 +951,6 @@
     el.classList.toggle("is-saved", mode === "saved");
     el.classList.toggle("is-error", mode === "error");
     el.classList.toggle("is-dirty", mode === "dirty");
-    if (mode) announceStatus("Save status: " + text);
   }
 
   function hideSaveState() {
@@ -2616,13 +2565,21 @@
     return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
+  function noteBodyLoaded(note) {
+    if (!note) return false;
+    if (state.bodyCache.has(note.recordName)) return true;
+    if (state.nativeSchema && typeof fieldValue(note.record, "text") === "string") return true;
+    return !state.nativeSchema && typeof fieldValue(note.record, "body") === "string";
+  }
+
   function searchCorpus() {
     return state.notes.filter(function (note) { return !isArchived(note.record); }).map(function (note) {
       const modifiedAt = note.modifiedAt.getTime();
+      const loaded = noteBodyLoaded(note);
       return {
         id: note.recordName,
         title: note.title,
-        body: typeof note.editorBody === "string" ? note.editorBody : (note.body || ""),
+        body: launchLibrary ? launchLibrary.searchBody(note, loaded) : (loaded ? (note.editorBody || note.body || "") : ""),
         folder: note.folderPath || "",
         createdAt: note.createdAt.getTime(),
         updatedAt: modifiedAt,
@@ -2730,27 +2687,39 @@
   }
 
   async function hydrateSearchCorpus(request) {
-    const missing = state.notes.filter(function (note) {
-      if (isArchived(note.record) || state.bodyCache.has(note.recordName)) return false;
-      return !(state.nativeSchema && typeof fieldValue(note.record, "text") === "string") && !(typeof note.body === "string" && note.body.length);
-    });
-    for (let offset = 0; offset < missing.length; offset += 5) {
-      if (request.id !== state.semanticRequestId || request.normalized !== state.semanticRequestedQuery) return;
-      const batch = missing.slice(offset, offset + 5);
-      await Promise.all(batch.map(function (note) {
-        return Promise.race([
-          hydrateSearchBody(note),
-          new Promise(function (resolve) { window.setTimeout(resolve, 15000); })
-        ]).catch(function () {});
-      }));
-    }
-    if (request.id === state.semanticRequestId && request.normalized === state.semanticRequestedQuery) {
-      renderNotes();
-      if (state.semanticWorkerUnavailable) {
-        state.semanticLoadingQuery = ""; state.semanticErrorQuery = request.normalized;
-        if (state.searchPage) renderSearchPage(); else if ($("search-dialog").open) renderSearchSuggestions(request.query);
-      } else sendSemanticSearch(request);
-    }
+    if (request.id !== state.semanticRequestId || request.normalized !== state.semanticRequestedQuery) return;
+    renderNotes();
+    if (state.semanticWorkerUnavailable) {
+      state.semanticLoadingQuery = ""; state.semanticErrorQuery = request.normalized;
+      if (state.searchPage) renderSearchPage(); else if ($("search-dialog").open) renderSearchSuggestions(request.query);
+    } else sendSemanticSearch(request);
+  }
+
+  function scheduleCloudKitTitleSearch(query) {
+    window.clearTimeout(state.titleQueryTimer);
+    const text = String(query || "").trim();
+    if (!text || state.demo || !state.database || typeof state.database.performQuery !== "function" || !launchLibrary) return;
+    const requestId = ++state.titleQueryRequest;
+    state.titleQueryTimer = window.setTimeout(function () {
+      const built = launchLibrary.cloudKitTitleQuery(state.nativeSchema, state.nativeZoneID, text);
+      if (!built) return;
+      state.database.performQuery(built).then(function (response) {
+        if (requestId !== state.titleQueryRequest || !accountSessionCurrent(state.accountSession)) return;
+        const records = Array.isArray(response) ? response : (response && response.records) || [];
+        let added = false;
+        records.forEach(function (record) {
+          if (!record || !record.recordName || state.records.has(record.recordName)) return;
+          if (!cloudKitWebZone.isLibraryRecord(record, state.nativeSchema)) return;
+          state.records.set(record.recordName, record);
+          added = true;
+        });
+        if (!added) return;
+        syncDerivedCollections();
+        scheduleLibraryCacheWrite();
+        if (state.searchPage) renderSearchPage();
+        else if ($("search-dialog").open) renderSearchSuggestions(text);
+      }).catch(function () {});
+    }, 250);
   }
 
   function scheduleSemanticSearch(query) {
@@ -2845,7 +2814,7 @@
 
   let semanticIndexPromise;
   function loadSemanticIndex() {
-    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-160-incremental-20261124");
+    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-190-instant-launch-20261125-a");
     return semanticIndexPromise;
   }
 
@@ -2907,7 +2876,7 @@
   function startSemanticWorker() {
     if (state.semanticWorker) return state.semanticWorker;
     try {
-      const worker = new Worker("./semantic-search-worker.js?v=arb-160-incremental-20261124", { type: "module" });
+      const worker = new Worker("./semantic-search-worker.js?v=arb-190-instant-launch-20261125-a", { type: "module" });
       worker.addEventListener("message", function (event) {
         const message = event.data || {};
         if (!state.semanticWorkerBusy || message.id !== state.semanticWorkerRequestId) return;
@@ -2996,7 +2965,7 @@
 
   function renderSearchSuggestions(query) {
     const list = $("search-suggestions"); const input = $("global-search-input"); const text = String(query || "").trim();
-    scheduleSemanticSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
+    scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
     if (!text) { state.searchActiveIndex = -1; input.removeAttribute("aria-activedescendant"); setMotionVisibility(list, false); list.innerHTML = ""; return; }
     if (state.searchActiveIndex >= state.searchItems.length) state.searchActiveIndex = -1;
     const progress = semanticProgressText(text);
@@ -3045,7 +3014,7 @@
   function renderSearchPage() {
     const input = $("expanded-search-input");
     if (document.activeElement !== input) input.value = state.searchQuery;
-    const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query);
+    const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query); scheduleCloudKitTitleSearch(query);
     state.searchItems = searchNotes(query).slice(0, 100);
     if (!query) {
       $("expanded-search-count").textContent = "";
@@ -4001,7 +3970,7 @@
     if (state.proofreadingWorker) return state.proofreadingWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./proofreading-worker.js?v=arb-147-name-context-20261123-a", { name: "arbor-local-proofreading" });
+      const worker = new Worker("./proofreading-worker.js?v=arb-190-instant-launch-20261125-a", { name: "arbor-local-proofreading" });
       worker.addEventListener("message", onProofreadingMessage);
       worker.addEventListener("error", function (event) {
         console.warn("Local writing suggestions could not start.", event.message || "Worker error");
@@ -5473,7 +5442,7 @@
     if (state.selectionReviewWorker) return state.selectionReviewWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./paragraph-proofreading-worker.js?v=arb-147-name-context-20261123-a", {
+      const worker = new Worker("./paragraph-proofreading-worker.js?v=arb-190-instant-launch-20261125-a", {
         type: "module",
         name: "arbor-on-device-paragraph-proofreading"
       });
@@ -5872,6 +5841,15 @@
     }, true);
   }
 
+  function selectRestoredNote(note) {
+    if (!note) {
+      selectNote(null);
+      return;
+    }
+    if (state.selectedRecordName === note.recordName && state.editor) return;
+    selectNote(note);
+  }
+
   function selectNote(note) {
     window.clearTimeout(state.proofreadingTimer);
     window.clearTimeout(state.capitalizationContextTimer);
@@ -6045,18 +6023,52 @@
     return await (await response.blob()).text();
   }
 
+  async function ensureWebRecordZone() {
+    const services = window.ArborCloudKitWebServices;
+    const transport = state.arborCloudKitTransport;
+    if (!services || typeof services.CloudKitEncryptedWebServices !== "function" || !transport) {
+      throw new Error("Arbor could not prepare its private notes zone in iCloud.");
+    }
+    const client = new services.CloudKitEncryptedWebServices({
+      containerIdentifier: config.containerIdentifier,
+      environment: config.environment || "development",
+      apiToken: String(config.apiToken || ""),
+      authTokenStore: transport.authTokenStore,
+      fetchImpl: transport.fetch
+    });
+    state.libraryLoadOperation = "zones/modify";
+    const ensured = await client.ensureRecordZone(cloudKitWebZone.ARBOR_WEB_ZONE_ID);
+    return ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+  }
+
+  function cachedBodyIsStale(previous, next) {
+    if (!previous) return false;
+    const previousModified = String(fieldValue(previous, "modifiedAt") || "");
+    const nextModified = String(fieldValue(next, "modifiedAt") || "");
+    if (previousModified !== nextModified) return true;
+    const previousFingerprint = String(fieldValue(previous, "contentFingerprint") || "");
+    const nextFingerprint = String(fieldValue(next, "contentFingerprint") || "");
+    return Boolean(previousFingerprint && nextFingerprint && previousFingerprint !== nextFingerprint);
+  }
+
+  function applyLibraryRecord(record) {
+    if (!cloudKitWebZone.isLibraryRecord(record, state.nativeSchema)) return;
+    const previous = state.records.get(record.recordName);
+    state.records.set(record.recordName, record);
+    if (cachedBodyIsStale(previous, record)) {
+      state.bodyCache.delete(record.recordName);
+      state.previewCache.delete(record.recordName);
+      state.previewLoadErrors.delete(record.recordName);
+    }
+  }
+
   async function loadZoneRecords(session) {
     if (!accountSessionCurrent(session)) return;
     state.loadingRecords = true; state.libraryLoadSlow = false; state.libraryLoadSlowMessage = ""; state.loadRecordsErrorMessage = ""; state.libraryLoadOperation = ""; renderNotes();
     if (config.schemaMode === "web") {
       state.nativeSchema = false;
-      if (!state.arborCloudKitTransport || typeof state.arborCloudKitTransport.createClient !== "function") {
-        throw new Error("Arbor could not prepare its private notes zone in iCloud.");
-      }
-      state.libraryLoadOperation = "zones/modify";
-      const ensured = await state.arborCloudKitTransport.createClient().ensureRecordZone(cloudKitWebZone.ARBOR_WEB_ZONE_ID);
+      state.nativeZoneID = await ensureWebRecordZone();
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
-      state.nativeZoneID = ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
     } else if (!state.nativeZoneID) {
       const zoneResponse = assertResponse(await state.database.fetchAllRecordZones());
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
@@ -6070,12 +6082,8 @@
         state.nativeZoneID = nativeZone.zoneID || nativeZone;
       } else {
         state.nativeSchema = false;
-        if (!state.arborCloudKitTransport || typeof state.arborCloudKitTransport.createClient !== "function") {
-          throw new Error("Arbor could not prepare its private notes zone in iCloud.");
-        }
-        const ensured = await state.arborCloudKitTransport.createClient().ensureRecordZone(cloudKitWebZone.ARBOR_WEB_ZONE_ID);
+        state.nativeZoneID = await ensureWebRecordZone();
         if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
-        state.nativeZoneID = ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
       }
     }
     if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
@@ -6101,13 +6109,9 @@
         }) || zones[0];
         if (!changes) break;
         (changes.records || []).forEach(function (record) {
-          if (cloudKitWebZone.isLibraryRecord(record, state.nativeSchema)) {
-            state.records.set(record.recordName, record); state.bodyCache.delete(record.recordName);
-            state.previewCache.delete(record.recordName); state.previewLoadErrors.delete(record.recordName);
-          }
+          applyLibraryRecord(record);
         });
         (changes.deletedRecords || []).forEach(function (record) {
-          notifyArborNoteDeleted(record.recordName);
           state.records.delete(record.recordName); state.bodyCache.delete(record.recordName);
           state.previewCache.delete(record.recordName); state.previewLoadErrors.delete(record.recordName);
         });
@@ -6224,15 +6228,11 @@
             state.pendingRemoteRecords.set(record.recordName, record);
             return;
           }
-          state.records.set(record.recordName, record);
-          state.bodyCache.delete(record.recordName);
-          state.previewCache.delete(record.recordName);
-          state.previewLoadErrors.delete(record.recordName);
+          applyLibraryRecord(record);
         });
         (changes.deletedRecords || []).forEach(function (record) {
           const recordName = record.recordName;
           deletedNames.add(recordName);
-          notifyArborNoteDeleted(recordName);
           if (recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
             state.pendingRemoteRecords.set(recordName, null);
             return;
@@ -6435,18 +6435,15 @@
     if (!identity) return;
     const signedInDuringWelcome = !$("welcome-screen").hidden && $("welcome-screen").dataset.step === "auth";
     const userID = String(identity.userRecordName || "").trim();
-    if (state.database && state.connectionUserID === userID && !state.accountCacheSuspended) {
-      startArborStateSync(userID, state.accountSession);
-      return;
-    }
+    if (state.database && state.connectionUserID === userID && !state.accountCacheSuspended) return;
     const session = ++state.accountSession;
-    showWelcomeChecking();
+    const keepCachedLibrary = state.paintedFromCache && state.connectionUserID === userID;
+    if (!keepCachedLibrary) showWelcomeChecking();
     setWelcomeStatus("Preparing your private notes…", true);
     const accountPreparationSlowTimer = window.setTimeout(function () {
       if (session !== state.accountSession) return;
       setWelcomeStatus("Arbor is still preparing your private notes on this browser. Your notes will load from iCloud next; keep this page open.", true);
     }, NOTE_LOAD_SLOW_NOTICE_MS);
-    stopArborStateSync(false);
     let ready = false;
     try {
       await enqueueAccountPersistence(async function () {
@@ -6528,7 +6525,7 @@
       setConnection("Still preparing your notes…", false);
       renderAll();
     }, NOTE_LOAD_SLOW_NOTICE_MS);
-    startArborStateSync(userID, session);
+    loadEditQueue();
     try { await openUndoHistoryForAccount(state.cacheKey, false); }
     catch (_) { showToast("Undo history could not be loaded from this browser.", true); }
     if (session !== state.accountSession) return;
@@ -6538,9 +6535,13 @@
       if (restored) {
         syncDerivedCollections(); renderAll();
         const restoredState = restoreOpenTabsForLoadedNotes();
-        if (state.preferences.tabsEnabled && restoredState.note) selectNote(restoredState.note);
+        const paintedNote = keepCachedLibrary
+          ? state.notes.find(function (item) { return item.recordName === state.selectedRecordName; })
+          : null;
+        if (state.preferences.tabsEnabled && restoredState.note) selectRestoredNote(restoredState.note);
         else if (restoredState.hidden) selectNote(null);
-        else if (currentNoteFromHistory()) selectNote(currentNoteFromHistory());
+        else if (currentNoteFromHistory()) selectRestoredNote(currentNoteFromHistory());
+        else if (paintedNote) selectRestoredNote(paintedNote);
         else selectNote(null);
         setConnection("Connected · refreshing notes…", true);
       } else setConnection("Loading your notes from iCloud…", false);
@@ -6551,6 +6552,7 @@
       state.libraryLoadSlowMessage = "";
       if (!(await loadZoneRecordsWithFeedback(session))) return;
       if (session !== state.accountSession) return;
+      flushPendingEdits();
       startRealtimeSync(session);
       configureRealtimeNotifications(session);
       await syncPersonalDictionary(session);
@@ -6634,6 +6636,12 @@
   const AUTH_RESTORE_TIMEOUT_MS = 15_000;
   const AUTH_RESTORE_SLOW_NOTICE_MS = 10_000;
 
+  function showCachedSignInFailure(message) {
+    setConnection("Couldn’t reach iCloud. Showing notes saved in this browser.", false);
+    setListMessage(message, true, true, true);
+    showApp();
+  }
+
   function initializeCloudKit() {
     if (demoMode) {
       initializeDemo();
@@ -6645,32 +6653,18 @@
       return;
     }
     if (!window.CloudKit) {
-      showSetup("Apple’s CloudKit library did not load. Check your connection, then reload the page.");
+      const message = "Arbor couldn’t load Apple’s sign-in service. Check your connection, then reload.";
+      if (state.paintedFromCache) showCachedSignInFailure(message);
+      else {
+        showWelcomeCheckError();
+        setWelcomeStatus(message, false);
+      }
       return;
     }
     try {
-      if (!state.arborSignOutGuardInstalled) {
-        document.addEventListener("click", function (event) {
-          const target = event.target && event.target.closest ? event.target.closest("#apple-sign-out-button") : null;
-          const manager = state.arborStateSync;
-          const accountId = state.connectionUserID;
-          const pending = Boolean(manager && manager.hasPending()) || Boolean(
-            accountId && window.ArborCloudKitSync && window.ArborCloudKitSync.hasPendingArborSync(window.localStorage, accountId)
-          );
-          if (!target || !pending) return;
-          const proceed = window.confirm("Some Arbor changes have not synced to iCloud. Signing out clears the unsynced local Arbor copy on this browser. Sign out anyway?");
-          if (!proceed) {
-            event.preventDefault();
-            event.stopImmediatePropagation();
-          }
-        }, true);
-        state.arborSignOutGuardInstalled = true;
-      }
-      if (window.ArborCloudKitSync && typeof window.ArborCloudKitSync.createArborCloudKitTransport === "function") {
-        state.arborCloudKitTransport = window.ArborCloudKitSync.createArborCloudKitTransport({
-          containerIdentifier: config.containerIdentifier,
-          environment: config.environment || "development",
-          apiToken: token
+      if (window.ArborCloudKitWebServices && typeof window.ArborCloudKitWebServices.createCloudKitAuthTransport === "function") {
+        state.arborCloudKitTransport = window.ArborCloudKitWebServices.createCloudKitAuthTransport({
+          containerIdentifier: config.containerIdentifier
         });
       }
       CloudKit.configure({
@@ -6691,18 +6685,23 @@
         }]
       });
       state.container = CloudKit.getDefaultContainer();
-      setConnection("Checking your Apple Account session…", false);
-      showWelcomeChecking();
+      const cachedFailure = "Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple. These notes are the unencrypted copy saved in this browser. Reload to try again.";
+      if (state.paintedFromCache) setConnection("Checking your Apple Account…", false);
+      else {
+        setConnection("Checking your Apple Account session…", false);
+        showWelcomeChecking();
+      }
       let authRestoreSettled = false;
       const authRestoreSlowTimer = window.setTimeout(function () {
-        if (authRestoreSettled) return;
+        if (authRestoreSettled || state.paintedFromCache) return;
         setWelcomeStatus("Still checking your Apple Account session. This is taking longer than usual; keep this page open.", true);
       }, AUTH_RESTORE_SLOW_NOTICE_MS);
       const authRestoreTimer = window.setTimeout(function () {
         if (authRestoreSettled) return;
         window.clearTimeout(authRestoreSlowTimer);
         setConnection("Sign-in needs attention", false);
-        showWelcomeCheckError();
+        if (state.paintedFromCache) showCachedSignInFailure(cachedFailure);
+        else showWelcomeCheckError();
       }, AUTH_RESTORE_TIMEOUT_MS);
       const finishAuthRestore = function () {
         authRestoreSettled = true;
@@ -6712,22 +6711,23 @@
       state.container.setUpAuth().then(function (identity) {
         finishAuthRestore();
         if (identity) connectUser(identity);
+        else if (state.paintedFromCache) showCachedSignInFailure("This browser is not signed in to iCloud. These notes are the unencrypted copy saved in this browser. Reload to sign in again.");
         else {
           setConnection("Not connected", false);
           showWelcomeSignedOut();
         }
-      }).catch(function (error) {
+      }).catch(function () {
         finishAuthRestore();
         setConnection("Sign-in needs attention", false);
-        showWelcomeCheckError();
+        if (state.paintedFromCache) showCachedSignInFailure(cachedFailure);
+        else showWelcomeCheckError();
       });
       state.container.whenUserSignsIn().then(function (identity) {
         finishAuthRestore();
         connectUser(identity);
       });
       state.container.whenUserSignsOut().then(function () {
-        stopArborStateSync(true);
-        const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts();
+        const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts() || state.editQueue.length > 0;
         const session = ++state.accountSession;
         const undoClose = detachUndoHistory();
         // Wipe unsaved-edit drafts right away. The queued cache delete below also
@@ -6765,6 +6765,7 @@
       });
       window.addEventListener("online", function () {
         if (state.database && !state.accountCacheSuspended) {
+          flushPendingEdits();
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
           syncKeyboardShortcutPreferences(state.accountSession);
@@ -7188,8 +7189,53 @@
     writeDraftStore(store);
   }
 
+  function editQueueStorageKey() {
+    const account = state.connectionUserID || state.cacheKey || "";
+    return launchLibrary ? launchLibrary.editQueueKey(account) : "arbor.web.pending-edit.";
+  }
+
+  function loadEditQueue() {
+    if (!launchLibrary) { state.editQueue = []; return; }
+    try {
+      state.editQueue = launchLibrary.normalizeEditQueue(JSON.parse(localStorage.getItem(editQueueStorageKey()) || "null"));
+    } catch (_) { state.editQueue = []; }
+  }
+
+  function storeEditQueue() {
+    if (!launchLibrary) return;
+    try {
+      const key = editQueueStorageKey();
+      if (!state.editQueue.length) localStorage.removeItem(key);
+      else localStorage.setItem(key, JSON.stringify(state.editQueue));
+    } catch (_) {}
+  }
+
+  function rememberPendingEdit(recordName, body) {
+    if (!launchLibrary || !recordName || body == null) return;
+    const documentValue = documentForSaveBody(body, state.records.get(recordName) || state.selectedRecord);
+    state.editQueue = launchLibrary.upsertPendingEdit(state.editQueue, {
+      recordName: recordName,
+      title: documentValue.title,
+      body: body,
+      updatedAt: Date.now()
+    });
+    storeEditQueue();
+  }
+
+  function dropPendingEdit(recordName) {
+    if (!launchLibrary || !recordName) return;
+    state.editQueue = launchLibrary.removePendingEdit(state.editQueue, recordName);
+    storeEditQueue();
+  }
+
+  function browserOffline() {
+    return typeof navigator !== "undefined" && navigator.onLine === false;
+  }
+
   function clearDrafts() {
     try { localStorage.removeItem(DRAFT_STORAGE_KEY); } catch (_) {}
+    state.editQueue = [];
+    try { localStorage.removeItem(editQueueStorageKey()); } catch (_) {}
     window.clearTimeout(state.saveTimer);
     state.saveGeneration += 1;
     state.dirty = false;
@@ -7314,7 +7360,8 @@
       advanceSemanticRevision(note);
     }
     persistCurrentDraft();
-    setSaveState("Unsaved", "dirty");
+    rememberPendingEdit(recordName, currentMarkdown());
+    setSaveState(browserOffline() ? "Offline" : "Unsaved", "dirty");
     window.clearTimeout(state.saveTimer);
     state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
     if (pendingCreation) renderNotes();
@@ -7464,8 +7511,41 @@
     return saved;
   }
 
+  async function flushPendingEdits() {
+    if (browserOffline() || !state.database || !state.editQueue.length) return;
+    const pending = state.editQueue.slice();
+    for (let index = 0; index < pending.length; index += 1) {
+      const edit = pending[index];
+      if (state.selectedRecordName === edit.recordName && state.dirty) {
+        await flushSave();
+        continue;
+      }
+      const record = state.records.get(edit.recordName);
+      if (!record) continue;
+      try {
+        if (state.selectedRecordName === edit.recordName) setSaveState("Saving…", "saving");
+        await saveRecord(record, edit.body);
+        dropPendingEdit(edit.recordName);
+        clearDraft(edit.recordName);
+        rememberRecordBody(edit.recordName, typeof edit.body === "string" ? edit.body : edit.body.title + "\n\n" + edit.body.body, state.accountSession);
+        if (state.selectedRecordName === edit.recordName && !state.dirty) setSaveState("Saved", "saved");
+      } catch (error) {
+        if (launchLibrary && launchLibrary.isNetworkSaveFailure(error) || browserOffline()) {
+          if (state.selectedRecordName === edit.recordName) setSaveState("Offline", "dirty");
+          return;
+        }
+        if (state.selectedRecordName === edit.recordName) setSaveState("Save failed", "error");
+      }
+    }
+  }
+
   async function flushSave() {
     window.clearTimeout(state.saveTimer);
+    if (browserOffline()) {
+      if (state.dirty && state.selectedRecordName) rememberPendingEdit(state.selectedRecordName, currentMarkdown());
+      if (state.dirty || state.editQueue.length) setSaveState("Offline", "dirty");
+      return state.savePromise.catch(function () {});
+    }
     if (!state.dirty || !state.selectedRecord || !state.database) return state.savePromise.catch(function () {});
     const recordName = state.selectedRecordName;
     const recordSnapshot = state.selectedRecord;
@@ -7546,7 +7626,10 @@
           }
           scheduleLibraryCacheWrite();
         }
-        if (!newerEdit) clearDraft(recordName);
+        if (!newerEdit) {
+          clearDraft(recordName);
+          dropPendingEdit(recordName);
+        }
         if (state.selectedRecordName === recordName) {
           state.selectedRecord = saved;
           if (!newerEdit) state.bodyDirty = false;
@@ -7568,7 +7651,7 @@
         if (!newerEdit) persistDraftSnapshot(recordName, parts);
         if (state.selectedRecordName === recordName) {
           state.dirty = true;
-          setSaveState("Save failed", "error");
+          setSaveState(launchLibrary && launchLibrary.isNetworkSaveFailure(error) ? "Offline" : "Save failed", launchLibrary && launchLibrary.isNetworkSaveFailure(error) ? "dirty" : "error");
         }
         showToast(readableError(error), true);
         throw error;
@@ -10168,9 +10251,14 @@
   const welcomeRetry = $("welcome-retry");
   if (welcomeRetry) welcomeRetry.addEventListener("click", function () { window.location.reload(); });
   const listRetry = $("list-message-retry");
-  if (listRetry) listRetry.addEventListener("click", function () { retryNoteLoad(); });
+  if (listRetry) listRetry.addEventListener("click", function () {
+    if (!state.database) { window.location.reload(); return; }
+    retryNoteLoad();
+  });
   wireEvents();
-  initializeCloudKit();
+  window.addEventListener("online", function () {
+    if (!state.accountCacheSuspended) flushPendingEdits();
+  });
   async function prepareForShellUpdate() {
     const capture = $("capture-dialog");
     if (capture.open && $("capture-input").value.trim()) return { ok: false, reason: "capture" };
@@ -10230,25 +10318,74 @@
     };
   }
 
-  function notifyArborNoteDeleted(recordName) {
-    const context = getArborContext();
-    if (!context.ready || !context.accountId) return;
-    const store = getArborStateStore(context);
-    if (!store) return;
+  function noteBodyReady(note) {
+    return noteBodyLoaded(note);
+  }
+
+  async function paintCachedLibrary() {
+    if (demoMode || state.paintedFromCache) return Boolean(state.paintedFromCache);
     try {
-      store.redactDeletedNote(recordName);
-      state.arborStateSync.sync().catch(function (error) {
-        console.warn("Arbor state redaction will sync when the connection returns.", error && error.message || "sync unavailable");
-      });
-    } catch (error) {
-      console.warn("A deleted source could not be redacted from Arbor history.", error && error.message || "local state unavailable");
+      const cache = await loadAccountCache();
+      const stored = cache.readStoredAccountRecordName(window.localStorage);
+      if (!stored) return false;
+      state.connectionUserID = stored;
+      state.cacheKey = libraryCacheKey(stored);
+      state.accountCacheSuspended = false;
+      loadNoteHistory(state.cacheKey);
+      loadEditQueue();
+      const restored = await restoreLibraryCache();
+      state.loadingRecords = false;
+      if (!restored || state.records.size === 0) return false;
+      if (!launchLibrary || !launchLibrary.cachedLibraryIsPaintable({ records: Array.from(state.records.values()) })) return false;
+      state.paintedFromCache = true;
+      syncDerivedCollections();
+      showApp();
+      renderAll();
+      const restoredState = restoreOpenTabsForLoadedNotes();
+      let note = state.preferences.tabsEnabled ? restoredState.note : currentNoteFromHistory();
+      if (!note) {
+        const openedNames = Array.from(state.bodyCache.keys());
+        const lastOpened = openedNames.length ? openedNames[openedNames.length - 1] : "";
+        note = state.notes.find(function (item) { return item.recordName === lastOpened; }) || null;
+      }
+      if (note && !noteBodyReady(note)) note = null;
+      selectNote(note || null);
+      setConnection("Showing notes saved in this browser…", false);
+      return true;
+    } catch (_) {
+      state.loadingRecords = false;
+      return false;
     }
   }
 
+  async function finishStartup(cloudKitError) {
+    if (state.startupFinished) return;
+    state.startupFinished = true;
+    if (state.paintPromise) await state.paintPromise;
+    if (demoMode || (!cloudKitError && window.CloudKit)) {
+      initializeCloudKit();
+      return;
+    }
+    const scriptFailure = cloudKitError && /^APPLE_CLOUDKIT_/.test(String(cloudKitError.code || ""));
+    const message = scriptFailure
+      ? "Arbor couldn’t load Apple’s sign-in service. Check your connection, then reload."
+      : "Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple; reload Arbor to retry.";
+    if (state.paintedFromCache) showCachedSignInFailure(message);
+    else if (!window.CloudKit) {
+      showWelcomeCheckError();
+      setWelcomeStatus(message, false);
+    } else initializeCloudKit();
+  }
+
+  state.paintPromise = demoMode ? Promise.resolve(false) : paintCachedLibrary();
   window.arborWeb = {
     clearDrafts: clearDrafts,
     prepareForShellUpdate: prepareForShellUpdate,
     cancelShellUpdatePreparation: cancelShellUpdatePreparation,
-    getArborContext: getArborContext
+    getArborContext: getArborContext,
+    finishStartup: finishStartup
   };
+  if (!window.__arborStartFromBootstrap) {
+    state.paintPromise.then(function () { return finishStartup(window.__arborCloudKitStartupError || null); });
+  }
 })();

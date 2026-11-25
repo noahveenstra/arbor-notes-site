@@ -50,7 +50,8 @@
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
   <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
-  <script src="./app-bootstrap.js?v=arb-188-onboarding-shell-20261125-a" defer></script>
+  <script src="./launch-library.js?v=arb-190-instant-launch-20261125-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-190-instant-launch-20261125-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -72,7 +73,7 @@
         <p class="welcome-description" id="welcome-auth-description">Sign in to let this browser read and write notes in your iCloud private database.</p>
         <div class="welcome-auth" id="welcome-auth" hidden>
           <div id="apple-sign-in-button"></div>
-          <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. This browser keeps a local cache for faster reopening; signing out clears the cache, not your iCloud notes.</p>
+          <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes.</p>
         </div>
         <p class="welcome-connected" id="welcome-connected" hidden>You’re connected with your Apple Account.</p>
         <button class="welcome-action" id="welcome-auth-continue" type="button" hidden>Continue</button>
@@ -164,6 +165,7 @@ Try replacing this example with something you want to remember.</textarea>
           <button class="back-button back-to-list" id="back-to-list-button" type="button" aria-label="Back to notes">‹</button>
           <div class="editor-date" id="modified-at" tabindex="0" aria-label="Note dates" title="Hover to show creation date"></div>
           <button class="note-actions-button" id="note-actions-button" type="button" aria-label="About this note" title="About this note" aria-controls="about-note-panel" aria-expanded="false"><svg viewBox="0 0 20 20" aria-hidden="true"><rect x="2.75" y="2.75" width="14.5" height="14.5" rx="2.25"></rect><path d="M7.25 3.25v13.5"></path></svg></button>
+          <p class="save-state" id="save-state" hidden aria-live="polite"><span class="save-dot" aria-hidden="true"></span><span id="save-state-label"></span></p>
         </header>
         <div class="editor-scroll">
           <article class="note-page" id="note-page">
@@ -490,6 +492,7 @@ Try replacing this example with something you want to remember.</textarea>
             <details class="settings-card settings-data-disclosure" data-setting-label="Data and privacy" data-setting-search="privacy data stored notes local browser icloud cloudkit sign out cache model">
               <summary>How Arbor handles your data</summary>
               <p>Arbor reads and writes notes, proofreading dictionary entries, and keyboard shortcut preferences in the Apple account you sign in with. Shortcut preferences contain Arbor command names and key combinations, not note content. Signing out of this browser removes notes, metadata, dictionary entries, shortcut preferences, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
+              <p>Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. A few edits that have not reached iCloud yet are also kept unencrypted here until they save or you sign out.</p>
               <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
             </details>
           </div>

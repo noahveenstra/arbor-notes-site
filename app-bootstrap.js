@@ -17,8 +17,8 @@ const PASSAGE_ANCHOR_URL = "./passage-anchor.js?v=recall-anchor-1";
 const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
-const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-2-auth-header-rotation-20261124-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-188-first-run-20261125-a";
+const CLOUDKIT_WEB_SERVICES_URL = "./cloudkit-encrypted-web-services.mjs?v=arb-190-instant-launch-20261125-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-190-instant-launch-20261125-a";
 let startupStatusTimer = null;
 
 function clearStartupStatusTimer() {
@@ -199,7 +199,7 @@ async function startApp() {
   globalThis.ArborUndoHistory = await importModule(UNDO_HISTORY_URL);
   globalThis.ArborPassageAnchor = await importModule(PASSAGE_ANCHOR_URL);
   globalThis.ArborCloudKitWebZone = await importModule(CLOUDKIT_WEB_ZONE_URL);
-  globalThis.ArborCloudKitSync = await importModule(ARBOR_CLOUDKIT_SYNC_URL);
+  globalThis.ArborCloudKitWebServices = await importModule(CLOUDKIT_WEB_SERVICES_URL);
   try {
     await appendClassicScript(RUST_SEARCH_URL);
   } catch (error) {
@@ -208,19 +208,18 @@ async function startApp() {
   await appendClassicScript(NOTE_SORT_URL);
   if (!isSamplePreview && !cloudKitLoaded) {
     setStartupStatus(
-      "Connecting to Apple’s sign-in service…",
-      "Apple’s sign-in service is taking longer than usual. Arbor is still waiting and will offer a retry if the connection fails."
+      "Opening your notes…",
+      "Arbor is opening notes saved in this browser. Apple sign-in continues in the background."
     );
   }
-  const cloudKitError = await cloudKitLoad;
-  if (cloudKitError) throw cloudKitError;
-  setStartupStatus(
-    "Checking your Apple Account…",
-    "Arbor is still checking your Apple Account session. Keep this page open; a retry option will appear if the check fails."
-  );
+  window.__arborStartFromBootstrap = true;
   await appendClassicScript(APP_SCRIPT_URL);
   clearStartupStatusTimer();
   document.documentElement.classList.remove("is-preparing-shell");
+  const cloudKitError = await cloudKitLoad;
+  if (window.arborWeb && typeof window.arborWeb.finishStartup === "function") {
+    await window.arborWeb.finishStartup(cloudKitError);
+  }
 }
 
 const retry = document.getElementById("shell-boot-retry");

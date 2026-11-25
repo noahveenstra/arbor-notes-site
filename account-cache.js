@@ -14,7 +14,13 @@
 // "transformers-cache" for the same public model bytes; that name is not
 // arbor-* and is left in place.
 
-import { ARBOR_STATE_STORAGE_PREFIX, ARBOR_SYNC_PENDING_PREFIX, ARBOR_SYNC_SUCCESS_PREFIX } from "./arbor-state.js";
+// Leftover keys from the removed Arbor knowledge-state sync. Sign-out still
+// deletes them so an older visit cannot leave that plaintext behind.
+const LEGACY_ARBOR_STATE_PREFIXES = [
+  "arbor.web.arbor-state.v1.",
+  "arbor.web.arbor-sync-pending.v1.",
+  "arbor.web.arbor-sync-success.v1."
+];
 
 export const LIBRARY_CACHE_DATABASE = "arbor-web-library-cache";
 export const SEMANTIC_VECTOR_DATABASE = "arbor-browser-semantic-index-arctic-e596f50-sentence-list-32w26-max32-even-v2";
@@ -131,7 +137,8 @@ export function clearAccountLocalState(storage) {
   if (!storage) return removed;
   const knownKeys = new Set(ACCOUNT_LOCAL_STORAGE_KEYS);
   storageKeys(storage).forEach(function (key) {
-    const accountLocalKey = knownKeys.has(key) || key.startsWith(ARBOR_STATE_STORAGE_PREFIX) || key.startsWith(ARBOR_SYNC_PENDING_PREFIX) || key.startsWith(ARBOR_SYNC_SUCCESS_PREFIX) ||
+    const accountLocalKey = knownKeys.has(key) ||
+      LEGACY_ARBOR_STATE_PREFIXES.some(function (prefix) { return key.startsWith(prefix); }) ||
       ACCOUNT_LOCAL_STORAGE_PREFIXES.some(function (prefix) { return key.startsWith(prefix); });
     if (!accountLocalKey) return;
     try {

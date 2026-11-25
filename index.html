@@ -38,7 +38,6 @@
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b"></script>
-  <script src="https://cdn.apple-cloudkit.com/ck/2/cloudkit.js"></script>
   <script type="module" src="./shortcuts.js?v=arb-179-custom-shortcuts-20261124-a"></script>
   <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" defer></script>
   <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
@@ -52,11 +51,11 @@
   <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
   <script src="./search-logic.js?v=arb-22-logic-2" defer></script>
   <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
-  <script src="./app-bootstrap.js?v=arb-auth-session-recovery-20261124-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-auth-startup-recovery-20261125-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
-    <p>Arbor could not verify a complete app update. Reload to try again.</p>
+    <p>Arbor couldn’t finish starting. Reload to try again.</p>
     <button id="shell-boot-retry" type="button">Reload Arbor</button>
   </div>
   <div id="app-status" class="shortcut-visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
@@ -65,7 +64,7 @@
       <img class="welcome-mark" src="./icons/icon-monochrome-192.png" alt="">
       <h1 id="welcome-title">Capture thoughts.<br>Find them later.</h1>
       <p class="welcome-description" id="welcome-description">Connect Arbor to iCloud. Your browser can stay signed in to Apple; Arbor needs its own permission to read your private notes.</p>
-      <p class="welcome-status" id="welcome-status" role="status" aria-live="polite">Checking your Apple Account…</p>
+      <p class="welcome-status" id="welcome-status" role="status" aria-live="polite">Starting Arbor…</p>
       <div class="welcome-auth" id="welcome-auth" hidden>
         <div id="apple-sign-in-button"></div>
         <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. This browser keeps a local cache for faster reopening; signing out clears the cache, not your iCloud notes.</p>

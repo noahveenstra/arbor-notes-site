@@ -8,6 +8,8 @@ const SERVICE_WORKER_URL = new URL("sw.js", APP_BASE_URL).pathname;
 const SERVICE_WORKER_SCOPE = APP_BASE_URL.pathname;
 const WORKER_OPTIONS = { scope: SERVICE_WORKER_SCOPE, updateViaCache: "none" };
 const WORKER_READY_TIMEOUT_MS = 12_000;
+const STARTUP_DEPENDENCY_TIMEOUT_MS = 15_000;
+const CLOUDKIT_SCRIPT_URL = "https://cdn.apple-cloudkit.com/ck/2/cloudkit.js";
 const PWA_CLIENT_URL = "./pwa-client.js?v=arb-94-update-action-20261119-a";
 const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
 const PASSAGE_ANCHOR_URL = "./passage-anchor.js?v=recall-anchor-1";
@@ -15,12 +17,20 @@ const RUST_SEARCH_URL = "./rust-search.js?v=arb-120-rust-lexical-20261121-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
 const ARBOR_CLOUDKIT_SYNC_URL = "./arbor-cloudkit-sync.mjs?v=arb-sync-state-2-auth-header-rotation-20261124-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-179-settings-redesign-20261124-b";
+const APP_SCRIPT_URL = "./app.js?v=arb-auth-startup-recovery-20261125-a";
 const ARBOR_VIEW_URL = "./arbor-view.js?v=arb-178-voice-default-20261124-a";
 
 function showBootError(error) {
   const message = document.getElementById("shell-boot-error");
-  if (message) message.hidden = false;
+  if (message) {
+    message.hidden = false;
+    const copy = message.querySelector("p");
+    if (copy) {
+      copy.textContent = error && /^APPLE_CLOUDKIT_/.test(String(error.code || ""))
+        ? "Arbor couldn’t load Apple’s sign-in service. Check your connection, then reload."
+        : "Arbor couldn’t finish starting. Reload to try again.";
+    }
+  }
   if (error) console.error("Arbor could not start.", error);
 }
 
@@ -50,10 +60,55 @@ function waitForServiceWorkerReady(registration) {
 function appendClassicScript(source) {
   return new Promise(function (resolve, reject) {
     const script = document.createElement("script");
+    let finished = false;
+    const finish = function (error) {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(timer);
+      script.removeEventListener("load", onLoad);
+      script.removeEventListener("error", onError);
+      if (error) {
+        script.remove();
+        reject(error);
+      } else resolve();
+    };
+    const onLoad = function () { finish(); };
+    const onError = function () {
+      const error = new Error("A required Arbor script could not be loaded.");
+      if (source === CLOUDKIT_SCRIPT_URL) error.code = "APPLE_CLOUDKIT_LOAD_FAILED";
+      finish(error);
+    };
+    const timer = window.setTimeout(function () {
+      const error = new Error("A required Arbor script took too long to load.");
+      if (source === CLOUDKIT_SCRIPT_URL) error.code = "APPLE_CLOUDKIT_LOAD_TIMEOUT";
+      finish(error);
+    }, STARTUP_DEPENDENCY_TIMEOUT_MS);
     script.src = source;
-    script.addEventListener("load", resolve, { once: true });
-    script.addEventListener("error", reject, { once: true });
-    document.body.appendChild(script);
+    script.async = true;
+    script.addEventListener("load", onLoad, { once: true });
+    script.addEventListener("error", onError, { once: true });
+    document.head.appendChild(script);
+  });
+}
+
+function importModule(source) {
+  return new Promise(function (resolve, reject) {
+    let finished = false;
+    const finish = function (error, value) {
+      if (finished) return;
+      finished = true;
+      window.clearTimeout(timer);
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const timer = window.setTimeout(function () {
+      finish(new Error("An Arbor component took too long to load: " + source));
+    }, STARTUP_DEPENDENCY_TIMEOUT_MS);
+    import(source).then(function (value) {
+      finish(null, value);
+    }, function (error) {
+      finish(error);
+    });
   });
 }
 
@@ -96,19 +151,25 @@ async function startApp() {
   if (!(await prepareShell())) return;
   if (window.__arborFirstControlReloadStarted) return;
   window.__arborFirstControlReloadStarted = true;
-  await import(PWA_CLIENT_URL);
-  globalThis.ArborUndoHistory = await import(UNDO_HISTORY_URL);
-  globalThis.ArborPassageAnchor = await import(PASSAGE_ANCHOR_URL);
-  globalThis.ArborCloudKitWebZone = await import(CLOUDKIT_WEB_ZONE_URL);
-  globalThis.ArborCloudKitSync = await import(ARBOR_CLOUDKIT_SYNC_URL);
+  const isSamplePreview = new URLSearchParams(window.location.search).get("preview") === "sample";
+  const cloudKitLoad = isSamplePreview
+    ? Promise.resolve(null)
+    : appendClassicScript(CLOUDKIT_SCRIPT_URL).then(function () { return null; }, function (error) { return error; });
+  await importModule(PWA_CLIENT_URL);
+  globalThis.ArborUndoHistory = await importModule(UNDO_HISTORY_URL);
+  globalThis.ArborPassageAnchor = await importModule(PASSAGE_ANCHOR_URL);
+  globalThis.ArborCloudKitWebZone = await importModule(CLOUDKIT_WEB_ZONE_URL);
+  globalThis.ArborCloudKitSync = await importModule(ARBOR_CLOUDKIT_SYNC_URL);
   try {
     await appendClassicScript(RUST_SEARCH_URL);
   } catch (error) {
     console.warn("Arbor is starting with its browser lexical-search fallback.", error);
   }
   await appendClassicScript(NOTE_SORT_URL);
+  const cloudKitError = await cloudKitLoad;
+  if (cloudKitError) throw cloudKitError;
   await appendClassicScript(APP_SCRIPT_URL);
-  globalThis.ArborView = await import(ARBOR_VIEW_URL);
+  globalThis.ArborView = await importModule(ARBOR_VIEW_URL);
   globalThis.ArborView.mountArborView({ api: window.arborWeb });
   document.documentElement.classList.remove("is-preparing-shell");
 }

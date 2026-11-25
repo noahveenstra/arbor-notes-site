@@ -6507,6 +6507,8 @@
     if (session === state.accountSession) setConnection("Using your Apple Account.", true);
   }
 
+  const AUTH_RESTORE_TIMEOUT_MS = 15_000;
+
   function initializeCloudKit() {
     if (demoMode) {
       initializeDemo();
@@ -6566,17 +6568,32 @@
       state.container = CloudKit.getDefaultContainer();
       setConnection("Restoring Arbor’s iCloud session…", false);
       showWelcomeChecking();
+      let authRestoreSettled = false;
+      const authRestoreTimer = window.setTimeout(function () {
+        if (authRestoreSettled) return;
+        setConnection("Sign-in needs attention", false);
+        showWelcomeCheckError();
+      }, AUTH_RESTORE_TIMEOUT_MS);
+      const finishAuthRestore = function () {
+        authRestoreSettled = true;
+        window.clearTimeout(authRestoreTimer);
+      };
       state.container.setUpAuth().then(function (identity) {
+        finishAuthRestore();
         if (identity) connectUser(identity);
         else {
           setConnection("Not connected", false);
           showWelcomeSignedOut();
         }
       }).catch(function (error) {
+        finishAuthRestore();
         setConnection("Sign-in needs attention", false);
         showWelcomeCheckError();
       });
-      state.container.whenUserSignsIn().then(function (identity) { connectUser(identity); });
+      state.container.whenUserSignsIn().then(function (identity) {
+        finishAuthRestore();
+        connectUser(identity);
+      });
       state.container.whenUserSignsOut().then(function () {
         stopArborStateSync(true);
         const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts();

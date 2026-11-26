@@ -1149,7 +1149,10 @@
     $("welcome-step-label").textContent = step === "intro" ? "Step 1 of 3 · Welcome" : step === "auth" ? "Step 2 of 3 · Sign in" : "Step 3 of 3 · First note";
     $("welcome-status").hidden = true;
     $("welcome-status").classList.remove("is-pending");
-    $("welcome-retry").hidden = true;
+    const welcomeRetryButton = $("welcome-retry");
+    welcomeRetryButton.hidden = true;
+    welcomeRetryButton.dataset.action = "";
+    welcomeRetryButton.textContent = "Reload Arbor";
     const connected = Boolean(state.database && state.connectionUserID);
     $("welcome-auth-title").textContent = connected ? "Your Apple Account is connected." : "Connect your Apple Account.";
     $("welcome-auth-description").textContent = connected
@@ -7421,7 +7424,24 @@
   function showCachedSignInFailure(message) {
     setConnection("Couldn’t reach iCloud. Showing notes saved in this browser.", false);
     setListMessage(message, true, true, true);
+    const retry = $("list-message-retry");
+    if (retry) retry.textContent = "Try again";
     showApp();
+  }
+
+  function openCachedSignInRecovery() {
+    if (!state.container) {
+      window.location.reload();
+      return;
+    }
+    showWelcomeStep("auth");
+    $("welcome-auth-title").textContent = "Reconnect to iCloud.";
+    $("welcome-auth-description").textContent = "Sign in with the Apple Account used for these notes. Signing in with a different account clears this browser’s saved copy to keep accounts separate.";
+    setWelcomeStatus("Your saved browser copy is still available. You can return to it below.", false);
+    const returnButton = $("welcome-retry");
+    returnButton.dataset.action = "return-to-cache";
+    returnButton.textContent = "Back to saved notes";
+    returnButton.hidden = false;
   }
 
   function initializeCloudKit() {
@@ -7493,7 +7513,7 @@
       state.container.setUpAuth().then(function (identity) {
         finishAuthRestore();
         if (identity) connectUser(identity);
-        else if (state.paintedFromCache) showCachedSignInFailure("This browser is not signed in to iCloud. These notes are the unencrypted copy saved in this browser. Reload to sign in again.");
+        else if (state.paintedFromCache) showCachedSignInFailure("This browser is not signed in to iCloud. These notes are the unencrypted copy saved in this browser. Sign in again below to reconnect.");
         else {
           setConnection("Not connected", false);
           showWelcomeSignedOut();
@@ -11187,10 +11207,23 @@
   }
 
   const welcomeRetry = $("welcome-retry");
-  if (welcomeRetry) welcomeRetry.addEventListener("click", function () { window.location.reload(); });
+  if (welcomeRetry) welcomeRetry.addEventListener("click", function () {
+    if (welcomeRetry.dataset.action === "return-to-cache") {
+      welcomeRetry.dataset.action = "";
+      welcomeRetry.textContent = "Reload Arbor";
+      welcomeRetry.hidden = true;
+      showApp();
+      return;
+    }
+    window.location.reload();
+  });
   const listRetry = $("list-message-retry");
   if (listRetry) listRetry.addEventListener("click", function () {
-    if (!state.database) { window.location.reload(); return; }
+    if (!state.database) {
+      if (state.container) openCachedSignInRecovery();
+      else window.location.reload();
+      return;
+    }
     retryNoteLoad();
   });
   wireEvents();

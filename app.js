@@ -285,7 +285,6 @@
       disclosureAnimations.delete(element);
       if (!isVisible) {
         element.hidden = true;
-        element.inert = false;
         animation.cancel();
         if (typeof afterHide === "function") afterHide();
       }
@@ -6743,6 +6742,7 @@
       !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "text") !== "string";
     const legacyNeedsBody = !state.nativeSchema && note.record.recordType === "ArborNote" &&
       !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "body") !== "string";
+    $("note-title").readOnly = nativeNeedsBody || legacyNeedsBody;
     if (nativeNeedsBody || legacyNeedsBody) {
       const recordName = note.recordName;
       const session = state.accountSession;
@@ -6756,6 +6756,7 @@
         $("note-title").value = note.title === "Untitled" && !note.body ? "" : note.title;
         rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
         createEditor(note.editorBody);
+        $("note-title").readOnly = false;
         revealRecoveredDraft(note);
         renderNotes();
       }).catch(function () {
@@ -6798,7 +6799,12 @@
     try {
       await state.noteStyleSavePromise.catch(function () {});
       await flushSave();
-      if (!accountSessionCurrent(session)) return false;
+      const hasSavedLibrary = state.paintedFromCache && state.cacheKey;
+      if (session !== state.accountSession || state.accountCacheSuspended || (!state.database && !hasSavedLibrary)) return false;
+      if (state.dirty && !sameSyncDocument(draftFor(state.selectedRecordName), editorDraftParts())) {
+        showSaveProblem("This browser couldn’t store your latest edit. Keep this note open until it saves to iCloud.", state.selectedRecordName);
+        return false;
+      }
       const note = state.notes.find(function (item) { return item.recordName === recordName; });
       if (!note) return false;
       prepareNoteTabOpen(recordName, tabIntent);
@@ -7196,6 +7202,7 @@
     }
     if (note.bodyPromise) return note.bodyPromise;
     const session = state.accountSession;
+    if (!state.database) return Promise.reject(new Error("This note is not connected to iCloud."));
     note.bodyPromise = loadNativeTextAsset(note, session).then(function (body) {
       if (!accountSessionCurrent(session)) return body;
       note.body = body; note.editorBody = body; note.preview = previewText(body);

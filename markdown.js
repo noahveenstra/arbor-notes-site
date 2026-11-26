@@ -19,7 +19,10 @@
     if (!match) return null;
     if (match[2]) return { indentation: match[1], marker: match[2], checklist: true, checked: match[3].toLowerCase() === "x", content: match[4] || "", number: 0, ordered: false };
     if (match[5]) return { indentation: match[1], marker: match[5], checklist: false, content: match[6] || "", number: 0, ordered: false };
-    return { indentation: match[1], marker: "", checklist: false, content: match[9] || "", number: Number(match[7]), delimiter: match[8], ordered: true };
+    const number = Number(match[7]);
+    const item = { indentation: match[1], marker: "", checklist: false, content: match[9] || "", number, delimiter: match[8], ordered: true };
+    if (String(number) !== match[7]) item.numberSpelling = match[7];
+    return item;
   }
 
   function splitMarkdownDocument(raw) {
@@ -71,11 +74,11 @@
           const itemIndentLevel = Math.ceil(itemIndentation.length / 2);
           const itemAttributes = ' data-indent="' + escapeHTML(itemIndentation) + '" data-indent-level="' + itemIndentLevel + '"' + (itemIndentLevel ? ' style="margin-left: ' + (itemIndentLevel * 1.35) + 'em"' : "");
           if (item.checklist) items.push("<li" + itemAttributes + '><input type="checkbox" ' + (item.checked ? "checked " : "") + 'contenteditable="false" aria-label="Checklist item"><span>' + (inlineHTML(item.content) || "<br>") + "</span></li>");
-          else items.push("<li" + (item.ordered ? ' data-number="' + item.number + '"' : "") + itemAttributes + ">" + (inlineHTML(item.content) || "<br>") + "</li>");
+          else items.push("<li" + (item.ordered ? ' data-number="' + (item.numberSpelling || item.number) + '"' : "") + itemAttributes + ">" + (inlineHTML(item.content) || "<br>") + "</li>");
           index += 1;
         }
         const level = Math.ceil(first.indentation.length / 2);
-        const attrs = (first.checklist ? ' data-checklist="true"' : "") + (!first.ordered ? ' data-marker="' + escapeHTML(first.marker) + '"' : ' start="' + first.number + '" data-delimiter="' + escapeHTML(first.delimiter) + '"') + (first.indentation ? ' data-indent="' + escapeHTML(first.indentation) + '"' : "") + ' data-indent-level="' + level + '"';
+        const attrs = (first.checklist ? ' data-checklist="true"' : "") + (!first.ordered ? ' data-marker="' + escapeHTML(first.marker) + '"' : ' start="' + (first.numberSpelling ? first.numberSpelling.replace(/^0+(?=\d)/, "") : first.number) + '" data-delimiter="' + escapeHTML(first.delimiter) + '"') + (first.indentation ? ' data-indent="' + escapeHTML(first.indentation) + '"' : "") + ' data-indent-level="' + level + '"';
         blocks.push("<" + tag + attrs + ">" + items.join("") + "</" + tag + ">"); continue;
       }
       if (/^>\s?/.test(lines[index])) {
@@ -100,7 +103,12 @@
       const content = String(item.content || "").replace(/\n/g, " ").trim();
       if (item.checkbox) return indentation + (list.marker || "-") + " [" + (item.checked ? "x" : " ") + "]" + (content ? " " + content : "");
       if (tagName === "OL") {
-        const number = item.number != null && item.number !== "" ? Number(item.number) : start + itemIndex;
+        let number = start + itemIndex;
+        if (item.number != null && item.number !== "") {
+          number = /^[0-9]+$/.test(String(item.number)) ? item.number : Number(item.number);
+        } else if (!Number.isSafeInteger(rawStart) && /^[0-9]+$/.test(String(list.start))) {
+          number = BigInt(list.start) + BigInt(itemIndex);
+        }
         return indentation + number + (list.delimiter || ".") + (content ? " " + content : "");
       }
       return indentation + (list.marker || "-") + (content ? " " + content : "");

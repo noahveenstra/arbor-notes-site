@@ -122,6 +122,39 @@ function storageKeys(storage) {
   return keys;
 }
 
+// Each open capture holds its own Web Lock until saved, discarded, or the
+// document exits. A second tab can create a draft without editing the first.
+function tryCaptureLock(locks, key) {
+  return new Promise((resolve, reject) => {
+    locks.request(key, { ifAvailable: true }, lock => {
+      if (!lock) { resolve(null); return; }
+      return new Promise(release => resolve(release));
+    }).catch(reject);
+  });
+}
+
+export async function claimCapture(storage, locks, accountKey, newID) {
+  if (!locks || !accountKey) return null;
+  const prefix = "arbor.web.draft.capture.v1." + encodeURIComponent(accountKey) + ".";
+  const candidates = storageKeys(storage).filter(key => key.startsWith(prefix));
+  const freshKey = prefix + newID;
+  for (const key of [...candidates, freshKey]) {
+    const release = await tryCaptureLock(locks, key);
+    if (!release) continue;
+    if (key === freshKey) return { key, release, stored: null };
+    try {
+      const stored = JSON.parse(storage.getItem(key));
+      if (stored && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(stored.id) &&
+          key === prefix + stored.id && typeof stored.text === "string" &&
+          stored.text.trim() && stored.text.length <= 2000 && typeof stored.folder === "string") {
+        return { key, release, stored };
+      }
+    } catch (_) { /* Leave unreadable data in place. */ }
+    release();
+  }
+  return null;
+}
+
 export function clearDraftAndOfflineKeys(storage) {
   const removed = [];
   storageKeys(storage).forEach(function (key) {

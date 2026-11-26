@@ -39,7 +39,8 @@
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b" data-required-global="ARBOR_CLOUDKIT_CONFIG"></script>
   <script type="module" src="./shortcuts.js?v=arb-179-custom-shortcuts-20261124-a" data-required-global="ArborShortcuts"></script>
-  <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" data-required-global="ArborMarkdown" defer></script>
+  <script src="./markdown.js?v=arb-216-list-spelling-20261126-a" data-required-global="ArborMarkdown" defer></script>
+  <script type="module" src="./markdown-typing-ui.mjs?v=arb-markdown-typing-20261126-a"></script>
   <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
   <script src="./proofreading-dictionary-sync.js?v=arb-212-startup-20261126-a" defer></script>
   <script src="./keyboard-shortcut-preferences.js?v=arb-179-shortcut-preferences-20261124-a" data-required-global="ArborKeyboardShortcutPreferences" defer></script>
@@ -54,7 +55,7 @@
   <script src="./search-logic.js?v=arb-related-margin-20261125-a" data-required-global="ArborSearchLogic" defer></script>
   <script src="./note-sync.js?v=arb-214-remote-deletions-20261126-a" data-required-global="ArborNoteSync" defer></script>
   <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" data-required-global="ArborLaunchLibrary" defer></script>
-  <script src="./app-bootstrap.js?v=arb-159-search-press-20261126-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-216-typing-20261126-c" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -76,7 +77,7 @@
         <p class="welcome-description" id="welcome-auth-description">Sign in to let this browser read and write notes in your iCloud private database.</p>
         <div class="welcome-auth" id="welcome-auth" hidden>
           <div id="apple-sign-in-button"></div>
-          <p class="welcome-privacy" id="welcome-privacy">This browser reads and writes your notes directly to Apple’s iCloud private database. Apple’s ability to decrypt them depends on your iCloud protection settings. Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes.</p>
+          <p class="welcome-privacy" id="welcome-privacy">Your notes sync to your private iCloud database. Apple can read note text stored in Arbor’s standard iCloud fields, even with Advanced Data Protection turned on. Recently opened notes are cached unencrypted in this browser. Unfinished Quick Captures are stored here unencrypted too. Signing out deletes that cache and any unfinished captures, and keeps your iCloud notes.</p>
         </div>
         <p class="welcome-connected" id="welcome-connected" hidden>You’re connected with your Apple Account.</p>
         <button class="welcome-action" id="welcome-auth-continue" type="button" hidden>Continue</button>
@@ -493,6 +494,27 @@ Try replacing this example with something you want to remember.</textarea>
               <label class="settings-toggle-row" for="proofreading-grammar-suggestions" data-setting-label="Grammar suggestions" data-setting-search="grammar check grammar as i write suggestions"><span><strong>Check grammar as I write</strong><small>Underlines update as you write. Nothing changes until you accept it. The first check downloads about 137 MB onto this device from Arbor (about 21 MB for Harper and about 116 MB for a grammar model). If the writing model is not already on this device, that is about 97 MB more. The note stays in this browser and is not sent anywhere.</small></span><input id="proofreading-grammar-suggestions" type="checkbox" checked></label>
             </div>
           </div>
+          <div class="settings-group" data-setting-label="Markdown typing shortcuts" data-setting-search="markdown typing triggers lists bullets numbers headings quotes bold italic inline code strikethrough underline highlights checklist reset">
+            <h3>Markdown typing shortcuts</h3>
+            <p class="settings-description">Choose what you type to start a list. These preferences stay in this browser.</p>
+            <form class="settings-card" id="markdown-typing-form" hidden>
+              <div class="settings-setting-row">
+                <div class="settings-setting-copy"><label for="markdown-typing-rule">Shortcut</label><small id="markdown-typing-availability"></small></div>
+                <select id="markdown-typing-rule" aria-describedby="markdown-typing-availability"></select>
+              </div>
+              <div class="settings-setting-row">
+                <div class="settings-setting-copy"><label for="markdown-typing-trigger">Typing trigger</label><small id="markdown-typing-hint"></small></div>
+                <input id="markdown-typing-trigger" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="markdown-typing-hint">
+              </div>
+              <label class="settings-toggle-row" for="markdown-typing-enabled"><strong>Enable shortcut</strong><input id="markdown-typing-enabled" type="checkbox"></label>
+              <div class="settings-setting-row">
+                <button id="markdown-typing-apply" type="submit">Apply</button>
+                <button id="markdown-typing-reset" type="button">Reset shortcut</button>
+                <button id="markdown-typing-reset-all" type="button">Reset all typing shortcuts</button>
+              </div>
+            </form>
+            <p class="settings-description settings-shortcut-note" id="markdown-typing-status" role="status">Typing shortcut settings are unavailable in this browser.</p>
+          </div>
           <div class="settings-group">
             <h3>Personal dictionary</h3>
             <div class="settings-card settings-dictionary-card" data-setting-label="Personal dictionary" data-setting-search="dictionary add words saved words ignore spelling across devices icloud">
@@ -527,11 +549,13 @@ Try replacing this example with something you want to remember.</textarea>
           </div>
           <div class="settings-group">
             <h3>Data &amp; privacy</h3>
-            <details class="settings-card settings-data-disclosure" data-setting-label="Data and privacy" data-setting-search="privacy data stored notes local browser icloud cloudkit sign out cache model">
+            <details class="settings-card settings-data-disclosure" data-setting-label="Data and privacy" data-setting-search="privacy data stored notes local browser icloud cloudkit sign out cache model encryption advanced data protection adp">
               <summary>How Arbor handles your data</summary>
+              <p>Apple encrypts your notes in transit and on its servers. Most note text is stored in standard iCloud fields. Apple holds the keys and can read text in those fields. Arbor reads it on this device so you can view, edit and search your notes.</p>
+              <p>Advanced Data Protection adds end-to-end encryption to eligible CloudKit fields. Arbor’s standard note fields keep their usual protection when you turn it on. Larger notes can be saved as files in iCloud. Arbor has not verified their end-to-end protection. You manage this setting in your Apple Account. <a href="https://support.apple.com/en-us/108756" target="_blank" rel="noopener noreferrer">Read Apple’s guide to Advanced Data Protection</a>.</p>
               <p>Arbor reads and writes notes, proofreading dictionary entries, and keyboard shortcut preferences in the Apple account you sign in with. Shortcut preferences contain Arbor command names and key combinations, not note content. Signing out of this browser removes notes, metadata, dictionary entries, shortcut preferences, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
               <p>The name in Settings stays in this browser. It is not written to iCloud. Each word of that name is added to the proofreading dictionary, and those dictionary entries sync with the Apple Account you sign in with. A note’s revision history on this browser keeps the name you were using when that revision was saved.</p>
-              <p>Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. A few edits that have not reached iCloud yet are also kept unencrypted here until they save or you sign out. Clearing site data or running low on storage can erase an edit before it reaches iCloud. Safari can also clear a site's data after seven days of Safari use without interaction with the site.</p>
+              <p>Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. Unfinished Quick Captures and a few edits that have not reached iCloud are stored unencrypted here until they save or you sign out. Clearing site data or running low on storage can erase an edit before it reaches iCloud. Safari can also clear a site's data after seven days of Safari use without interaction with the site.</p>
               <p>Ignoring a proofreading suggestion stores the marked text and a short excerpt on either side in this browser. Ignored words and counts of accepted or dismissed suggestions also stay on this device, in the IndexedDB database <code>arbor-web-proofreading-learning</code>. Signing out deletes the database.</p>
               <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
             </details>

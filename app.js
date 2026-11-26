@@ -578,7 +578,10 @@
 
   function recordUndoAction(action) {
     if (!state.undoHistory || state.replayingHistory) return;
-    state.undoHistory.record(action).then(function (saved) {
+    const update = action.beforePendingEdits
+      ? state.undoHistory.recordCreationBeforeEdits(action)
+      : state.undoHistory.record(action);
+    update.then(function (saved) {
       if (saved === false && !state.demo && !state.undoPersistenceWarned) {
         state.undoPersistenceWarned = true;
         showToast("Undo is available in this tab, but could not be saved for your next visit.", true);
@@ -724,12 +727,32 @@
   }
 
   function updateDictionaryState(entries, pending) {
+    const previousTerms = new Set(dictionaryTerms());
     state.dictionaryPending = proofreadingDictionary.normalizeSnapshotEntries(pending);
     state.dictionaryEntries = proofreadingDictionary.mergeSnapshotEntries(entries, state.dictionaryPending);
     renderPersonalDictionarySettings();
     scheduleLibraryCacheWrite();
+
+    const currentTerms = new Set(dictionaryTerms());
+    const changedTerms = [...previousTerms].filter(term => !currentTerms.has(term))
+      .concat([...currentTerms].filter(term => !previousTerms.has(term)));
+    if (!changedTerms.length) return;
+
+    // Retire both final and in-flight results that used the old protected terms.
+    // Unaffected sentences can keep their model results.
+    const patterns = changedTerms.map(term => new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"));
+    let recheckCurrentNote = false;
+    for (const [key, sentence] of state.cascadeSentences) {
+      if (patterns.some(pattern => pattern.test(sentence.text))) {
+        state.cascadeSentences.delete(key);
+        if (sentence.recordName === state.selectedRecordName) recheckCurrentNote = true;
+      }
+    }
     const body = $("note-body");
-    if (body && state.selectedRecordName) scheduleProofreading(body, 0);
+    if (body && state.selectedRecordName) {
+      scheduleProofreading(body, 0);
+      if (recheckCurrentNote) scheduleCascadeProofreading(body);
+    }
   }
 
   function queuePersonalDictionaryOperation(rawTerm, isDeleted) {
@@ -3447,20 +3470,69 @@
     }).join("") + (openedRelated ? "</div>" : "");
   }
 
-  function openCapture() {
+  function captureOwner() {
+    if (state.demo || !state.connectionUserID || state.accountCacheSuspended) return "";
+    try {
+      return localStorage.getItem("arbor.web.account-id") === state.connectionUserID ? draftAccountKey() : "";
+    } catch (_) { return ""; }
+  }
+
+  async function openCapture() {
     if (state.showingArchive) {
       state.showingArchive = false;
       state.selectedFolder = "";
       renderAll();
     }
+    if (captureDraft?.opening) return;
     if (!captureDraft) {
-      captureDraft = { id: crypto.randomUUID().toUpperCase(), folder: state.selectedFolder, submitted: false, busy: false, attempted: false };
+      const draft = { id: crypto.randomUUID().toUpperCase(), folder: state.selectedFolder, owner: captureOwner(),
+        submitted: false, attempted: false, busy: false, opening: true };
+      captureDraft = draft;
       $("capture-input").value = "";
       $("capture-status").textContent = "";
+      if (draft.owner) {
+        let claim;
+        try { claim = await (await loadAccountCache()).claimCapture(localStorage, navigator.locks, draft.owner, draft.id); }
+        catch (_) { /* Capture still works in memory when browser storage is unavailable. */ }
+        if (captureDraft !== draft || captureOwner() !== draft.owner) {
+          claim?.release();
+          if (captureDraft === draft) clearCapture();
+          return;
+        }
+        draft.claim = claim;
+        if (claim?.stored) {
+          const stored = claim.stored;
+          draft.id = stored.id;
+          draft.folder = stored.folder;
+          draft.submitted = stored.submitted === true;
+          draft.attempted = stored.attempted === true;
+          draft.retryOnReconnect = stored.retryOnReconnect === true;
+          draft.persistedText = stored.text;
+          $("capture-input").value = stored.text;
+          $("capture-status").textContent = "Recovered from this browser. Press Enter to save.";
+        } else if (!claim) {
+          $("capture-status").textContent = "This browser can only keep this capture in the current tab.";
+        }
+      }
+      draft.opening = false;
     }
     resizeCaptureInput();
     if (!$("capture-dialog").open) $("capture-dialog").showModal();
     window.requestAnimationFrame(function () { $("capture-input").focus(); });
+  }
+
+  function persistCapture(draft) {
+    if (!draft.claim) return false;
+    if (captureOwner() !== draft.owner) { clearCapture(); return false; }
+    const text = $("capture-input").value;
+    try {
+      if (text.trim()) {
+        const { id, folder, attempted, submitted, retryOnReconnect } = draft;
+        localStorage.setItem(draft.claim.key, JSON.stringify({ id, folder, text, attempted, submitted, retryOnReconnect }));
+      } else localStorage.removeItem(draft.claim.key);
+      draft.persistedText = text;
+      return true;
+    } catch (_) { return false; }
   }
 
   function resizeCaptureInput() {
@@ -3492,6 +3564,10 @@
   }
 
   function clearCapture() {
+    if (captureDraft?.claim) {
+      try { localStorage.removeItem(captureDraft.claim.key); } catch (_) {}
+      captureDraft.claim.release();
+    }
     captureDraft = null;
     $("capture-input").value = "";
     $("capture-input").readOnly = false;
@@ -3509,13 +3585,18 @@
     if (!draft || draft.busy || !input.value.trim()) return;
     draft.busy = true;
     draft.attempted = true;
+    draft.retryOnReconnect = true;
+    persistCapture(draft);
+    if (draft !== captureDraft) return;
     input.readOnly = true;
     $("capture-status").textContent = "Saving…";
     try {
       await createNote(input.value, true, undefined, { draft });
     } catch (error) {
       if (draft === captureDraft) {
-        $("capture-status").textContent = readableError(error) + " Your text is still in this tab.";
+        const retained = persistCapture(draft);
+        if (draft === captureDraft) $("capture-status").textContent = readableError(error) +
+          (retained ? " Your capture is saved unencrypted in this browser." : " Keep this tab open to preserve your text.");
       }
     } finally {
       if (draft === captureDraft) {
@@ -3689,7 +3770,9 @@
         items: items
       });
     }
-    const value = inlineMarkdown(block).replace(/\u00a0/g, " ").trim();
+    const raw = inlineMarkdown(block).replace(/\u00a0/g, " ");
+    if (block.dataset.listLiteral && raw.startsWith(block.dataset.listLiteral)) return raw;
+    const value = raw.trim();
     if (/^H[1-3]$/.test(block.tagName)) return "#".repeat(Number(block.tagName[1])) + " " + value;
     if (block.tagName === "BLOCKQUOTE") return value.split("\n").map(function (line) { return "> " + line; }).join("\n");
     return value;
@@ -4228,22 +4311,119 @@
     return { selection: selection, block: block, before: textWithLineBreaks(before.cloneContents()), after: textWithLineBreaks(after.cloneContents()) };
   }
 
-  function tryFormatTypedListMarker(body) {
-    const context = editorCaretContext(body);
-    if (!context || context.block.tagName === "LI" || context.before.includes("\n") || context.after.replace(/\n+$/g, "").trim()) return false;
-    const bullet = context.before.match(/^([ \t]*)([-*+])$/);
-    const number = context.before.match(/^([ \t]*)([0-9]+)([.)])$/);
-    if (!bullet && !number) return false;
-    if (context.block !== body && context.block.parentElement !== body) return false;
-    const list = document.createElement(number ? "ol" : "ul");
-    if (bullet) { list.dataset.marker = bullet[2]; list.dataset.indent = bullet[1]; }
-    if (number) { list.start = Number(number[2]); list.dataset.delimiter = number[3]; list.dataset.indent = number[1]; }
-    const item = document.createElement("li"); item.appendChild(document.createElement("br")); list.appendChild(item);
-    if (context.block === body) body.replaceChildren(list); else context.block.replaceWith(list);
-    const caret = document.createRange(); caret.selectNodeContents(item); caret.collapse(true);
-    context.selection.removeAllRanges(); context.selection.addRange(caret);
-    scheduleSave();
-    return true;
+  function matchTypedList(marker) {
+    if (window.ArborMarkdownTyping) return window.ArborMarkdownTyping.matchList(marker);
+    // The settings module loads independently. Preserve the original five
+    // defaults on a fresh installation, and never bypass a saved preference.
+    try { if (localStorage.getItem("arbor.web.markdown-typing.v1") !== null) return null; }
+    catch (_) { return null; }
+    const match = /^([ \t]*)(?:([-*+])|([0-9]+)([.)]))$/.exec(marker);
+    return match && { indentation: match[1], marker: match[2] || match[4], digits: match[3] || "" };
+  }
+
+  function insideListMarkerFence(prefix) {
+    let fence = "";
+    for (const line of prefix.split("\n")) {
+      const match = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (!match) continue;
+      if (!fence) fence = match[1];
+      else if (match[1][0] === fence[0] && match[1].length >= fence.length && !match[2].trim()) fence = "";
+    }
+    return Boolean(fence);
+  }
+
+  function tryFormatTypedListMarker(body, typed, selection) {
+    const block = editorBlockForNode(body, selection.anchorNode);
+    if (!["P", "DIV"].includes(block.tagName) || (block !== body && block.parentElement !== body)) return null;
+    // Replacing a marker must never consume adjacent structure, inline styles,
+    // media, widgets, or a second empty line. Browsers may retain one final BR.
+    if (Array.from(block.childNodes).some(function (child) {
+      return child.nodeType !== Node.TEXT_NODE && !(child.nodeName === "BR" && child === block.lastChild);
+    })) return null;
+    const literal = block.textContent.replace(/\u00a0/g, " ");
+    if (/[\r\n]/.test(literal) || editorTextOffset(block, selection.anchorNode, selection.anchorOffset) !== literal.length) return null;
+    if (!literal.endsWith(" ")) return null;
+    const marker = literal.slice(0, -1);
+    const matched = matchTypedList(marker);
+    if (!matched || !typed.endsWith(marker.slice(matched.indentation.length) + " ")) return null;
+
+    const parts = bodyMarkdownParts(body);
+    const part = block === body ? { start: 0, end: parts.noteText.length }
+      : parts.parts.find(function (entry) { return entry.node === block; });
+    if (!part || insideListMarkerFence(parts.noteText.slice(0, part.start))) return null;
+    const before = captureEditorHistorySnapshot({ editorBodyChanged: true });
+    if (!before) return null;
+    before.body = parts.noteText.slice(0, part.start) + literal + parts.noteText.slice(part.end);
+    before.listLiteral = { start: part.start, text: literal };
+
+    const list = document.createElement(matched.digits ? "ol" : "ul");
+    list.dataset.indent = matched.indentation;
+    const item = document.createElement("li");
+    if (matched.digits) {
+      list.setAttribute("start", matched.digits.replace(/^0+(?=\d)/, ""));
+      list.dataset.delimiter = matched.marker;
+      item.dataset.number = matched.digits;
+    } else list.dataset.marker = matched.marker;
+    item.appendChild(document.createElement("br"));
+    list.appendChild(item);
+    if (block === body) body.replaceChildren(list); else block.replaceWith(list);
+    selection.collapse(item, 0);
+    return { label: "Format list", groupKey: null, literalBefore: before };
+  }
+
+  // Only a contiguous run of real typing may start a list. Looking at the
+  // line on Space alone would reinterpret pasted, imported or preexisting text.
+  function trackListMarkerTyping(body) {
+    let typed = "", node = null, offset = 0, insertion = null;
+    let composing = false, committedComposition = false;
+    const graphemes = typeof Intl.Segmenter === "function" ? new Intl.Segmenter(undefined, { granularity: "grapheme" }) : null;
+    function reset() { typed = ""; node = null; insertion = null; }
+    function checkCaret() {
+      const selection = window.getSelection();
+      if (!selection || !selection.isCollapsed || selection.anchorNode !== node || selection.anchorOffset !== offset) reset();
+    }
+    body.addEventListener("beforeinput", function (event) {
+      checkCaret();
+      const commit = committedComposition;
+      committedComposition = false;
+      const selection = window.getSelection();
+      const data = event.data;
+      if (composing || commit || event.isComposing || !selection || !selection.isCollapsed ||
+          event.inputType !== "insertText" || !data || /[\r\n]/.test(data) ||
+          (graphemes ? graphemes.segment(data).containing(0).segment !== data : [...data].length !== 1)) {
+        reset(); return;
+      }
+      insertion = data;
+    });
+    body.addEventListener("compositionstart", function () { reset(); composing = true; });
+    body.addEventListener("compositionend", function () { reset(); composing = false; committedComposition = true; });
+    for (const type of ["blur", "pointerdown", "paste", "drop", "cut"]) body.addEventListener(type, reset);
+    body.addEventListener("keydown", function (event) {
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey && event.key === " " ||
+          /^(?:Arrow|Home$|End$|PageUp$|PageDown$|Escape$|Tab$)/.test(event.key)) reset();
+    });
+    document.addEventListener("selectionchange", checkCaret);
+    window.addEventListener("arbor-markdown-typing-changed", reset);
+    return {
+      reset,
+      destroy() {
+        document.removeEventListener("selectionchange", checkCaret);
+        window.removeEventListener("arbor-markdown-typing-changed", reset);
+      },
+      observe(event) {
+        const selection = window.getSelection();
+        if (insertion === null || event.inputType !== "insertText" || event.isComposing ||
+            event.data !== insertion || !selection || !selection.isCollapsed) { reset(); return null; }
+        typed += insertion;
+        insertion = null;
+        node = selection.anchorNode;
+        offset = selection.anchorOffset;
+        if (event.data !== " ") return null;
+        const history = tryFormatTypedListMarker(body, typed, selection);
+        if (history) reset();
+        return history;
+      }
+    };
   }
 
   function updateListItemIndent(item, nextIndent) {
@@ -4277,6 +4457,7 @@
       const element = anchor && (anchor.nodeType === Node.ELEMENT_NODE ? anchor : anchor.parentElement);
       const nextItem = element && element.closest ? element.closest("li") : null;
       if (!nextItem || nextItem === item || nextItem.parentElement !== list || nextItem.previousElementSibling !== item) return;
+      if (list.tagName === "OL" && nextItem.dataset.number === item.dataset.number) delete nextItem.dataset.number;
       if (nextItem.dataset.indent == null || nextItem.dataset.indent === indentation) updateListItemIndent(nextItem, indentation);
 
       const previousCheckbox = item.querySelector('input[type="checkbox"]');
@@ -4385,7 +4566,9 @@
     body.id = "note-body"; body.className = "note-body"; body.contentEditable = "true";
     body.setAttribute("role", "textbox"); body.setAttribute("aria-label", "Note body"); body.setAttribute("aria-multiline", "true"); body.spellcheck = false;
     body.innerHTML = markdownHTML(value || "");
+    const listTyping = trackListMarkerTyping(body);
     const onInput = function (event) {
+      const listHistory = listTyping.observe(event);
       const autoCorrection = state.autoCorrectionApplying;
       state.autoCorrectionApplying = false;
       const acceptedSuggestion = state.proofreadingAccepting;
@@ -4403,7 +4586,7 @@
         : acceptedSuggestion
           ? { label: "Accept suggestion", groupKey: null }
           : null;
-      scheduleSave(true, history);
+      scheduleSave(true, listHistory || history);
       const returnBoundary = state.autoCorrectionReturnBoundary;
       state.autoCorrectionReturnBoundary = null;
       const trigger = autoCorrection ? null : (autoCorrectionTrigger(body, event) || autoCorrectionReturnTrigger(body, event, returnBoundary));
@@ -4441,7 +4624,6 @@
       const element = anchor && (anchor.nodeType === Node.ELEMENT_NODE ? anchor : anchor.parentElement);
       const item = element && element.closest ? element.closest("li") : null;
       if (event.key === "Tab" && item && body.contains(item)) { event.preventDefault(); indentListItem(item, event.shiftKey ? -1 : 1); return; }
-      if (event.key === " " && !event.shiftKey && tryFormatTypedListMarker(body)) { event.preventDefault(); return; }
       const emptyListItem = item && body.contains(item) && selection && selection.isCollapsed && !textWithLineBreaks(item).trim();
       if (emptyListItem && ((event.key === "Enter" && !event.shiftKey) || event.key === "Backspace")) {
         event.preventDefault();
@@ -4457,6 +4639,7 @@
     state.editor = {
       getMarkdown: function () { return bodyMarkdown(body); },
       replaceMarkdown: function (markdown) {
+        listTyping.reset();
         const selection = captureEditorSelection(body);
         const wasFocused = document.activeElement === body || body.contains(document.activeElement);
         const scrollTop = body.scrollTop;
@@ -4468,6 +4651,7 @@
         scheduleCascadeProofreading(body, 1000);
       },
       destroy: function () {
+        listTyping.destroy();
         body.removeEventListener("input", onInput);
         body.removeEventListener("pointerover", onCorrectionPointerOver);
         body.removeEventListener("pointerout", onCorrectionPointerOut);
@@ -7554,6 +7738,7 @@
       await syncKeyboardShortcutPreferences(session);
       if (session !== state.accountSession) return;
       setConnection("Using your Apple Account.", true);
+      retryVisibleCapture();
       if (state.notes.length) {
         markFirstRunComplete(userID);
         showApp();
@@ -8445,8 +8630,17 @@
     const pendingCreation = state.pendingNewNoteRecords.has(recordName);
     const nextEditorState = captureEditorHistorySnapshot({ editorBodyChanged: bodyChanged !== false });
     if (nextEditorState) {
-      const previousEditorState = state.editorHistoryBaseline;
-      if (pendingCreation && previousEditorState && !sameEditorContent(previousEditorState, nextEditorState)) {
+      const literal = history.literalBefore;
+      const pending = pendingCreation && state.pendingNewNoteNavigation.get(recordName);
+      const alreadyFormatted = Boolean(pending && pending.firstListLiteral);
+      if (literal && pending && !alreadyFormatted) pending.firstListLiteral = literal;
+      const initialListEdits = Boolean(pending && pending.firstListLiteral);
+      const previousEditorState = literal || state.editorHistoryBaseline;
+      if (literal && (!pendingCreation || alreadyFormatted) && state.editorHistoryBaseline && !sameEditorContent(state.editorHistoryBaseline, literal)) {
+        recordUndoAction({ kind: "editor", target: recordName, label: "Edit note", groupKey: "editor:" + recordName,
+          before: state.editorHistoryBaseline, after: literal, initialListEdit: initialListEdits, updatedAt: Date.now() });
+      }
+      if (pendingCreation && !initialListEdits && previousEditorState && !sameEditorContent(previousEditorState, nextEditorState)) {
         state.editorHistoryBaseline = nextEditorState;
         const pendingNavigation = state.pendingNewNoteNavigation.get(recordName);
         if (pendingNavigation && !pendingNavigation.historyRecorded) {
@@ -8458,6 +8652,7 @@
           kind: "editor",
           target: nextEditorState.recordName,
           label: history.label || "Edit note",
+          ...(initialListEdits ? { initialListEdit: true } : {}),
           groupKey: Object.prototype.hasOwnProperty.call(history, "groupKey") ? history.groupKey : "editor:" + nextEditorState.recordName,
           before: previousEditorState,
           after: nextEditorState,
@@ -8525,17 +8720,24 @@
     return (wasArchived ? "Archive/" : "") + (folder ? folder + "/" : "") + filename;
   }
 
+  function truncatePathComponent(value, maxBytes, maxCodeUnits = value.length) {
+    const encoder = new TextEncoder();
+    let result = "";
+    let bytes = 0;
+    for (const character of value) {
+      bytes += encoder.encode(character).length;
+      if (bytes > maxBytes || result.length + character.length > maxCodeUnits) break;
+      result += character;
+    }
+    return result;
+  }
+
   function cleanFilenameStem(title) {
     let value = String(title || "").replace(/[\/:\\\u0000-\u001f\u007f]/g, " ");
     value = value.split(/\s+/).filter(Boolean).join(" ");
     while (value.startsWith(".")) value = value.slice(1);
     value = value.trim() || "Untitled";
-    let result = "";
-    for (const character of value) {
-      if (new TextEncoder().encode(result + character).length > 252) break;
-      result += character;
-    }
-    return result.trim() || "Untitled";
+    return truncatePathComponent(value, 252).trim() || "Untitled";
   }
 
   function uniqueFilename(title, taken) {
@@ -8545,11 +8747,7 @@
     let counter = 2;
     while (counter < 10000) {
       const suffix = " -" + counter;
-      let shortStem = "";
-      for (const character of stem) {
-        if (new TextEncoder().encode(shortStem + character).length > 252 - suffix.length) break;
-        shortStem += character;
-      }
+      const shortStem = truncatePathComponent(stem, 252 - suffix.length);
       const candidate = shortStem + suffix + ".md";
       if (!taken.has(candidate.toLowerCase())) return candidate;
       counter += 1;
@@ -8745,8 +8943,11 @@
           state.pendingNewNoteRecords.delete(recordName);
           const pendingNavigation = state.pendingNewNoteNavigation.get(recordName) || {};
           state.pendingNewNoteNavigation.delete(recordName);
-          const content = { title: normalizedTitle(parts.title), body: String(parts.body || ""), userTitle: normalizedTitle(parts.title) };
+          const firstContent = pendingNavigation.firstListLiteral || parts;
+          const content = { title: normalizedTitle(firstContent.title), body: String(firstContent.body || ""), userTitle: normalizedTitle(firstContent.title) };
+          if (pendingNavigation.firstListLiteral) content.listLiteral = pendingNavigation.firstListLiteral.listLiteral;
           recordUndoAction({
+            ...(pendingNavigation.firstListLiteral ? { beforePendingEdits: true } : {}),
             kind: "created-record", target: recordName, label: "Create note",
             record: cloneRecord(saved), content: content,
             signature: creationSignature(saved, content),
@@ -8754,7 +8955,7 @@
             navigationAfter: { note: recordName, folder: state.selectedFolder, archive: false },
             updatedAt: Date.now()
           });
-          if (newerEdit) {
+          if (newerEdit && !pendingNavigation.firstListLiteral) {
             const latestEditorState = captureEditorHistorySnapshot({ editorBodyChanged: true });
             const savedEditorState = Object.assign({}, latestEditorState || {}, {
               recordName: recordName, title: content.title, body: content.body
@@ -8942,10 +9143,16 @@
       if (!accountSessionCurrent(session)) return false;
       let saved = draft?.submitted ? await findSubmittedCapture(record, draft, session) : null;
       if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
+      if (draft?.owner && captureOwner() !== draft.owner) { clearCapture(); return false; }
       if (!saved) {
-        if (draft) draft.submitted = true;
+        if (draft) {
+          draft.submitted = true;
+          // Persist the identity and ambiguous-write flag before the request can leave this tab.
+          if (draft.claim && !persistCapture(draft)) throw new Error("Arbor couldn’t store the capture for a safe retry.");
+        }
         const response = assertResponse(await saveToDatabase(record));
-        if (!accountSessionCurrent(session)) return false;
+        if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
+        if (draft?.owner && captureOwner() !== draft.owner) { clearCapture(); return false; }
         saved = response?.records?.find(item => item.recordName === record.recordName);
         if (!saved && draft) throw new Error("Arbor couldn’t confirm whether this note was saved. Press Enter to check again.");
         saved = saved || record;
@@ -9030,9 +9237,18 @@
         if (editing && state.bodyDirty) text = currentEditorBodyMarkdown();
         else if (isNativeModelRecord(note.record, "CapturedNote")) text = await ensureNativeTextBody(note);
         else {
-          const record = note.record;
-          const source = fieldValue(record, "bodyStorageRaw") === "asset" && fieldValue(record, "bodyAsset")
-            ? await loadAssetBody(record) : await ensureWebTextBody(note);
+          // An earlier opened-body cache can outlive a completed inline save.
+          // Download the record's exact bytes, including imported line endings.
+          const record = state.records.get(note.recordName) || note.record;
+          const inline = fieldValue(record, "body");
+          let source;
+          if (fieldValue(record, "bodyStorageRaw") === "asset" && fieldValue(record, "bodyAsset")) {
+            source = await loadAssetBody(record);
+          } else if (typeof inline === "string") {
+            source = inline;
+          } else {
+            source = await ensureWebTextBody(note);
+          }
           text = files.webFileBody(source);
         }
         if (!accountSessionCurrent(session)) return;
@@ -9051,14 +9267,17 @@
   }
 
   function cleanFolderName(name) {
-    return String(name || "").replace(/[\/:\\\u0000-\u001f\u007f]/g, " ").split(/\s+/).filter(Boolean).join(" ").replace(/^\.+/, "").trim().slice(0, 120);
+    const cleaned = String(name || "").replace(/[\/:\\\u0000-\u001f\u007f]/g, " ").split(/\s+/).filter(Boolean).join(" ").replace(/^\.+/, "").trim();
+    return truncatePathComponent(cleaned, 255, 120).trimEnd();
   }
 
   function uniqueFolderName(name, taken) {
-    if (!taken.has(name.toLocaleLowerCase())) return name;
-    let index = 2;
-    while (taken.has((name + " -" + index).toLocaleLowerCase())) index += 1;
-    return name + " -" + index;
+    let candidate = truncatePathComponent(name, 255);
+    for (let index = 2; taken.has(candidate.toLocaleLowerCase()); index++) {
+      const suffix = " -" + index;
+      candidate = truncatePathComponent(name, 255 - suffix.length).trimEnd() + suffix;
+    }
+    return candidate;
   }
 
   async function createFolder(parentOverride) {
@@ -9071,7 +9290,7 @@
     if (response === null) return;
     const label = cleanFolderName(response);
     if (!label) { showToast("Enter a folder name.", true); return; }
-    const taken = new Set(state.folders.filter(function (folder) { return parentPath(folder.path) === parent; }).map(function (folder) { return folder.path.split("/").pop().toLowerCase(); }));
+    const taken = new Set(state.folders.filter(function (folder) { return parentPath(folder.path) === parent; }).map(function (folder) { return folder.path.split("/").pop().toLocaleLowerCase(); }));
     const name = uniqueFolderName(label, taken);
     const path = parent ? parent + "/" + name : name;
     const uuid = crypto.randomUUID().toUpperCase();
@@ -9556,6 +9775,15 @@
     }
   }
 
+  function pendingListCreationIsNext(history) {
+    const pending = state.pendingNewNoteNavigation.get(state.selectedRecordName);
+    if (!pending || !pending.firstListLiteral || !history) return false;
+    const redo = history.peekRedo();
+    const undo = history.peekUndo();
+    return Boolean(redo && redo.initialListEdit && redo.target === state.selectedRecordName &&
+      !(undo && undo.initialListEdit && undo.target === redo.target));
+  }
+
   function updateUndoControls() {
     const history = state.undoHistory;
     const unavailable = !state.database || state.accountCacheSuspended;
@@ -9563,8 +9791,9 @@
     const undo = $("undo-action-button");
     const redo = $("redo-action-button");
     if (undo) {
-      undo.disabled = unavailable || commandRunning || !history || !history.canUndo;
-      undo.title = history && history.undoLabel ? "Undo " + history.undoLabel : "Undo";
+      const pendingCreate = pendingListCreationIsNext(history);
+      undo.disabled = unavailable || commandRunning || !history || (!history.canUndo && !pendingCreate);
+      undo.title = pendingCreate ? "Undo Create note" : history && history.undoLabel ? "Undo " + history.undoLabel : "Undo";
       undo.setAttribute("aria-label", undo.title);
     }
     if (redo) {
@@ -9720,6 +9949,26 @@
     throw new Error(message || "This item changed in iCloud. Its undo history was cleared to protect the newer version.");
   }
 
+  // The ordinary Markdown loader interprets "-" as a list, even when Undo
+  // restores the literal just typed. Render that one recorded source interval
+  // as text, then let ordinary Markdown handle all surrounding blocks.
+  function renderEditorHistoryBody(body, snapshot) {
+    const text = snapshot.body, literal = snapshot.listLiteral;
+    if (!literal || typeof literal.text !== "string" || !Number.isSafeInteger(literal.start) ||
+        text.slice(literal.start, literal.start + literal.text.length) !== literal.text) {
+      body.innerHTML = markdownHTML(text);
+      return null;
+    }
+    let token = "ArborListMarkerHistory";
+    while (text.includes(token)) token += "X";
+    body.innerHTML = markdownHTML(text.slice(0, literal.start) + token + text.slice(literal.start + literal.text.length));
+    const paragraph = Array.from(body.querySelectorAll("p")).find(function (p) { return p.textContent === token; });
+    if (!paragraph) { body.innerHTML = markdownHTML(text); return null; }
+    paragraph.textContent = literal.text;
+    paragraph.dataset.listLiteral = literal.text;
+    return paragraph;
+  }
+
   async function applyEditorHistory(action, direction, context) {
     assertHistoryContext(context);
     const expected = direction === "undo" ? action.after : action.before;
@@ -9751,6 +10000,7 @@
       advanceSemanticRevision(note);
       writeDraft(note.recordName, { title: desiredContent.title, body: desiredContent.body });
 
+      let literalBlock = null;
       if (isSelected) {
         const liveEditorState = captureEditorHistorySnapshot({ editorBodyChanged: true });
         const activeBody = $("note-body");
@@ -9758,7 +10008,7 @@
         const titleInput = $("note-title");
         titleInput.value = note.title === "Untitled" && !note.body ? "" : note.title;
         fitTitle();
-        if (activeBody) activeBody.innerHTML = markdownHTML(desiredContent.body);
+        literalBlock = activeBody && renderEditorHistoryBody(activeBody, desired);
         if (activeBody) activeBody.scrollTop = scrollTop;
         state.bodyDirty = false;
         renderNoteDate(note);
@@ -9768,8 +10018,11 @@
       } else {
         assertHistoryContext(context);
         selectNote(note);
+        const activeBody = $("note-body");
+        if (activeBody && desired.listLiteral) literalBlock = renderEditorHistoryBody(activeBody, desired);
         restoreEditorSnapshotSelection(desired);
       }
+      if (literalBlock && desired.focused === "body") window.getSelection().collapse(literalBlock.firstChild, literalBlock.textContent.length);
       scheduleSave(false);
     } finally { state.replayingHistory = false; }
   }
@@ -9958,6 +10211,13 @@
 
   async function applyCreatedRecordHistory(action, direction, context) {
     assertHistoryContext(context);
+    // An immediate second Undo follows Format list before its inverse reaches
+    // storage. Verify Create against that saved inverse, on the same record.
+    if (direction === "undo" && action.beforePendingEdits && state.selectedRecordName === action.target) {
+      await flushSave();
+      assertHistoryContext(context);
+      if (state.dirty || pendingEditFor(action.target)) throw new Error("Waiting for this note’s edits to save before undoing its creation.");
+    }
     const latest = await fetchLatestHistoryRecord(action.target, context);
     if (direction === "undo") {
       if (!latest) return;
@@ -9995,6 +10255,14 @@
     }
     closeNoteActions();
     restoreHistoryNavigation(direction === "undo" ? action.navigationBefore : action.navigationAfter);
+    if (direction === "redo" && action.content?.listLiteral && state.selectedRecordName === action.target) {
+      const body = $("note-body");
+      const block = renderEditorHistoryBody(body, action.content);
+      if (block) {
+        body.focus({ preventScroll: true });
+        window.getSelection().collapse(block.firstChild, block.textContent.length);
+      }
+    }
   }
 
   async function applyHistoryAction(action, direction, context) {
@@ -10019,7 +10287,7 @@
       const history = requestedHistory;
       if (!history || state.undoHistory !== history || state.accountSession !== requestedSession ||
           state.database !== requestedDatabase || state.undoHistoryAccountKey !== requestedAccountKey ||
-          !requestedDatabase || state.accountCacheSuspended || (direction === "undo" ? !history.canUndo : !history.canRedo)) return false;
+          !requestedDatabase || state.accountCacheSuspended) return false;
       const context = {
         session: requestedSession,
         accountKey: requestedAccountKey,
@@ -10033,8 +10301,17 @@
         await applyHistoryAction(action, command, context);
         assertHistoryContext(context);
       };
-      const action = direction === "undo" ? history.peekUndo() : history.peekRedo();
       try {
+        // If the first format was already undone, the next action is Create
+        // even while its first save is debounced. Never undo an unrelated item.
+        if (direction === "undo" && pendingListCreationIsNext(history)) {
+          const target = state.selectedRecordName;
+          await flushSave();
+          assertHistoryContext(context);
+          if (state.selectedRecordName !== target || state.pendingNewNoteRecords.has(target)) return false;
+        }
+        const action = direction === "undo" ? history.peekUndo() : history.peekRedo();
+        if (!action) return false;
         if (direction === "undo") await history.undo(apply);
         else await history.redo(apply);
         if (action) showToast((direction === "undo" ? "Undid " : "Redid ") + String(action.label || "change").toLocaleLowerCase() + ".");
@@ -10746,7 +11023,7 @@
       const noteEditor = target && ((target.id === "note-title") || (target.closest && target.closest("#note-body")));
       if (isNativeTextEditingTarget(target) && !noteEditor) return;
       const history = state.undoHistory;
-      if (!history || (!state.historyCommandPromise && (id === "undo" ? !history.canUndo : !history.canRedo))) return;
+      if (!history || (!state.historyCommandPromise && (id === "undo" ? !history.canUndo && !pendingListCreationIsNext(history) : !history.canRedo))) return;
       event.preventDefault();
       event.stopPropagation();
       performHistoryCommand(id);
@@ -11117,7 +11394,8 @@
     if (discardDraftButton) discardDraftButton.addEventListener("click", discardRecoveredDraft);
     window.addEventListener("beforeunload", function (event) {
       persistCurrentDraft();
-      if (!state.dirty && state.saveFlightCount === 0 && !hasUnsavedCapture()) return;
+      const unprotectedCapture = hasUnsavedCapture() && captureDraft.persistedText !== $("capture-input").value;
+      if (!state.dirty && state.saveFlightCount === 0 && !unprotectedCapture) return;
       event.preventDefault();
       event.returnValue = "";
     });
@@ -11162,7 +11440,14 @@
     });
     $("search-page-new-note").addEventListener("click", openCapture);
     $("capture-form").addEventListener("submit", function (event) { event.preventDefault(); commitCapture(); });
-    $("capture-input").addEventListener("input", resizeCaptureInput);
+    $("capture-input").addEventListener("input", function () {
+      resizeCaptureInput();
+      if (!captureDraft) return;
+      captureDraft.retryOnReconnect = false;
+      if (captureDraft.claim && !persistCapture(captureDraft) && captureDraft) {
+        $("capture-status").textContent = "Browser storage is unavailable. Keep this tab open to preserve your text.";
+      }
+    });
     $("capture-input").addEventListener("keydown", function (event) {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) { event.preventDefault(); commitCapture(); }
       if (event.key === "Escape") $("capture-dialog").close();
@@ -11597,6 +11882,15 @@
     retryNoteLoad();
   });
   wireEvents();
+  window.addEventListener("storage", function (event) {
+    if (captureDraft?.owner && (event.key === null || event.key === "arbor.web.account-id") &&
+        (!event.newValue || event.newValue !== state.connectionUserID)) clearCapture();
+  });
+  window.addEventListener("online", retryVisibleCapture);
+  function retryVisibleCapture() {
+    if (captureDraft?.retryOnReconnect && captureDraft.owner && captureOwner() === captureDraft.owner &&
+        state.database && state.nativeZoneExists && $("capture-dialog").open) commitCapture();
+  }
   window.addEventListener("online", function () {
     if (!state.accountCacheSuspended) flushPendingEdits();
   });

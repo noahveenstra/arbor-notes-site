@@ -142,6 +142,20 @@ export async function openUndoHistory(options) {
       notify();
       return persist();
     },
+    // Formatting can be undone before the first save of a newly created
+    // note. Insert its eventual Create action below those editor actions and
+    // keep any format Redo that the user already earned while the save ran.
+    recordCreationBeforeEdits: function (action) {
+      if (closed || action?.kind !== "created-record" || !action.target) return Promise.resolve(false);
+      const isCreation = entry => entry.kind === "created-record" && entry.target === action.target;
+      if (undoStack.some(isCreation) || redoStack.some(isCreation)) return Promise.resolve(true);
+      const creation = cloneValue(action);
+      const first = undoStack.findIndex(entry => entry.target === action.target && entry.initialListEdit);
+      undoStack.splice(first < 0 ? undoStack.length : first, 0, creation);
+      trimHistory();
+      notify();
+      return persist();
+    },
     peekUndo: function () { return undoStack.length ? cloneValue(undoStack[undoStack.length - 1]) : null; },
     peekRedo: function () { return redoStack.length ? cloneValue(redoStack[redoStack.length - 1]) : null; },
     undo: async function (apply) {

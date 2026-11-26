@@ -12,13 +12,13 @@ const STARTUP_DEPENDENCY_TIMEOUT_MS = 15_000;
 const STARTUP_SLOW_STATUS_MS = 10_000;
 const CLOUDKIT_SCRIPT_URL = "https://cdn.apple-cloudkit.com/ck/2/cloudkit.js";
 const PWA_CLIENT_URL = "./pwa-client.js?v=arb-94-update-action-20261119-a";
-const UNDO_HISTORY_URL = "./undo-history.js?v=arb-100-global-undo-20261119-a";
+const UNDO_HISTORY_URL = "./undo-history.js?v=arb-216-list-undo-20261126-a";
 const PASSAGE_ANCHOR_URL = "./passage-anchor.js?v=arb-161-verify-1";
 const RUST_SEARCH_URL = "./rust-search.js?v=arb-125-integrity-20261126-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
 const CLOUDKIT_WEB_SERVICES_URL = "./cloudkit-encrypted-web-services.mjs?v=arb-190-instant-launch-20261125-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-159-search-press-20261126-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-216-typing-20261126-c";
 const PROOFREADING_SCHEDULE_URL = "./proofreading-schedule.mjs?v=arb-always-on-proofreading-20261125-a";
 let startupStatusTimer = null;
 

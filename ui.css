@@ -183,6 +183,18 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .note-action-menu button:hover { background: var(--surface-control); }
 .note-action-menu button:focus-visible, .note-action-menu select:focus-visible { outline: 2px solid var(--system-blue); outline-offset: 1px; }
 .correction-mark { border-radius: 3px; color: inherit; text-decoration-line: underline; text-decoration-style: solid; text-decoration-color: color-mix(in srgb, var(--secondary-label) 84%, transparent); text-decoration-thickness: 1px; text-underline-offset: 3px; cursor: default; }
+/* An empty inline anchor keeps the note and its line breaks intact. Its
+   positioned underline gives pointer users a target at the insertion point. */
+.correction-mark[data-correction-insertion] { position: relative; }
+.correction-mark[data-correction-insertion]::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: -0.32em;
+  bottom: -3px;
+  width: 0.64em;
+  height: 0.85em;
+  border-bottom: 2px solid var(--secondary-label);
+}
 .correction-mark:hover, .correction-mark:focus { background: transparent; outline: none; }
 .correction-popover { position: fixed; z-index: 110; display: flex; width: min(320px, calc(100vw - 20px)); max-width: min(92vw, 520px); flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--secondary-label) 48%, transparent); border-radius: 12px; color: var(--label); background: var(--surface-elevated); box-shadow: 0 10px 28px rgb(0 0 0 / 34%); opacity: 0; pointer-events: none; transform: translate(-50%, -100%) translateY(-3px) scale(.985); transition: opacity 140ms ease-in, transform 140ms cubic-bezier(.4, 0, 1, 1), visibility 0s linear 140ms; }
 .correction-popover[data-placement="bottom"] { transform: translateX(-50%) translateY(3px) scale(.985); }

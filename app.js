@@ -4915,7 +4915,16 @@
     state.cascadeSentences.forEach(function (item) {
       if (found || !item || item.recordName !== state.selectedRecordName || !Array.isArray(item.spans)) return;
       item.spans.forEach(function (span) {
-        if (found || !span || span.end <= span.start) return;
+        if (found || !span || span.end < span.start) return;
+        if (span.start === span.end) {
+          if (span.replacement && !span.detectOnly) {
+            const key = cascadeInsertionKey(item, span);
+            found = !Array.from(state.proofreadingCorrections.values()).some(function (entry) {
+              return entry.insertionKey === key && entry.marker.isConnected;
+            });
+          }
+          return;
+        }
         const word = item.text.slice(span.start, span.end);
         if (!word) return;
         const covered = Array.prototype.some.call(body.querySelectorAll(".correction-mark"), function (mark) {
@@ -4949,6 +4958,10 @@
     return proofreadingBlockOffset(block, selection.anchorNode, selection.anchorOffset, nodes, body);
   }
 
+  function cascadeInsertionKey(item, span) {
+    return JSON.stringify([item.key, span.start, span.replacement]);
+  }
+
   function appendCascadeEntries(entries, nodes, body, recordName) {
     const schedule = window.ArborProofreadingSchedule;
     state.cascadeSentences.forEach(function (item) {
@@ -4962,34 +4975,42 @@
       const localActive = active ? { start: active.start - item.sentenceStart, end: active.end - item.sentenceStart } : null;
       const spans = schedule ? schedule.filterActiveWord(item.spans, localActive) : item.spans;
       spans.forEach(function (span) {
-        if (!span || !Number.isInteger(span.start) || !Number.isInteger(span.end) || span.end <= span.start) return;
+        if (!span || !Number.isInteger(span.start) || !Number.isInteger(span.end) || span.start < 0 || span.end < span.start || span.end > item.text.length) return;
         const absStart = item.sentenceStart + span.start;
         const length = span.end - span.start;
-        const position = proofreadingBlockPosition(block, absStart, nodes, body);
+        const insertion = length === 0;
+        if (insertion && (!span.replacement || span.detectOnly)) return;
+        // At a sentence end, keep the insertion in the preceding formatting run.
+        const afterLastChar = insertion && span.start === item.text.length;
+        const position = proofreadingBlockPosition(block, afterLastChar ? absStart - 1 : absStart, nodes, body);
+        if (position && afterLastChar) position.offset += 1;
         if (!position || position.offset + length > position.node.length) return;
         const word = position.node.nodeValue.slice(position.offset, position.offset + length);
         if (word !== item.text.slice(span.start, span.end)) return;
-        if (proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), word)) return;
+        if (!insertion && proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), word)) return;
         const overlaps = entries.some(function (entry) {
-          return entry.nodeIndex === position.nodeIndex && entry.item.start < position.offset + length && entry.item.end > position.offset;
+          return entry.nodeIndex === position.nodeIndex && ((entry.item.start < position.offset + length && entry.item.end > position.offset)
+            || (insertion && entry.item.insertionKey && entry.item.start === position.offset));
         });
         if (overlaps) return;
         const replacement = span.replacement == null ? null : String(span.replacement);
+        const insertionLabel = insertion && (replacement.trim() ? "Insert “" + replacement.trim() + "”" : "Insert space");
         const issue = {
+          insertionKey: insertion ? cascadeInsertionKey(item, span) : null,
           start: position.offset,
           end: position.offset + length,
           kind: span.kind || "grammar",
           word: word,
           message: span.message || "Grammar suggestion",
           transformClass: span.transformClass || span.ruleId || span.kind || "grammar",
-          patternLabel: (span.message || "Grammar suggestion") + ": " + word,
+          patternLabel: (span.message || "Grammar suggestion") + ": " + (insertionLabel || word),
           options: span.detectOnly || replacement == null ? [] : [{
-            label: replacement === "" ? "Delete" : replacement,
+            label: insertionLabel || (replacement === "" ? "Delete" : replacement),
             replacement: replacement
           }]
         };
         const ignored = state.proofreadingIgnored.get(recordName) || new Set();
-        const key = ignoredCorrectionKey(position.node.nodeValue, issue);
+        const key = ignoredCorrectionKey(position.node.nodeValue, issue) + (insertion ? "\u001f" + replacement : "");
         const sameOccurrenceIgnored = ignored.has(key) || ["spelling", "grammar", "capitalization"].some(function (kind) {
           return ignored.has(ignoredCorrectionKey(position.node.nodeValue, Object.assign({}, issue, { kind: kind })));
         });
@@ -5475,19 +5496,23 @@
       });
     });
     appendCascadeEntries(entries, nodes, pending.body, pending.recordName);
-    entries.sort(function (left, right) { return left.nodeIndex - right.nodeIndex || right.item.start - left.item.start; });
+    entries.sort(function (left, right) { return left.nodeIndex - right.nodeIndex || right.item.start - left.item.start || right.item.end - left.item.end; });
     withProofreadingDom(function () { paintProofreadingMarks(entries, nodes, result, pending, savedSelection); });
   }
 
   function paintProofreadingMarks(entries, nodes, result, pending, savedSelection) {
     entries.forEach(function (entry, index) {
       const node = nodes[entry.nodeIndex];
-      if (!node || !node.parentNode || entry.item.start < 0 || entry.item.end > node.length || entry.item.start >= entry.item.end) return;
+      if (!node || !node.parentNode || entry.item.start < 0 || entry.item.end > node.length || entry.item.start > entry.item.end || (entry.item.start === entry.item.end && !entry.item.insertionKey)) return;
       splitProofreadingTextNode(node, entry.item.end, savedSelection);
       const matchNode = splitProofreadingTextNode(node, entry.item.start, savedSelection);
       const mark = document.createElement("span");
       const id = "correction-" + result.requestId + "-" + index;
       mark.className = "correction-mark";
+      if (entry.item.insertionKey) {
+        mark.dataset.correctionInsertion = "";
+        mark.contentEditable = "false";
+      }
       mark.dataset.correctionId = id;
       mark.dataset.correctionKind = entry.item.kind;
       mark.setAttribute("role", "button");
@@ -5496,11 +5521,11 @@
       mark.setAttribute("aria-expanded", "false");
       const modifier = /Mac|iPhone|iPad|iPod/i.test((navigator.platform || "") + " " + (navigator.userAgent || "")) ? "Option" : "Alt";
       const suggestionLabel = entry.item.kind === "spelling" ? "Spelling suggestion" : entry.item.message;
-      mark.setAttribute("aria-label", suggestionLabel + ": " + entry.item.word + ". Press " + modifier + " and Down Arrow, Enter, or Space for suggestions.");
+      mark.setAttribute("aria-label", suggestionLabel + ": " + (entry.item.insertionKey ? entry.item.options[0].label : entry.item.word) + ". Press " + modifier + " and Down Arrow, Enter, or Space for suggestions.");
       matchNode.replaceWith(mark);
       mark.appendChild(matchNode);
       state.proofreadingCorrections.set(id, {
-        id: id, marker: mark, recordName: pending.recordName, kind: entry.item.kind,
+        id: id, marker: mark, recordName: pending.recordName, kind: entry.item.kind, insertionKey: entry.item.insertionKey,
         word: entry.item.word, message: entry.item.message, options: entry.item.options || [], occurrenceKey: entry.key,
         transformClass: entry.item.transformClass || entry.item.kind,
         patternLabel: entry.item.patternLabel || ((entry.item.message || "Suggestion") + ": " + entry.item.word)
@@ -5611,9 +5636,10 @@
       button.className = "correction-option";
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", String(selectedIndex < 0 ? index === 0 : index === selectedIndex));
-      button.setAttribute("aria-label", entry.kind === "capitalization"
-        ? "Click to capitalize " + entry.word
-        : "Replace “" + entry.word + "” with “" + option.label + "”");
+      let label = "Replace “" + entry.word + "” with “" + option.label + "”";
+      if (entry.insertionKey) label = option.label;
+      if (entry.kind === "capitalization") label = "Click to capitalize " + entry.word;
+      button.setAttribute("aria-label", label);
       button.textContent = option.label;
       button.dataset.correctionOption = String(index);
       options.appendChild(button);
@@ -5876,7 +5902,7 @@
     options.setAttribute("role", "listbox");
     options.setAttribute("aria-label", (entry.kind === "spelling" ? "Spelling" : entry.message) + " suggestions");
     renderCorrectionOptions(entry, null);
-    $("correction-term").textContent = entry.word;
+    $("correction-term").textContent = entry.insertionKey ? "Suggested insertion" : entry.word;
     const message = $("correction-message");
     message.textContent = entry.kind === "spelling" ? "" : entry.message;
     message.hidden = entry.kind === "spelling";
@@ -5898,7 +5924,7 @@
     if (entry.kind === "spelling") popover.insertBefore(actions, options);
     else popover.appendChild(actions);
     $("correction-announcement").textContent = (entry.kind === "spelling" ? "Spelling suggestion" : entry.message)
-      + ". Current text: " + entry.word + ". " + entry.options.map(function (option) { return option.label; }).join(", ")
+      + (entry.insertionKey ? ". " : ". Current text: " + entry.word + ". ") + entry.options.map(function (option) { return option.label; }).join(", ")
       + ". Ignore this occurrence."
       + (showIgnoreEverywhere(entry) ? " Ignore this word everywhere." : "")
       + (entry.kind === "spelling" || (entry.kind === "grammar" && showIgnoreEverywhere(entry)) ? " Add to Dictionary." : "");
@@ -5968,6 +5994,7 @@
     const option = entry.options[optionIndex];
     if (!option) return;
     const marker = entry.marker;
+    if (entry.insertionKey && marker.textContent) return;
     const body = $("note-body");
     const parent = marker.parentNode;
     let highlight = null;

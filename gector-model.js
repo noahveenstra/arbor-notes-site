@@ -1,3 +1,4 @@
+import { weightFiles } from "./gector-weights.mjs";
 import { onnxruntime as ort } from "./vendor/transformers/transformers.min.js";
 import { correctText, verbsFromLines, vocabFromLines } from "./gector-decoder.mjs";
 
@@ -7,7 +8,7 @@ export const LOCAL_MODEL_ID = "gector-bert-en@" + MODEL_REVISION;
 
 // The published Proofbird file is FP32. This copy is per-channel INT8 for
 // MatMul and Gemm, with per-channel INT8 word embeddings and a DequantizeLinear
-// before Gather. Weights are split into two files so each stays under 100 MB.
+// before Gather. Each external weight file is served in two integrity-checked parts.
 // sha256 values are the bytes served from this origin. An empty hash fails closed.
 export const FILE_HASHES = Object.freeze({
   "config.json": "4d9c202b274e63a583bdb0911f36e59efdbe3ac46ac3b6508eb174221f37b9e7",
@@ -16,8 +17,10 @@ export const FILE_HASHES = Object.freeze({
   "vocab.txt": "eeaa9875b23b04b4c54ef759d03db9d1ba1554838f8fb26c5d96fa551df93d02",
   "verb-form-vocab.txt": "5906804ec8a1acd8cbfc2918522bf429ce5edded8bbc46ffc2be861d280d3abf",
   "model.onnx": "ee2ba6c47aadc30eac7d986d101fc204c887d8695dadd8b1331bdbdd86a7014a",
-  "weights-0.bin": "5cb35f687f38ced7c5c2c7e37f34d1dc6aa612cf9a156cbdbd6b3ba098fc714f",
-  "weights-1.bin": "d6a30b53429fe38041dce5c7baaec1fc80989b99e75f644887c39d52339a635f"
+  "weights-0-part-0.bin": "50dff2587424103bdb3750ffe547e5ba314cea8f6800d44447a5275353ac9122",
+  "weights-0-part-1.bin": "2c8b9d82c7e25d7c4ab9f85a2f9f191f75e05c4c57a9c1baca6a8939a40c140b",
+  "weights-1-part-0.bin": "378788fa4380dab6fb266b5fa730a6ff42c37659d1dbe57043c0bb40b97214a5",
+  "weights-1-part-1.bin": "c89e5bdac0d2dd803134cbeff473698fb6bfc820386e540d055cc7c4578b06c9"
 });
 
 const MODEL_ROOT = new URL("./models/" + LOCAL_MODEL_ID + "/", import.meta.url);
@@ -113,14 +116,23 @@ async function loadResources(onProgress) {
 async function loadSession(onProgress) {
   const model = await fetchVerified("model.onnx", onProgress);
   const external = [];
-  if (FILE_HASHES["weights-0.bin"]) external.push({ path: "weights-0.bin", data: await fetchVerified("weights-0.bin", onProgress) });
-  if (FILE_HASHES["weights-1.bin"]) external.push({ path: "weights-1.bin", data: await fetchVerified("weights-1.bin", onProgress) });
+  for (const weight of weightFiles) {
+    const data = new Uint8Array(weight.size);
+    let offset = 0;
+    for (const part of weight.parts) {
+      const bytes = await fetchVerified(part, onProgress);
+      data.set(bytes, offset);
+      offset += bytes.length;
+    }
+    if (offset !== data.length) throw new Error("invalid-model-weight-size");
+    external.push({ path: weight.path, data });
+  }
   onProgress({ phase: "model", file: "model.onnx", loaded: 1, total: 1 });
   return ort.InferenceSession.create(model, {
     executionProviders: ["wasm"],
     graphOptimizationLevel: "all",
     executionMode: "sequential",
-    externalData: external.length ? external : undefined
+    externalData: external
   });
 }
 

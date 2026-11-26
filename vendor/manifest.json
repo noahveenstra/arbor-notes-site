@@ -284,14 +284,24 @@
       "sha384": "51gme9Cqfj4/hRQFCXicIt1VSyE0oc0YmI/J0gmeXaUeXtK6dfCNhuHUqY/bjjDu"
     },
     {
-      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-0.bin",
-      "bytes": 55299520,
-      "sha384": "6HTkUGoaXVb3iZGCUlWDV9ELm3amNRHLf1xpw1pcndE5mcewO32C2ech0gUM7FFE"
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-0-part-0.bin",
+      "bytes": 27649760,
+      "sha384": "23wtYv2J2p/R3sG/XA7IqBJALAWztSJoIOsB7KjgkOjyjvjiRUSy8nK1o2jI1mES"
     },
     {
-      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-1.bin",
-      "bytes": 55299202,
-      "sha384": "XdxmRoEQZ0YE/HTTvluax1RpODx0vwXbnCWq48PS1QQIwc3KFAK9tvHmdEsmN0oC"
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-0-part-1.bin",
+      "bytes": 27649760,
+      "sha384": "cKI+3hyjIXuOZ8KR9C7hJyZsu1yM/V3Rfk0OoLFFzcRDxRBdxFNetIDUlL7Jktdy"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-1-part-0.bin",
+      "bytes": 27649601,
+      "sha384": "ICSAnRKFPS2a9YdQ5ugZbZqDoUZF+wQpKHjg7KeL2fZmOHXTETk8j+ASn+lPcyME"
+    },
+    {
+      "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/weights-1-part-1.bin",
+      "bytes": 27649601,
+      "sha384": "DQjQ9jm+CXOZZlIhsrU317WCoUAg4l9u7Q81sCNrnNxpqZiv4zPxm/tM1mlccIyh"
     },
     {
       "path": "models/gector-bert-en@107219645ad50dc859a4b55d73bf9e0c7bb2773f/LICENSE",
@@ -330,6 +340,6 @@
     "revision": "107219645ad50dc859a4b55d73bf9e0c7bb2773f",
     "license": "apache-2.0",
     "published": "2026-11-22",
-    "note": "Published checkpoint is FP32 ONNX (434,210,042 bytes). This copy uses per-channel dynamic INT8 for MatMul and Gemm, and per-channel INT8 word embeddings with DequantizeLinear before Gather. Weights are split into weights-0.bin and weights-1.bin."
+    "note": "Published checkpoint is FP32 ONNX (434,210,042 bytes). This copy uses per-channel dynamic INT8 for MatMul and Gemm, and per-channel INT8 word embeddings with DequantizeLinear before Gather. Each ONNX external data file is served in two integrity-checked parts."
   }
 }

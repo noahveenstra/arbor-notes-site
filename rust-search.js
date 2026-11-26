@@ -173,7 +173,7 @@
     const script = root.document.currentScript;
     const scriptURL = script && script.src ? script.src : root.location.href;
     const wasmURL = new URL("./lexical-search.wasm?v=arb-125-rust-index-20261125-a", scriptURL);
-    ready = root.fetch(wasmURL, { credentials: "same-origin" })
+    ready = root.fetch(wasmURL, { mode: "same-origin", credentials: "same-origin", integrity: "sha256-FgBqtKLtbW94MuY2hDSYwsAnd1ZwEvCzg3vHQXhxRtY=" })
       .then(function (response) {
         if (!response.ok) throw new Error("Rust lexical search could not be loaded.");
         return response.arrayBuffer();

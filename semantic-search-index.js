@@ -130,12 +130,13 @@ function validSkipRecord(record, document) {
   return Boolean(document.signature && record.signature === document.signature);
 }
 
-async function readVectors(documents, database) {
+async function readVectors(documents, database, startedIn) {
   const vectors = new Map();
   const ranges = new Map();
   const wholeNoteVectors = new Map();
   const missing = [];
   const skipped = [];
+  const result = { vectors, ranges, wholeNoteVectors, missing, skipped };
   const unread = [];
   documents.forEach(function (document) {
     const memory = memoryVectors.get(document.key);
@@ -155,6 +156,8 @@ async function readVectors(documents, database) {
       const reads = unread.map(function (entry) { return readRequest(store.get(entry.key)); });
       const records = await Promise.all(reads);
       await completed;
+      // A completed read can outlive sign-out and the old database connection.
+      if (startedIn !== generation) return result;
       unread.forEach(function (entry, index) {
         const cached = records[index];
         if (validVectorRecord(cached, entry)) {
@@ -172,10 +175,13 @@ async function readVectors(documents, database) {
     }
   } else missing.push.apply(missing, unread);
 
-  return { vectors: vectors, ranges: ranges, wholeNoteVectors: wholeNoteVectors, missing: missing, skipped: skipped };
+  return result;
 }
 
 async function pruneVectors(database, liveKeys, accountPrefix) {
+  for (const key of memoryVectors.keys()) {
+    if (key.startsWith(accountPrefix) && !liveKeys.has(key)) memoryVectors.delete(key);
+  }
   if (!database) return;
   const signature = accountPrefix + "\u0001" + Array.from(liveKeys).sort().join("\u0000");
   if (signature === prunedCorpusSignature) return;
@@ -496,7 +502,7 @@ export async function prepareSemanticQuery(query, notes) {
   }
   const liveKeys = new Set(documents.map(function (document) { return document.key; }));
   await pruneVectors(database, liveKeys, accountPrefix);
-  const cached = await readVectors(documents, database);
+  const cached = await readVectors(documents, database, startedIn);
   documents.forEach(function (document) {
     if (cached.vectors.has(document.note.id)) document.passages = cached.ranges.get(document.note.id);
   });
@@ -572,7 +578,7 @@ export async function prepareSemanticQuery(query, notes) {
   };
 }
 
-export async function completeSemanticQuery(prepared, rows) {
+export async function completeSemanticQuery(prepared, rows, { deferPassageAnchors = false } = {}) {
   if (!prepared) throw new Error("Missing semantic search preparation");
   if (prepared.stale || prepared.generation !== generation) return { stale: true, results: [], queryVector: null, coverage: { indexed: 0, total: 0, remaining: 0 } };
   const expected = 1 + prepared.passages.length;
@@ -650,7 +656,7 @@ export async function completeSemanticQuery(prepared, rows) {
       ? { start: winningPassage.start, end: winningPassage.end }
       : null;
     let source = null;
-    if (winningChunkRange) {
+    if (winningChunkRange && !deferPassageAnchors) {
       try {
         source = await createPassageAnchor({
           noteId: document.note.id,

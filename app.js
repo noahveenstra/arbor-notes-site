@@ -523,6 +523,8 @@
     state.searchPage = false;
     state.searchItems = [];
     state.searchActiveIndex = -1;
+    state.titleQueryRequest += 1;
+    window.clearTimeout(state.titleQueryTimer);
     state.semanticSearchQuery = "";
     state.semanticLoadingQuery = "";
     state.semanticErrorQuery = "";
@@ -910,7 +912,11 @@
     if ((session != null && session !== state.accountSession) || state.accountCacheSuspended) return;
     state.bodyCache.delete(recordName); state.bodyCache.set(recordName, body);
     const bodyLimit = launchLibrary && launchLibrary.OPENED_BODY_LIMIT || 30;
-    while (state.bodyCache.size > bodyLimit) state.bodyCache.delete(state.bodyCache.keys().next().value);
+    while (state.bodyCache.size > bodyLimit) {
+      const evicted = state.bodyCache.keys().next().value;
+      state.bodyCache.delete(evicted);
+      refreshLexicalNote(state.notes.find(note => note.recordName === evicted));
+    }
     const preview = previewText(body);
     const current = state.notes.find(function (note) { return note.recordName === recordName; });
     if (current && isNativeModelRecord(current.record, "CapturedNote")) {
@@ -1479,7 +1485,7 @@
     return String(fieldValue(record, "relativePath") || "").replace(/^\/+|\/+$/g, "");
   }
 
-  function syncDerivedCollections() {
+  function syncDerivedCollections(changedNoteID) {
     if (state.nativeSchema) {
       const noteRecords = [];
       const folderRecords = [];
@@ -1519,7 +1525,7 @@
         note.path = (note.folderPath ? note.folderPath + "/" : "") + cleanFilenameStem(note.title) + ".md";
         return note;
       });
-      refreshLexicalIndex();
+      refreshLexicalIndex(changedNoteID);
       return;
     }
     const noteRecords = [];
@@ -1546,7 +1552,7 @@
     state.folders = Array.from(byPath.values()).sort(function (a, b) {
       return a.path.localeCompare(b.path, undefined, { sensitivity: "base" });
     });
-    refreshLexicalIndex();
+    refreshLexicalIndex(changedNoteID);
   }
 
   function formatDate(date) {
@@ -2854,8 +2860,14 @@
     return state.notes.filter(function (note) { return !isArchived(note.record); }).map(searchableDocument);
   }
 
-  function refreshLexicalIndex() {
+  function refreshLexicalIndex(changedNoteID) {
     if (!lexicalIndex) return;
+    if (changedNoteID) {
+      const note = state.notes.find(function (entry) { return entry.recordName === changedNoteID; });
+      if (note) refreshLexicalNote(note);
+      else lexicalIndex.remove(changedNoteID);
+      return;
+    }
     lexicalIndex.sync(searchCorpus());
   }
 
@@ -2876,7 +2888,6 @@
   function rankedLexicalNotes(query) {
     const key = String(query || "");
     if (lexicalIndex && lexicalIndex.isQueryPending() && activeLexicalQuery === key) return [];
-    refreshLexicalIndex();
     if (!lexicalIndex) return searchLexically(searchCorpus(), query);
     const generation = ++lexicalSearchGeneration;
     const outcome = lexicalIndex.search(query);
@@ -2904,6 +2915,7 @@
     if (!note) return;
     state.semanticRevisionSequence = Math.max(Date.now(), state.semanticRevisionSequence + 1);
     note.semanticRevision = state.semanticRevisionSequence;
+    refreshLexicalNote(note);
     const noteID = String(note.recordName || "");
     const previousRevision = state.semanticResultRevisions.get(noteID);
     if (!noteID || !state.semanticRequestedQuery || previousRevision == null || previousRevision === semanticSourceRevision(note)) return;
@@ -2979,24 +2991,27 @@
     return rankedLexicalNotes(query);
   }
 
-  function searchNotes(query) {
+  function searchNotes(query, limit) {
     const normalized = String(query || "").trim().toLocaleLowerCase();
     if (!normalized) return [];
-    const corpus = searchCorpus();
-    const lexical = rankedLexicalNotes(query).map(function (note) {
+    const lexical = rankedLexicalNotes(query).slice(0, limit).map(function (note) {
       const range = window.ArborPassageAnchor.findLexicalPassageRange(note.body, query);
       return Object.assign({}, note, { _passageCandidate: range ? { body: note.body, range: range } : null });
     });
-    if (state.semanticSearchQuery !== normalized) return lexical;
+    if (lexical.length === limit || state.semanticSearchQuery !== normalized) return lexical;
+    const corpus = searchCorpus();
     const eligibleCorpus = corpus.filter(function (note) { return state.semanticResultRevisions.get(String(note.id)) === note.sourceRevision; });
     const semantic = semanticOnlySuggestions(eligibleCorpus, state.semanticScores, lexical, {
       librarySize: corpus.length,
       topScore: state.semanticTopScore,
       sixthScore: state.semanticSixthScore
     }).map(function (note) {
-      return Object.assign({}, note, { _passageCandidate: state.semanticPassages.get(note.id) || null, _related: true });
+      const range = state.semanticPassages.get(note.id);
+      const validRange = range && range.start >= 0 && range.end > range.start && range.end <= note.body.length;
+      const candidate = validRange ? { body: note.body, range: range, excerpt: note.body.slice(range.start, range.end) } : null;
+      return Object.assign({}, note, { _passageCandidate: candidate, _related: true });
     });
-    return lexical.concat(semantic);
+    return lexical.concat(semantic).slice(0, limit);
   }
 
   async function hydrateSearchBody(note) {
@@ -3017,13 +3032,19 @@
   function scheduleCloudKitTitleSearch(query) {
     window.clearTimeout(state.titleQueryTimer);
     const text = String(query || "").trim();
-    if (!text || state.demo || !state.database || typeof state.database.performQuery !== "function" || !launchLibrary) return;
     const requestId = ++state.titleQueryRequest;
+    const database = state.database;
+    const session = state.accountSession;
+    if (!text || state.demo || !database || typeof database.performQuery !== "function" || !launchLibrary) return;
+    function isCurrent() {
+      return requestId === state.titleQueryRequest && database === state.database && accountSessionCurrent(session);
+    }
     state.titleQueryTimer = window.setTimeout(function () {
+      if (!isCurrent()) return;
       const built = launchLibrary.cloudKitTitleQuery(state.nativeSchema, state.nativeZoneID, text);
       if (!built) return;
-      state.database.performQuery(built).then(function (response) {
-        if (requestId !== state.titleQueryRequest || !accountSessionCurrent(state.accountSession)) return;
+      database.performQuery(built).then(function (response) {
+        if (!isCurrent()) return;
         const records = Array.isArray(response) ? response : (response && response.records) || [];
         let added = false;
         records.forEach(function (record) {
@@ -3124,7 +3145,7 @@
 
   function renderSemanticSearchUpdate(request) {
     const selected = state.searchItems[state.searchActiveIndex] && state.searchItems[state.searchActiveIndex].id;
-    state.searchItems = searchNotes(request.query).slice(0, state.searchPage ? 100 : 8);
+    state.searchItems = searchNotes(request.query, state.searchPage ? 100 : 8);
     if (selected) {
       const index = state.searchItems.findIndex(function (note) { return note.id === selected; });
       state.searchActiveIndex = index >= 0 ? index : -1;
@@ -3135,7 +3156,7 @@
 
   let semanticIndexPromise;
   function loadSemanticIndex() {
-    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-related-margin-20261125-a");
+    if (!semanticIndexPromise) semanticIndexPromise = import("./semantic-search-index.js?v=arb-160-defer-anchor-20261126-a");
     return semanticIndexPromise;
   }
 
@@ -3216,7 +3237,7 @@
   async function finishSemanticResult(request, prepared, rows) {
     try {
       const index = await loadSemanticIndex();
-      const completion = await index.completeSemanticQuery(prepared, rows);
+      const completion = await index.completeSemanticQuery(prepared, rows, { deferPassageAnchors: true });
       releaseSemanticWorker();
       if (semanticSearchIsCurrent(request) && !completion.stale && !semanticCorpusMatches(prepared)) {
         state.semanticQueryVector = null;
@@ -3225,7 +3246,14 @@
         const results = completion.results || [];
         state.semanticQueryVector = completion.queryVector;
         state.semanticScores = new Map(results.map(function (result) { return [result.id, result.score]; }));
-        state.semanticPassages = new Map(results.filter(function (result) { return result.passage; }).map(function (result) { return [result.id, result.passage]; }));
+        state.semanticPassages = new Map();
+        for (const result of results) {
+          if (result.winningChunkRange) state.semanticPassages.set(result.id, {
+            ...result.winningChunkRange,
+            matchProvenance: "semantic",
+            chunkerVersion: index.CHUNKER_VERSION
+          });
+        }
         state.semanticTopScore = Number.isFinite(completion.topNoteScore) ? completion.topNoteScore : null;
         state.semanticSixthScore = Number.isFinite(completion.sixthBestNoteScore) ? completion.sixthBestNoteScore : null;
         state.semanticResultRevisions = new Map(results.map(function (result) { return [String(result.id), result.sourceRevision]; }));
@@ -3297,7 +3325,7 @@
 
   function renderSearchSuggestions(query) {
     const list = $("search-suggestions"); const input = $("global-search-input"); const text = String(query || "").trim();
-    scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
+    scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text, 8) : [];
     restoreSearchSelection(text);
     if (!text) { state.searchActiveIndex = -1; input.removeAttribute("aria-activedescendant"); setMotionVisibility(list, false); list.innerHTML = ""; return; }
     if (!state.searchItems.length && lexicalIndex && lexicalIndex.isQueryPending()) {
@@ -3364,7 +3392,7 @@
     const input = $("expanded-search-input");
     if (document.activeElement !== input) input.value = state.searchQuery;
     const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query); scheduleCloudKitTitleSearch(query);
-    state.searchItems = searchNotes(query).slice(0, 100);
+    state.searchItems = searchNotes(query, 100);
     restoreSearchSelection(query);
     const results = $("expanded-search-results");
     const waitingForIndex = query && lexicalIndex && lexicalIndex.isQueryPending();
@@ -3569,6 +3597,7 @@
             body: candidate.body,
             start: candidate.range.start,
             end: candidate.range.end,
+            chunkerVersion: candidate.range.chunkerVersion,
             matchProvenance: candidate.range.matchProvenance
           });
         } catch (_) { anchor = null; }
@@ -7095,6 +7124,7 @@
       : documentValue.title + "\n\n" + documentValue.body;
     note.preview = previewText(documentValue.body);
     note.previewUnavailable = false;
+    refreshLexicalNote(note);
     const titleInput = $("note-title");
     if (titleInput && document.activeElement !== titleInput) {
       titleInput.value = documentValue.title === "Untitled" && !documentValue.body ? "" : documentValue.title;
@@ -8426,7 +8456,6 @@
       note.editorBody = note.body;
       note.preview = previewText(note.body);
       advanceSemanticRevision(note);
-      refreshLexicalNote(note);
     }
     persistCurrentDraft();
     rememberPendingEdit(recordName, currentMarkdown());
@@ -8536,7 +8565,7 @@
       if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(saved.recordName);
       rememberSavedRevision(saved.recordName, body, saved);
       rememberSyncBaseline(saved.recordName, documentForSaveBody(body, saved));
-      syncDerivedCollections();
+      syncDerivedCollections(saved.recordName);
       return saved;
     }
     const oldBodyFingerprint = String(fieldValue(record, "contentFingerprint") || "");
@@ -8579,7 +8608,7 @@
     if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(saved.recordName);
     rememberSavedRevision(saved.recordName, body, saved);
     rememberSyncBaseline(saved.recordName, documentForSaveBody(body, saved));
-    syncDerivedCollections();
+    syncDerivedCollections(saved.recordName);
     return saved;
   }
 
@@ -9700,6 +9729,7 @@
       state.bodyCache.set(note.recordName, state.nativeSchema
         ? String(desiredContent.body || "")
         : normalizedTitle(desiredContent.title) + "\n\n" + String(desiredContent.body || ""));
+      advanceSemanticRevision(note);
       writeDraft(note.recordName, { title: desiredContent.title, body: desiredContent.body });
 
       if (isSelected) {

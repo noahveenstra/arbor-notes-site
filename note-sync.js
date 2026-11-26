@@ -105,6 +105,35 @@
     return { merged: { title: title.merged, body: body.merged }, conflict: false };
   }
 
+  // True when every remote change is already present in local text. A later
+  // keystroke on this device contains the copy just saved here; a deletion or
+  // a different word on another device does not.
+  function remoteTextContained(baseText, localText, remoteText) {
+    const base = String(baseText || "");
+    const local = String(localText || "");
+    const remote = String(remoteText || "");
+    if (remote === local || remote === base) return true;
+    const baseLines = base.split("\n");
+    const localLines = local.split("\n");
+    const remoteLines = remote.split("\n");
+    if (remoteLines.length > localLines.length) return false;
+    for (let index = 0; index < remoteLines.length; index += 1) {
+      const baseLine = index < baseLines.length ? baseLines[index] : "";
+      const remoteLine = remoteLines[index];
+      const localLine = localLines[index];
+      if (remoteLine === localLine || remoteLine === baseLine) continue;
+      if (remoteLine.length < baseLine.length && baseLine.startsWith(remoteLine) && localLine.startsWith(baseLine)) return false;
+      if (!localLine.startsWith(remoteLine)) return false;
+    }
+    return true;
+  }
+
+  function remoteEditsContained(base, local, remote) {
+    if (!base || !local || !remote) return false;
+    return remoteTextContained(base.title, local.title, remote.title)
+      && remoteTextContained(base.body, local.body, remote.body);
+  }
+
   function isRecordConflict(error) {
     if (!error) return false;
     const values = [error.reason, error.message, error.description, error.serverErrorCode, error.code, error.errorCode];
@@ -113,5 +142,10 @@
     return /OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED|CONFLICT/i.test(values.filter(Boolean).join(" "));
   }
 
-  return Object.freeze({ mergeText: mergeText, mergeDocument: mergeDocument, isRecordConflict: isRecordConflict });
+  return Object.freeze({
+    mergeText: mergeText,
+    mergeDocument: mergeDocument,
+    remoteEditsContained: remoteEditsContained,
+    isRecordConflict: isRecordConflict
+  });
 });

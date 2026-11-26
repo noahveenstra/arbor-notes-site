@@ -189,6 +189,7 @@
     cascadeTimer: 0,
     cascadeRepaintPending: false,
     proofreadingHeldTrigger: null,
+    proofreadingDomDepth: 0,
     cascadeGeneration: 0,
     cascadeSentences: new Map(),
     cascadeDownloadAnnounced: false,
@@ -3436,9 +3437,11 @@
     const candidate = result && result._passageCandidate;
     const session = state.accountSession;
     if ($("search-dialog").open) $("search-dialog").close();
-    if (state.searchPage) { state.searchPage = false; frame.classList.remove("is-search-expanded"); }
+    const leavingSearchPage = state.searchPage;
+    if (leavingSearchPage) { state.searchPage = false; frame.classList.remove("is-search-expanded"); }
     state.showingArchive = false;
     state.selectedFolder = "";
+    if (leavingSearchPage) renderAll();
     openNote(recordName).then(async function (opened) {
       if (!opened || !candidate || !accountSessionCurrent(session)) { renderAll(); return; }
       const note = state.notes.find(function (item) { return item.recordName === recordName; });
@@ -4219,6 +4222,12 @@
       state.autoCorrectionApplying = false;
       const acceptedSuggestion = state.proofreadingAccepting;
       state.proofreadingAccepting = false;
+      // Underlines and highlight cleanup mutate the contenteditable. WebKit
+      // fires input for that with no input data, but the serialized note did
+      // not change. Keep real input events such as a trailing space: Markdown
+      // omits that space, but proofreading needs its word boundary.
+      if (!autoCorrection && !acceptedSuggestion && !state.selectionReviewApplying &&
+          (state.proofreadingDomDepth > 0 || (event.isTrusted && event.data == null && editorTextUnchanged()))) return;
       cancelAutomaticSpellingContextRequests();
       if (!state.selectionReviewApplying) closeSelectionReview(false);
       const history = autoCorrection
@@ -4443,7 +4452,17 @@
     return remainder;
   }
 
+  function withProofreadingDom(work) {
+    state.proofreadingDomDepth += 1;
+    try { return work(); }
+    finally { state.proofreadingDomDepth = Math.max(0, state.proofreadingDomDepth - 1); }
+  }
+
   function unwrapProofreadingMarks(body) {
+    withProofreadingDom(function () { unwrapProofreadingMarksNow(body); });
+  }
+
+  function unwrapProofreadingMarksNow(body) {
     const saved = captureProofreadingSelection(body);
     body.querySelectorAll("[data-correction-id]").forEach(function (mark) {
       if (saved && (saved.anchorNode === mark || saved.focusNode === mark)) {
@@ -4714,8 +4733,10 @@
     window.clearTimeout(correction.clearTimer);
     window.clearTimeout(correction.removeTimer);
     automaticCorrectionHighlights.delete(wrapper);
-    wrapper.replaceWith(document.createTextNode(correction.original));
-    block.normalize();
+    withProofreadingDom(function () {
+      wrapper.replaceWith(document.createTextNode(correction.original));
+      block.normalize();
+    });
     body.focus({ preventScroll: true });
     correctionSelectionAtBlockOffset(block, prefixOffset + Math.min(clickedOffset, correction.original.length));
     announceStatus("Restored “" + correction.replacement + "” to “" + correction.original + "”.");
@@ -4738,13 +4759,15 @@
         if (!wrapper.isConnected) return;
         const saved = captureCorrectionSelection(body);
         const parent = wrapper.parentNode;
-        const proofreadingContext = opts.proofreadingContextWrapper;
-        if (proofreadingContext && proofreadingContext.isConnected) {
-          proofreadingContext.replaceWith.apply(proofreadingContext, Array.from(proofreadingContext.childNodes));
-        }
-        wrapper.replaceWith.apply(wrapper, Array.from(wrapper.childNodes));
-        if (parent) parent.normalize();
-        if (saved) restoreCorrectionSelection(body, saved);
+        withProofreadingDom(function () {
+          const proofreadingContext = opts.proofreadingContextWrapper;
+          if (proofreadingContext && proofreadingContext.isConnected) {
+            proofreadingContext.replaceWith.apply(proofreadingContext, Array.from(proofreadingContext.childNodes));
+          }
+          wrapper.replaceWith.apply(wrapper, Array.from(wrapper.childNodes));
+          if (parent) parent.normalize();
+          if (saved) restoreCorrectionSelection(body, saved);
+        });
         automaticCorrectionHighlights.delete(wrapper);
         if (opts.recheckProofreading) scheduleProofreading(body, 0);
       };
@@ -4783,7 +4806,7 @@
     fragment.appendChild(highlight);
     let suffixNode = null;
     if (suffix) { suffixNode = document.createTextNode(suffix); fragment.appendChild(suffixNode); }
-    node.replaceWith(fragment);
+    withProofreadingDom(function () { node.replaceWith(fragment); });
     if (target.boundary === "return" && savedSelection) {
       restoreProofreadingSelection(body, savedSelection);
     } else if (savedTextSelection) {
@@ -5450,6 +5473,10 @@
     });
     appendCascadeEntries(entries, nodes, pending.body, pending.recordName);
     entries.sort(function (left, right) { return left.nodeIndex - right.nodeIndex || right.item.start - left.item.start; });
+    withProofreadingDom(function () { paintProofreadingMarks(entries, nodes, result, pending, savedSelection); });
+  }
+
+  function paintProofreadingMarks(entries, nodes, result, pending, savedSelection) {
     entries.forEach(function (entry, index) {
       const node = nodes[entry.nodeIndex];
       if (!node || !node.parentNode || entry.item.start < 0 || entry.item.end > node.length || entry.item.start >= entry.item.end) return;
@@ -5942,6 +5969,8 @@
     const parent = marker.parentNode;
     let highlight = null;
     closeCorrectionPopover(false);
+    state.proofreadingDomDepth += 1;
+    try {
     if (option.action === "remove-duplicate") {
       const before = marker.previousSibling;
       if (before && before.nodeType === Node.TEXT_NODE) before.nodeValue = before.nodeValue.replace(/\s+$/, "");
@@ -5968,6 +5997,9 @@
       marker.replaceWith(highlight);
       const range = document.createRange(); range.selectNodeContents(highlight); range.collapse(false);
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+    }
+    } finally {
+      state.proofreadingDomDepth = Math.max(0, state.proofreadingDomDepth - 1);
     }
     body.focus({ preventScroll: true });
     state.proofreadingAccepting = option.action !== "remove-duplicate";
@@ -7844,6 +7876,9 @@
       historyContext ? historyContext.nativeZoneID : state.nativeZoneID);
     const localDocument = documentForSaveBody(body, record);
     const merged = noteSync.mergeDocument(baseline, localDocument, currentDocument);
+    if (merged.conflict && noteSync.remoteEditsContained(baseline, localDocument, currentDocument)) {
+      return saveRecord(current, saveBodyForDocument(localDocument, current), options, historyContext, attempt + 1);
+    }
     if (merged.conflict) {
       state.pendingRemoteRecords.set(record.recordName, current);
       const error = new Error("This note has overlapping edits on two devices. Arbor kept the newer iCloud copy and saved your edits as a local draft on this device.");
@@ -8038,6 +8073,19 @@
     rememberSyncBaseline(edit.recordName, { title: edit.base.title, body: edit.base.body });
   }
 
+  function adoptSavedPendingBase(recordName, saved, savedDocument) {
+    if (!launchLibrary || !recordName || !saved || !saved.recordChangeTag || !savedDocument) return;
+    if (!pendingEditFor(recordName)) return;
+    state.editQueue = launchLibrary.rebasePendingEdit(state.editQueue, recordName, {
+      recordChangeTag: String(saved.recordChangeTag),
+      modifiedAt: jsonSafeModifiedAt(fieldValue(saved, "modifiedAt")),
+      contentFingerprint: String(fieldValue(saved, "contentFingerprint") || ""),
+      title: savedDocument.title,
+      body: savedDocument.body
+    });
+    storeEditQueue();
+  }
+
   function recordForPendingEdit(record, edit) {
     if (!record) return null;
     const base = edit && edit.base;
@@ -8148,6 +8196,15 @@
     }
     clearSaveProblem(recordName);
     renderNotes();
+  }
+
+  function editorTextUnchanged() {
+    if (!state.editor || !state.selectedRecordName) return false;
+    const note = state.notes.find(function (item) { return item.recordName === state.selectedRecordName; });
+    if (!note) return false;
+    const titleField = $("note-title");
+    const title = normalizedTitle(titleField ? titleField.value : "");
+    return title === normalizedTitle(note.title) && String(state.editor.getMarkdown() || "") === String(note.editorBody || "");
   }
 
   function scheduleSave(bodyChanged, historyOptions) {
@@ -8413,12 +8470,21 @@
         const selectedNote = state.notes.find(function (note) { return note.recordName === recordName; });
         if (state.nativeSchema && selectedNote) await ensureFullNativeRecord(selectedNote);
         if (superseded()) return;
-        const latest = recordForPendingEdit(state.records.get(recordName) || recordSnapshot, pendingEditFor(recordName)) || basedRecord;
-        rememberPendingEditBaseline(pendingEditFor(recordName));
+        const pendingNow = pendingEditFor(recordName);
+        const liveRecord = state.records.get(recordName) || recordSnapshot;
+        // A save chained behind this one captured its tag before the previous
+        // save finished. Once that save is stored, use its tag. The snapshot
+        // from when this save was scheduled is only a fallback for a pending
+        // edit that still names the pre-save revision.
+        const latest = pendingNow
+          ? (recordForPendingEdit(liveRecord, pendingNow) || basedRecord)
+          : (liveRecord || basedRecord);
+        rememberPendingEditBaseline(pendingNow);
         const submittedDocument = documentForSaveBody(body, latest);
         const saved = await saveRecord(latest, body);
         if (superseded()) return;
         const savedDocument = state.syncBaselines.get(recordName) || submittedDocument;
+        adoptSavedPendingBase(recordName, saved, savedDocument);
         if (body && typeof body === "object") {
           rememberRecordBody(recordName, state.nativeSchema ? savedDocument.body : savedDocument.title + "\n\n" + savedDocument.body, session);
         }

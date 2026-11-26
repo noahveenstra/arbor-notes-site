@@ -81,6 +81,21 @@
     return normalizeEditQueue(queue).filter(function (item) { return item.recordName !== recordName; });
   }
 
+  // Keep the unsent text, but point its base at the revision this device just
+  // saved. The next save then sends that recordChangeTag instead of the one
+  // the burst started from.
+  function rebasePendingEdit(queue, recordName, base) {
+    const normalized = normalizeEditBase(base);
+    if (!recordName || !normalized || !normalized.recordChangeTag) return normalizeEditQueue(queue);
+    let found = false;
+    const next = normalizeEditQueue(queue).map(function (edit) {
+      if (edit.recordName !== recordName) return edit;
+      found = true;
+      return Object.assign({}, edit, { base: normalized });
+    });
+    return found ? next : normalizeEditQueue(queue);
+  }
+
   function isNetworkSaveFailure(error) {
     const values = [error && error.reason, error && error.message, error && error.description, error && error.code, error && error.serverErrorCode];
     const text = values.filter(Boolean).join(" ");
@@ -122,6 +137,7 @@
     normalizeEditBase: normalizeEditBase,
     upsertPendingEdit: upsertPendingEdit,
     removePendingEdit: removePendingEdit,
+    rebasePendingEdit: rebasePendingEdit,
     isNetworkSaveFailure: isNetworkSaveFailure,
     cloudKitTitleQuery: cloudKitTitleQuery,
     searchBody: searchBody

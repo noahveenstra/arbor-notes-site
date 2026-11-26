@@ -2880,6 +2880,29 @@
   let lexicalSearchGeneration = 0;
   let activeLexicalQuery = null;
 
+  let searchPress = null;
+  let searchRenderPending = false;
+
+  function deferPressedSearchRender() {
+    if (!searchPress || !searchPress.row.isConnected || !accountSessionCurrent(searchPress.session)) return false;
+    searchRenderPending = true;
+    return true;
+  }
+
+  function releaseSearchPress(event) {
+    const press = searchPress;
+    if (!press || (event.pointerId != null && event.pointerId !== press.pointerId)) return;
+    // Let the native click reach its original row before rebuilding the list.
+    window.setTimeout(function () {
+      if (searchPress !== press) return;
+      searchPress = null;
+      if (searchRenderPending) {
+        searchRenderPending = false;
+        rerenderActiveSearch();
+      }
+    }, 0);
+  }
+
   function rerenderActiveSearch() {
     if (state.searchPage) renderSearchPage();
     else if ($("search-dialog") && $("search-dialog").open) renderSearchSuggestions($("global-search-input").value);
@@ -3014,15 +3037,8 @@
     return lexical.concat(semantic).slice(0, limit);
   }
 
-  async function hydrateSearchBody(note) {
-    if (!note || !state.database) return;
-    if (state.nativeSchema) await ensureNativeTextBody(note);
-    else await ensureWebTextBody(note);
-  }
-
-  async function hydrateSearchCorpus(request) {
-    if (request.id !== state.semanticRequestId || request.normalized !== state.semanticRequestedQuery) return;
-    renderNotes();
+  function runSemanticSearch(request) {
+    if (!semanticSearchIsCurrent(request)) return;
     if (state.semanticWorkerUnavailable) {
       state.semanticLoadingQuery = ""; state.semanticErrorQuery = request.normalized;
       if (state.searchPage) renderSearchPage(); else if ($("search-dialog").open) renderSearchSuggestions(request.query);
@@ -3094,7 +3110,7 @@
     state.semanticCurrentRequest = request;
     window.clearTimeout(state.semanticTimer);
     window.clearTimeout(state.semanticIndexTimer);
-    state.semanticTimer = window.setTimeout(function () { hydrateSearchCorpus(request); }, 180);
+    state.semanticTimer = window.setTimeout(function () { runSemanticSearch(request); }, 180);
   }
 
   function semanticSearchIsCurrent(request) {
@@ -3144,6 +3160,7 @@
   }
 
   function renderSemanticSearchUpdate(request) {
+    if (deferPressedSearchRender()) return;
     const selected = state.searchItems[state.searchActiveIndex] && state.searchItems[state.searchActiveIndex].id;
     state.searchItems = searchNotes(request.query, state.searchPage ? 100 : 8);
     if (selected) {
@@ -3324,6 +3341,7 @@
   }
 
   function renderSearchSuggestions(query) {
+    if (deferPressedSearchRender()) return;
     const list = $("search-suggestions"); const input = $("global-search-input"); const text = String(query || "").trim();
     scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text, 8) : [];
     restoreSearchSelection(text);
@@ -3389,6 +3407,7 @@
   }
 
   function renderSearchPage() {
+    if (deferPressedSearchRender()) return;
     const input = $("expanded-search-input");
     if (document.activeElement !== input) input.value = state.searchQuery;
     const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query); scheduleCloudKitTitleSearch(query);
@@ -10767,6 +10786,17 @@
   }
 
   function wireEvents() {
+    for (const results of [$("search-suggestions"), $("expanded-search-results")]) {
+      results.addEventListener("pointerdown", function (event) {
+        if (!event.isPrimary || event.button !== 0) return;
+        const row = event.target.closest("[data-search-note-id]");
+        if (row) searchPress = { row: row, session: state.accountSession, pointerId: event.pointerId };
+      });
+    }
+    window.addEventListener("pointerup", releaseSearchPress, true);
+    window.addEventListener("pointercancel", releaseSearchPress, true);
+    window.addEventListener("blur", releaseSearchPress);
+
     bindCorrectionPopover();
     bindSelectionReview();
     $("welcome-continue").addEventListener("click", continueWelcome);

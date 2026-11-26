@@ -123,7 +123,7 @@
     accountCacheSuspended: false,
     layout: loadPreference("arbor.web.layout.v1", { sidebarWidth: 195, listWidth: 340, sidebarCollapsed: false }),
     appearance: loadPreference("arbor.web.appearance.v1", { bodyWidth: 70, bodySize: 18, theme: "system", font: "sans", headerFont: "sans", bodyFont: "sans", textSize: "small", margins: "compact" }),
-    preferences: loadPreference("arbor.web.preferences.v1", { tabsEnabled: false, confirmFolderArchive: true, checkGrammarSuggestions: true, checkSentenceCapitalization: true, autoCorrectHighConfidence: true, noteSortOrder: "created-newest" }),
+    preferences: loadPreference("arbor.web.preferences.v1", { tabsEnabled: false, confirmFolderArchive: true, checkGrammarSuggestions: true, checkSentenceCapitalization: false, autoCorrectHighConfidence: true, noteSortOrder: "created-newest" }),
     accountSettings: loadPreference("arbor.web.account.v1", { name: "" }),
     searchItems: [],
     searchActiveIndex: -1,
@@ -176,6 +176,9 @@
     selectionReviewApplying: false,
     proofreadingCorrections: new Map(),
     proofreadingIgnored: new Map(),
+    proofreadingLearning: null,
+    proofreadingLearningApi: null,
+    proofreadingLearningStore: null,
     proofreadingActive: null,
     proofreadingPopoverSessionId: 0,
     proofreadingKeyboardOpen: false,
@@ -185,6 +188,7 @@
     cascadeWorker: null,
     cascadeTimer: 0,
     cascadeRepaintPending: false,
+    proofreadingHeldTrigger: null,
     cascadeGeneration: 0,
     cascadeSentences: new Map(),
     cascadeDownloadAnnounced: false,
@@ -354,7 +358,7 @@
     state.preferences.tabsEnabled = Boolean(state.preferences.tabsEnabled);
     state.preferences.confirmFolderArchive = state.preferences.confirmFolderArchive !== false;
     state.preferences.checkGrammarSuggestions = state.preferences.checkGrammarSuggestions !== false;
-    state.preferences.checkSentenceCapitalization = state.preferences.checkSentenceCapitalization !== false;
+    state.preferences.checkSentenceCapitalization = state.preferences.checkSentenceCapitalization === true;
     state.preferences.autoCorrectHighConfidence = state.preferences.autoCorrectHighConfidence !== false;
     state.preferences.noteSortOrder = noteSorting.normalizeOrder(state.preferences.noteSortOrder);
     state.accountSettings.name = String(state.accountSettings.name || "").slice(0, 80);
@@ -462,6 +466,11 @@
     state.saveTimer = null;
     try { await libraryWriteChain; } catch (_) {}
     await closeLibraryCacheDB();
+    try { if (state.proofreadingLearningStore) await state.proofreadingLearningStore.close(); } catch (_) {}
+    state.proofreadingLearningStore = null;
+    state.proofreadingIgnored = new Map();
+    if (state.proofreadingLearningApi) state.proofreadingLearning = state.proofreadingLearningApi.emptyLearning();
+    renderLearnedProofreading();
   }
 
   function discardInMemoryLibrary() {
@@ -4208,9 +4217,16 @@
     const onInput = function (event) {
       const autoCorrection = state.autoCorrectionApplying;
       state.autoCorrectionApplying = false;
+      const acceptedSuggestion = state.proofreadingAccepting;
+      state.proofreadingAccepting = false;
       cancelAutomaticSpellingContextRequests();
       if (!state.selectionReviewApplying) closeSelectionReview(false);
-      scheduleSave(true, autoCorrection ? { label: "Auto-correct", groupKey: null } : null);
+      const history = autoCorrection
+        ? { label: "Auto-correct", groupKey: null }
+        : acceptedSuggestion
+          ? { label: "Accept suggestion", groupKey: null }
+          : null;
+      scheduleSave(true, history);
       const returnBoundary = state.autoCorrectionReturnBoundary;
       state.autoCorrectionReturnBoundary = null;
       const trigger = autoCorrection ? null : (autoCorrectionTrigger(body, event) || autoCorrectionReturnTrigger(body, event, returnBoundary));
@@ -4292,7 +4308,7 @@
     if (state.proofreadingWorker) return state.proofreadingWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./proofreading-worker.js?v=arb-190-instant-launch-20261125-a", { name: "arbor-local-proofreading" });
+      const worker = new Worker("./proofreading-worker.js?v=arb-proofreading-real-models-20261126-a", { name: "arbor-local-proofreading" });
       worker.addEventListener("message", onProofreadingMessage);
       worker.addEventListener("error", function (event) {
         console.warn("Local writing suggestions could not start.", event.message || "Worker error");
@@ -4443,6 +4459,38 @@
     // offsets across paragraphs or empty list rows.
     normalizeProofreadingTextNodes(body, saved);
     restoreProofreadingSelection(body, saved);
+  }
+
+  function proofreadingLearningBlocks(item, word, patternKey) {
+    const api = state.proofreadingLearningApi;
+    const learning = state.proofreadingLearning;
+    if (!api || !learning || !item) return false;
+    return Boolean(api.suppression(learning, {
+      pattern: patternKey,
+      word: word,
+      transformClass: item.transformClass || item.kind || ""
+    }));
+  }
+
+  function commitProofreadingLearning(next) {
+    const api = state.proofreadingLearningApi;
+    if (!api) return;
+    state.proofreadingLearning = api.normalizeLearning(next);
+    renderLearnedProofreading();
+    if (!state.proofreadingLearningStore) return;
+    state.proofreadingLearningStore.save(state.proofreadingLearning).catch(function (error) {
+      console.warn("Could not save proofreading preferences on this device.", error);
+    });
+  }
+
+  function proofreadingSingleWord(word) {
+    return /^[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*$/u.test(String(word || ""));
+  }
+
+  function showIgnoreEverywhere(entry) {
+    if (!entry || entry.kind === "capitalization" || entry.kind === "fragment") return false;
+    if (!entry.options || !entry.options.length) return false;
+    return proofreadingSingleWord(entry.word);
   }
 
   function ignoredCorrectionKey(text, item) {
@@ -4771,7 +4819,7 @@
     if (state.cascadeWorker) return state.cascadeWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./proofreading-cascade-worker.js?v=arb-always-on-proofreading-20261125-b", {
+      const worker = new Worker("./proofreading-cascade-worker.js?v=arb-proofreading-real-models-20261126-a", {
         type: "module",
         name: "arbor-always-on-proofreading"
       });
@@ -4824,6 +4872,11 @@
       || (state.automaticSpellingRequests && state.automaticSpellingRequests.size > 0);
   }
 
+  function autocorrectCheckInFlight() {
+    const pending = state.proofreadingPending;
+    return Boolean(pending && pending.autoCorrectionTarget);
+  }
+
   function cascadeHasUnpaintedSpan(body) {
     let found = false;
     state.cascadeSentences.forEach(function (item) {
@@ -4843,7 +4896,11 @@
 
   function flushCascadeRepaint(body) {
     if (!body || body !== $("note-body")) return;
-    if (proofreadingUiBusy()) {
+    // A grammar repaint starts a new spelling check and drops the one that
+    // still owes this keystroke an auto-correction. The trigger is stored
+    // before that check's timer fires, so a fast Harper result cannot cancel
+    // it in the gap. Wait until the correction is applied or abandoned.
+    if (proofreadingUiBusy() || autocorrectCheckInFlight() || state.proofreadingHeldTrigger) {
       state.cascadeRepaintPending = true;
       return;
     }
@@ -4891,6 +4948,8 @@
           kind: span.kind || "grammar",
           word: word,
           message: span.message || "Grammar suggestion",
+          transformClass: span.transformClass || span.ruleId || span.kind || "grammar",
+          patternLabel: (span.message || "Grammar suggestion") + ": " + word,
           options: span.detectOnly || replacement == null ? [] : [{
             label: replacement === "" ? "Delete" : replacement,
             replacement: replacement
@@ -4901,7 +4960,7 @@
         const sameOccurrenceIgnored = ignored.has(key) || ["spelling", "grammar", "capitalization"].some(function (kind) {
           return ignored.has(ignoredCorrectionKey(position.node.nodeValue, Object.assign({}, issue, { kind: kind })));
         });
-        if (sameOccurrenceIgnored) return;
+        if (sameOccurrenceIgnored || proofreadingLearningBlocks(issue, word, key)) return;
         entries.push({ nodeIndex: position.nodeIndex, source: position.node.nodeValue, item: issue, key: key });
       });
     });
@@ -4948,7 +5007,11 @@
           text: sentence.text,
           protectedTerms: dictionaryTerms(),
           displayName: accountDisplayName(),
-          skipModels: navigator.webdriver === true
+          allowCapitalization: state.preferences.checkSentenceCapitalization === true,
+          skipModels: navigator.webdriver === true,
+          acceptBoosts: state.proofreadingLearningApi && state.proofreadingLearning
+            ? state.proofreadingLearningApi.boostMap(state.proofreadingLearning)
+            : {}
         });
       });
     });
@@ -4972,6 +5035,13 @@
 
   function scheduleProofreading(body, delay, autoCorrection) {
     if (!body || !state.selectedRecordName || body !== $("note-body")) return;
+    if (autoCorrection) state.proofreadingHeldTrigger = autoCorrection;
+    let trigger = autoCorrection || state.proofreadingHeldTrigger || null;
+    const pendingCorrection = state.proofreadingPending;
+    if (!trigger && pendingCorrection && pendingCorrection.body === body && pendingCorrection.autoCorrectionTrigger
+        && resolveAutoCorrectionTarget(body, pendingCorrection.autoCorrectionTrigger)) {
+      trigger = pendingCorrection.autoCorrectionTrigger;
+    }
     window.clearTimeout(state.proofreadingTimer);
     const requestId = ++state.proofreadingRequestId;
     const recordName = state.selectedRecordName;
@@ -4986,7 +5056,8 @@
       // track the unwrap/normalize mutation instead.
       const nodes = proofreadingTextNodes(body);
       const blocks = nodes.map(function (node) { return node.nodeValue || ""; });
-      const autoCorrectionTarget = autoCorrection ? resolveAutoCorrectionTarget(body, autoCorrection) : null;
+      const autoCorrectionTarget = trigger ? resolveAutoCorrectionTarget(body, trigger) : null;
+      if (trigger && !autoCorrectionTarget) state.proofreadingHeldTrigger = null;
       state.proofreadingPending = {
         requestId: requestId,
         recordName: recordName,
@@ -4994,7 +5065,7 @@
         nodes: nodes,
         blocks: blocks,
         autoCorrectionTarget: autoCorrectionTarget,
-        autoCorrectionTrigger: autoCorrectionTarget ? autoCorrection : null
+        autoCorrectionTrigger: autoCorrectionTarget ? trigger : null
       };
       worker.postMessage({
         type: "check",
@@ -5003,7 +5074,7 @@
         blocks: blocks,
         checkGrammarSuggestions: state.preferences.checkGrammarSuggestions,
         checkSentenceCapitalization: state.preferences.checkSentenceCapitalization,
-        autocorrect: autoCorrectionTarget ? { word: autoCorrectionTarget.word, before: autoCorrection.before } : null,
+        autocorrect: autoCorrectionTarget ? { word: autoCorrectionTarget.word, before: trigger.before } : null,
         personalWords: autoCorrectionTarget ? dictionaryTerms() : []
       });
     }, wait);
@@ -5032,6 +5103,7 @@
     };
     pending.timeoutId = window.setTimeout(function () {
       if (state.automaticSpellingRequests.get(requestId) === pending) state.automaticSpellingRequests.delete(requestId);
+      if (state.cascadeRepaintPending) flushCascadeRepaint($("note-body"));
     }, AUTO_CORRECTION_CONTEXT_TIMEOUT_MS);
     state.automaticSpellingRequests.set(requestId, pending);
     try {
@@ -5066,10 +5138,12 @@
       dictionaryTerms()
     );
     const currentTarget = resolveAutoCorrectionTarget(pending.body, pending.trigger);
-    if (!correction || !currentTarget) return;
-    unwrapProofreadingMarks(pending.body);
-    const target = resolveAutoCorrectionTarget(pending.body, pending.trigger);
-    if (!target || !applyAutomaticCorrection(pending.body, target, correction)) scheduleProofreading(pending.body, 0);
+    if (correction && currentTarget) {
+      unwrapProofreadingMarks(pending.body);
+      const target = resolveAutoCorrectionTarget(pending.body, pending.trigger);
+      if (!target || !applyAutomaticCorrection(pending.body, target, correction)) scheduleProofreading(pending.body, 0);
+    }
+    if (state.cascadeRepaintPending) flushCascadeRepaint($("note-body"));
   }
 
   function autoCorrectionIssueForTarget(pending, results) {
@@ -5283,7 +5357,10 @@
           state.capitalizationContextCache.set(cacheKey, cached);
         });
         state.capitalizationContextLastKey = pending.key;
-        if (changes.length) scheduleProofreading(body, 0);
+        if (changes.length) {
+          if (autocorrectCheckInFlight()) state.cascadeRepaintPending = true;
+          else scheduleProofreading(body, 0);
+        }
       }
     }
 
@@ -5304,18 +5381,22 @@
     if (result.type !== "result" || !Array.isArray(result.results) || state.selectedRecordName !== pending.recordName || $("note-body") !== pending.body) return;
     const nodes = proofreadingTextNodes(pending.body);
     if (nodes.length !== pending.blocks.length || nodes.some(function (node, index) { return node.nodeValue !== pending.blocks[index]; })) {
-      scheduleProofreading(pending.body, 0);
+      scheduleProofreading(pending.body, 0, pending.autoCorrectionTrigger || undefined);
       return;
     }
     if (pending.autoCorrectionTarget && result.autocorrection) {
       state.proofreadingPending = null;
-      if (applyAutomaticCorrection(pending.body, pending.autoCorrectionTarget, result.autocorrection)) return;
+      if (applyAutomaticCorrection(pending.body, pending.autoCorrectionTarget, result.autocorrection)) {
+        state.proofreadingHeldTrigger = null;
+        return;
+      }
       state.proofreadingPending = pending;
     }
     if (pending.autoCorrectionTarget && pending.autoCorrectionTrigger && !result.autocorrection) {
       const spellingIssue = autoCorrectionIssueForTarget(pending, result.results);
       if (spellingIssue) requestAutomaticSpellingContextCorrection(pending.body, pending.recordName, pending.autoCorrectionTrigger, spellingIssue);
     }
+    if (pending.autoCorrectionTarget) state.proofreadingHeldTrigger = null;
     state.proofreadingPending = null;
     const savedSelection = captureProofreadingSelection(pending.body);
     closeCorrectionPopover(false);
@@ -5328,7 +5409,8 @@
       (items || []).forEach(function (item) {
         const key = ignoredCorrectionKey(source, item);
         if ((item.kind === "spelling" || item.kind === "grammar") && proofreadingDictionary.hasDictionaryEntry(dictionaryTerms(), item.word)) return;
-        if (!ignored.has(key)) entries.push({ nodeIndex: nodeIndex, source: source, item: item, key: key });
+        if (!item.transformClass) item.transformClass = item.kind || "grammar";
+        if (!ignored.has(key) && !proofreadingLearningBlocks(item, item.word, key)) entries.push({ nodeIndex: nodeIndex, source: source, item: item, key: key });
       });
     });
     Array.from(state.capitalizationContextCache.entries()).forEach(function (pair) {
@@ -5382,7 +5464,9 @@
       mark.appendChild(matchNode);
       state.proofreadingCorrections.set(id, {
         id: id, marker: mark, recordName: pending.recordName, kind: entry.item.kind,
-        word: entry.item.word, message: entry.item.message, options: entry.item.options || [], occurrenceKey: entry.key
+        word: entry.item.word, message: entry.item.message, options: entry.item.options || [], occurrenceKey: entry.key,
+        transformClass: entry.item.transformClass || entry.item.kind,
+        patternLabel: entry.item.patternLabel || ((entry.item.message || "Suggestion") + ": " + entry.item.word)
       });
     });
     // splitText() and wrapping preserve the browser's live selection range.
@@ -5762,9 +5846,15 @@
     const ignore = $("correction-ignore");
     ignore.setAttribute("aria-label", "Ignore this occurrence");
     ignore.hidden = false;
+    const ignoreEverywhere = $("correction-ignore-everywhere");
+    if (ignoreEverywhere) {
+      ignoreEverywhere.hidden = !showIgnoreEverywhere(entry);
+      ignoreEverywhere.setAttribute("aria-label", "Ignore this word everywhere");
+    }
     const addToDictionary = $("correction-add-dictionary");
+    const offerDictionary = entry.kind === "spelling" || (entry.kind === "grammar" && showIgnoreEverywhere(entry));
     if (addToDictionary) {
-      addToDictionary.hidden = entry.kind !== "spelling";
+      addToDictionary.hidden = !offerDictionary;
       addToDictionary.setAttribute("aria-label", "Add " + entry.word + " to your proofreading dictionary");
     }
     popover.dataset.kind = entry.kind;
@@ -5772,7 +5862,9 @@
     else popover.appendChild(actions);
     $("correction-announcement").textContent = (entry.kind === "spelling" ? "Spelling suggestion" : entry.message)
       + ". Current text: " + entry.word + ". " + entry.options.map(function (option) { return option.label; }).join(", ")
-      + ". Ignore this occurrence." + (entry.kind === "spelling" ? " Add to Dictionary." : "");
+      + ". Ignore this occurrence."
+      + (showIgnoreEverywhere(entry) ? " Ignore this word everywhere." : "")
+      + (entry.kind === "spelling" || (entry.kind === "grammar" && showIgnoreEverywhere(entry)) ? " Add to Dictionary." : "");
     popover.hidden = false;
     popover.setAttribute("aria-hidden", "false");
     popover.classList.remove("is-open");
@@ -5812,7 +5904,7 @@
   function handleCorrectionPopoverKeydown(event) {
     const popover = $("correction-popover");
     if (!popover || popover.hidden || !state.proofreadingActive) return;
-    const items = Array.from(popover.querySelectorAll(".correction-option, #correction-ignore, #correction-add-dictionary")).filter(function (item) { return !item.hidden; });
+    const items = Array.from(popover.querySelectorAll(".correction-option, #correction-ignore, #correction-ignore-everywhere, #correction-add-dictionary")).filter(function (item) { return !item.hidden; });
     if (event.key === "Escape") {
       event.preventDefault(); event.stopPropagation(); closeCorrectionPopover(true); return;
     }
@@ -5871,6 +5963,12 @@
       const selection = window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
     }
     body.focus({ preventScroll: true });
+    state.proofreadingAccepting = option.action !== "remove-duplicate";
+    const learningApi = state.proofreadingLearningApi;
+    if (learningApi && state.proofreadingLearning && option.action !== "remove-duplicate") {
+      const kind = entry.transformClass || entry.kind;
+      if (kind) commitProofreadingLearning(learningApi.acceptTransform(state.proofreadingLearning, kind));
+    }
     body.dispatchEvent(new InputEvent("input", {
       bubbles: true,
       inputType: option.action === "remove-duplicate" ? "deleteContentBackward" : "insertReplacementText",
@@ -5889,9 +5987,106 @@
     let ignored = state.proofreadingIgnored.get(entry.recordName);
     if (!ignored) { ignored = new Set(); state.proofreadingIgnored.set(entry.recordName, ignored); }
     ignored.add(entry.occurrenceKey);
+    const api = state.proofreadingLearningApi;
+    if (api && state.proofreadingLearning) {
+      const kind = entry.transformClass || entry.kind || "grammar";
+      const label = entry.patternLabel || ((entry.message || "Suggestion") + ": " + entry.word);
+      const next = api.ignorePattern(state.proofreadingLearning, { key: entry.occurrenceKey, label: label }, kind, label);
+      const muted = next.muted.indexOf(kind) >= 0 && state.proofreadingLearning.muted.indexOf(kind) < 0;
+      commitProofreadingLearning(next);
+      if (muted) announceStatus(api.classLabel(kind) + " is paused. You can turn it back on in Settings, under Writing.");
+    }
     const body = $("note-body");
     closeCorrectionPopover(false);
     if (body) scheduleProofreading(body, 0);
+  }
+
+  function ignoreCorrectionEverywhere() {
+    const entry = state.proofreadingActive;
+    if (!entry || !showIgnoreEverywhere(entry)) return;
+    const api = state.proofreadingLearningApi;
+    if (api && state.proofreadingLearning) commitProofreadingLearning(api.ignoreWord(state.proofreadingLearning, entry.word));
+    const body = $("note-body");
+    closeCorrectionPopover(false);
+    if (body) scheduleProofreading(body, 0);
+  }
+
+  function renderLearnedProofreading() {
+    const list = $("proofreading-learning-entries");
+    if (!list) return;
+    list.replaceChildren();
+    const api = state.proofreadingLearningApi;
+    const rows = api && state.proofreadingLearning ? api.describeLearning(state.proofreadingLearning) : [];
+    if (!rows.length) {
+      const empty = document.createElement("li");
+      empty.className = "personal-dictionary-empty";
+      empty.textContent = "Nothing learned yet.";
+      list.appendChild(empty);
+      return;
+    }
+    rows.forEach(function (row) {
+      const item = document.createElement("li");
+      item.className = "personal-dictionary-entry";
+      const copy = document.createElement("span");
+      const title = document.createElement("strong");
+      title.textContent = row.title;
+      const detail = document.createElement("small");
+      detail.textContent = row.detail;
+      copy.append(title, detail);
+      const undo = document.createElement("button");
+      undo.type = "button";
+      undo.className = "personal-dictionary-remove";
+      undo.textContent = "Undo";
+      undo.dataset.learningUndo = row.kind;
+      if (row.pattern) undo.dataset.learningKey = row.pattern;
+      if (row.word) undo.dataset.learningWord = row.word;
+      if (row.transformClass) undo.dataset.learningClass = row.transformClass;
+      undo.setAttribute("aria-label", "Undo " + row.title);
+      item.append(copy, undo);
+      list.appendChild(item);
+    });
+  }
+
+  function undoLearnedProofreading(button) {
+    const api = state.proofreadingLearningApi;
+    if (!api || !state.proofreadingLearning || !button) return;
+    const kind = button.dataset.learningUndo;
+    let next = state.proofreadingLearning;
+    if (kind === "pattern") next = api.undoPattern(next, button.dataset.learningKey || "");
+    else if (kind === "word") next = api.undoWord(next, button.dataset.learningWord || "");
+    else if (kind === "muted") next = api.undoMute(next, button.dataset.learningClass || "");
+    else if (kind === "accept") next = api.undoAccept(next, button.dataset.learningClass || "");
+    else return;
+    if (kind === "pattern" && button.dataset.learningKey) {
+      state.proofreadingIgnored.forEach(function (ignored) { ignored.delete(button.dataset.learningKey); });
+    }
+    commitProofreadingLearning(next);
+    const body = $("note-body");
+    if (body) scheduleProofreading(body, 0);
+  }
+
+  function resetLearnedProofreading() {
+    const api = state.proofreadingLearningApi;
+    if (!api) return;
+    state.proofreadingIgnored = new Map();
+    commitProofreadingLearning(api.emptyLearning());
+    const body = $("note-body");
+    if (body) scheduleProofreading(body, 0);
+  }
+
+  function loadProofreadingLearning() {
+    import("./proofreading-learning.mjs").then(function (api) {
+      state.proofreadingLearningApi = api;
+      state.proofreadingLearningStore = api.createLearningStore(indexedDB);
+      return state.proofreadingLearningStore.load();
+    }).then(function (learning) {
+      state.proofreadingLearning = learning;
+      renderLearnedProofreading();
+      const body = $("note-body");
+      if (body && state.selectedRecordName) scheduleProofreading(body, 0);
+    }).catch(function (error) {
+      console.warn("Proofreading preferences could not be loaded on this device.", error);
+    });
   }
 
   function bindCorrectionPopover() {
@@ -5904,16 +6099,18 @@
     popover.addEventListener("click", function (event) {
       const option = event.target.closest("[data-correction-option]");
       if (option) applyCorrectionOption(Number(option.dataset.correctionOption));
+      else if (event.target.closest("#correction-ignore-everywhere")) ignoreCorrectionEverywhere();
       else if (event.target.closest("#correction-ignore")) ignoreCorrectionOccurrence();
       else if (event.target.closest("#correction-add-dictionary")) {
         const active = state.proofreadingActive;
-        if (!active || active.kind !== "spelling") return;
+        if (!active || (active.kind !== "spelling" && !(active.kind === "grammar" && showIgnoreEverywhere(active)))) return;
         const word = active.word;
         closeCorrectionPopover(false);
         claimManualDictionaryTerm(word);
         queuePersonalDictionaryOperation(word, false);
       }
     });
+    loadProofreadingLearning();
     document.addEventListener("pointerdown", function (event) {
       state.proofreadingLastPointerType = event.pointerType || "";
       const mark = correctionMarkFromEvent(event);
@@ -10812,6 +11009,13 @@
       event.preventDefault();
       addDictionaryFromSettings();
     });
+    const learningList = $("proofreading-learning-entries");
+    const learningReset = $("proofreading-learning-reset");
+    if (learningList) learningList.addEventListener("click", function (event) {
+      const button = event.target.closest("[data-learning-undo]");
+      if (button) undoLearnedProofreading(button);
+    });
+    if (learningReset) learningReset.addEventListener("click", resetLearnedProofreading);
     if (dictionaryList) dictionaryList.addEventListener("click", function (event) {
       const button = event.target.closest("[data-dictionary-remove]");
       if (!button) return;

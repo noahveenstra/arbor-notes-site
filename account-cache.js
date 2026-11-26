@@ -1,3 +1,5 @@
+import { LEARNING_DATABASE } from "./proofreading-learning.mjs";
+
 // Browser copies of note metadata, note bodies, and semantic vectors.
 // Sign-out and an Apple ID change delete these databases. There is no
 // encrypted cache and no "remember this device" exception.
@@ -42,7 +44,7 @@ export const DRAFT_NAME_PREFIXES = [
   "arbor-web-outbox"
 ];
 
-const KNOWN_ACCOUNT_DATABASES = [LIBRARY_CACHE_DATABASE, SEMANTIC_VECTOR_DATABASE, UNDO_HISTORY_DATABASE];
+const KNOWN_ACCOUNT_DATABASES = [LIBRARY_CACHE_DATABASE, SEMANTIC_VECTOR_DATABASE, UNDO_HISTORY_DATABASE, LEARNING_DATABASE];
 
 // Keep these prefixes aligned with APP_SHELL_CACHE and RUNTIME_ASSET_CACHE in sw.js.
 export const APP_SHELL_CACHE_PREFIX = "arbor-shell-";

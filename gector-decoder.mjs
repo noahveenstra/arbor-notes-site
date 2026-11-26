@@ -5,6 +5,41 @@
 const WORD = /[\p{L}\p{N}_]+(?:['’'][\p{L}\p{N}_]+)?|[^\p{L}\p{N}_\s]/gu;
 const OPENING = "([{“«";
 const CLOSING = ".,;:!?)]}%»”";
+const CUE_QUANTIFIERS = new Set("two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million dozen several many few various numerous multiple both these those".split(" "));
+const CUE_MODIFIERS = new Set("big small old new young long short high low good bad great little large early late other own same such very more most quite rather really just red blue green black white".split(" "));
+const PLURAL_TAGS = new Set(["$TRANSFORM_AGREEMENT_PLURAL", "$TRANSFORM_SUF__s", "$TRANSFORM_SUF__es", "$TRANSFORM_SUF_y_ies", "$TRANSFORM_SUF_f_ves", "$TRANSFORM_SUF_fe_ves"]);
+const TO_THIRD_TAGS = new Set(["$TRANSFORM_VERB_VB_VBZ", "$TRANSFORM_SUF__s", "$TRANSFORM_SUF__es", "$TRANSFORM_SUF_y_ies"]);
+const TO_BASE_TAGS = new Set(["$TRANSFORM_VERB_VBZ_VB", "$TRANSFORM_SUF_s_", "$TRANSFORM_SUF_es_", "$TRANSFORM_SUF_ies_y"]);
+const AGREEMENT_CLASS_THRESHOLD = 0.55;
+
+function cueWordBefore(words, wordIndex) {
+  let index = wordIndex - 1;
+  let skipped = 0;
+  while (index >= 0 && skipped < 3 && CUE_MODIFIERS.has(String(words[index] || "").toLocaleLowerCase())) {
+    index -= 1;
+    skipped += 1;
+  }
+  return index >= 0 ? String(words[index] || "").toLocaleLowerCase() : "";
+}
+
+function cueClass(label, words, wordIndex) {
+  if (wordIndex < 0) return null;
+  const previous = cueWordBefore(words, wordIndex);
+  const numeric = /^\d+$/u.test(previous) && Number(previous) >= 2;
+  if (PLURAL_TAGS.has(label) && (CUE_QUANTIFIERS.has(previous) || numeric)) return "agreement-plural";
+  if (TO_THIRD_TAGS.has(label) && /^(he|she|it)$/u.test(previous)) return "agreement-verb";
+  if (TO_BASE_TAGS.has(label) && /^(i|you|we|they)$/u.test(previous)) return "agreement-verb";
+  return null;
+}
+
+function classThreshold(label, words, wordIndex, minErrorProb, boosts) {
+  const base = Number.isFinite(minErrorProb) ? minErrorProb : 0.7;
+  const cue = cueClass(label, words, wordIndex);
+  if (!cue) return base;
+  const boost = boosts && Number(boosts[cue]);
+  const lift = Number.isFinite(boost) ? Math.min(0.1, Math.max(0, boost)) : 0;
+  return Math.max(0.45, Math.min(base, AGREEMENT_CLASS_THRESHOLD) - lift);
+}
 
 function softmaxRow(data, offset, length) {
   let max = Number.NEGATIVE_INFINITY;
@@ -61,9 +96,10 @@ function encodeWords(words, vocab) {
   return { ids: ids, wordIds: wordIds };
 }
 
-function chooseLabels(logitsLabels, logitsD, tokenCount, labelCount, wordIds, model) {
+function chooseLabels(logitsLabels, logitsD, tokenCount, labelCount, wordIds, model, words) {
   const chosen = [];
   const seen = new Set();
+  const sourceWords = Array.isArray(words) ? words : [];
   let maxWrong = 0;
   for (let token = 0; token < tokenCount; token += 1) {
     const wordId = wordIds[token];
@@ -77,13 +113,25 @@ function chooseLabels(logitsLabels, logitsD, tokenCount, labelCount, wordIds, mo
     const detectCount = model.detectCount || 2;
     const wrong = softmaxRow(logitsD, token * detectCount, detectCount)[model.incorrectIndex];
     if (wrong > maxWrong) maxWrong = wrong;
+    const wordIndex = word === 0 ? -1 : word - 1;
+    const candidate = model.labels[best];
+    const cue = cueClass(candidate, sourceWords, wordIndex);
+    const threshold = classThreshold(candidate, sourceWords, wordIndex, model.minErrorProb, model.acceptBoosts);
+    const keep = probs[best] >= threshold && (!cue || wrong >= threshold);
     chosen.push({
-      label: probs[best] >= model.minErrorProb ? model.labels[best] : "$KEEP",
+      label: keep ? candidate : "$KEEP",
       probability: probs[best],
-      wrong: wrong
+      wrong: wrong,
+      threshold: threshold,
+      cue: cue
     });
   }
-  if (maxWrong < model.minErrorProb) return chosen.map(function (item) { return { label: "$KEEP", probability: item.probability, wrong: item.wrong }; });
+  if (maxWrong < model.minErrorProb) {
+    return chosen.map(function (item) {
+      if (item.cue && item.label !== "$KEEP" && item.wrong >= item.threshold && item.probability >= item.threshold) return item;
+      return { label: "$KEEP", probability: item.probability, wrong: item.wrong, threshold: item.threshold, cue: item.cue };
+    });
+  }
   return chosen;
 }
 
@@ -268,7 +316,8 @@ async function correctText(text, resources, runLogits) {
       encoded.ids.length,
       model.labels.length,
       encoded.wordIds,
-      model
+      model,
+      words
     );
     const next = applyTags(words, tags, verbs);
     if (next.length === words.length && next.every(function (word, index) { return word === words[index]; })) break;
@@ -302,9 +351,12 @@ function verbsFromLines(text) {
 }
 
 export {
+  AGREEMENT_CLASS_THRESHOLD,
   applyTags,
   chooseLabels,
+  classThreshold,
   correctText,
+  cueClass,
   editWord,
   encodeWords,
   suggestionsFor,

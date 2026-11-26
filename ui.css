@@ -204,6 +204,13 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .correction-add-dictionary:hover, .correction-add-dictionary:focus-visible { color: var(--label); background: var(--surface-control); outline: none; }
 .correction-add-dictionary:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring); }
 .correction-actions button[hidden] { display: none; }
+.correction-ignore-everywhere { min-height: 34px; padding: 6px 9px; border: 0; border-radius: 7px; color: var(--secondary-label); background: transparent; font: 500 14px/1.25 var(--font-sans); white-space: nowrap; cursor: default; }
+.correction-ignore-everywhere:hover, .correction-ignore-everywhere:focus-visible { color: var(--label); background: var(--surface-control); outline: none; }
+.correction-ignore-everywhere:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring); }
+.proofreading-learning-copy, #proofreading-learning-entries .personal-dictionary-entry span { display: grid; gap: 2px; min-width: 0; }
+#proofreading-learning-entries small { color: var(--secondary-label); font-size: 12px; line-height: 1.35; }
+#proofreading-learning-reset { margin-top: 8px; border: 0; color: var(--secondary-label); background: transparent; font-size: 13px; cursor: pointer; }
+#proofreading-learning-reset:hover, #proofreading-learning-reset:focus-visible { color: var(--label); }
 
 .personal-dictionary-add-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; }
 .settings-content #personal-dictionary-input { width: 100%; max-width: none; }
@@ -250,7 +257,7 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 }
 @media (max-width: 560px) {
   .correction-popover { max-width: calc(100vw - 20px); }
-  .correction-option, .correction-ignore, .correction-add-dictionary { min-height: 40px; padding-inline: 10px; font-size: 15px; }
+  .correction-option, .correction-ignore, .correction-ignore-everywhere, .correction-add-dictionary { min-height: 40px; padding-inline: 10px; font-size: 15px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .correction-popover { transition: none; }

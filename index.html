@@ -34,7 +34,7 @@
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-save-indicator-20261125-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-related-margin-20261125-a">
+  <link rel="stylesheet" href="./ui.css?v=arb-proofreading-learning-20261125-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b"></script>
@@ -44,7 +44,7 @@
   <script src="./proofreading-dictionary-sync.js?v=arb-112-dictionary-sync-20261120-a" defer></script>
   <script src="./keyboard-shortcut-preferences.js?v=arb-179-shortcut-preferences-20261124-a" defer></script>
   <script src="./keyboard-shortcut-sync.js?v=arb-179-shortcut-sync-20261124-a" defer></script>
-  <script src="./proofreading.js?v=arb-140-capitalization-whole-word-20261123-c" defer></script>
+  <script src="./proofreading.js?v=arb-proofreading-real-models-20261126-a" defer></script>
   <script src="./autocorrect.js?v=arb-109-context-autocorrect-20261123-a" defer></script>
   <script src="./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b" defer></script>
   <script src="./note-history.js?v=arb-136-restore-20261123-a" defer></script>
@@ -296,6 +296,7 @@ Try replacing this example with something you want to remember.</textarea>
     <div class="correction-options" id="correction-options"></div>
     <div class="correction-actions" id="correction-actions">
       <button class="correction-ignore" id="correction-ignore" type="button">Ignore</button>
+      <button class="correction-ignore-everywhere" id="correction-ignore-everywhere" type="button" hidden>Ignore everywhere</button>
       <button class="correction-add-dictionary" id="correction-add-dictionary" type="button" hidden>Add to Dictionary</button>
     </div>
     <span class="shortcut-visually-hidden" id="correction-announcement" aria-live="polite" aria-atomic="true"></span>
@@ -469,7 +470,7 @@ Try replacing this example with something you want to remember.</textarea>
             <h3>Typing</h3>
             <div class="settings-card">
               <label class="settings-toggle-row" for="proofreading-autocorrect" data-setting-label="Auto-correct spelling" data-setting-search="autocorrect spelling correct typos as you type"><span><strong>Auto-correct high-confidence spelling</strong><small>Correct likely typing mistakes when a word is complete.</small></span><input id="proofreading-autocorrect" type="checkbox" checked></label>
-              <label class="settings-toggle-row" for="proofreading-sentence-capitalization" data-setting-label="Capitalization suggestions" data-setting-search="capitalize names first word sentence proper nouns"><span><strong>Suggest sentence and name capitalization</strong><small>Name checks run locally in this browser. The first use loads an Arbor model (about 97 MB); note text is not sent to an AI service.</small></span><input id="proofreading-sentence-capitalization" type="checkbox" checked></label>
+              <label class="settings-toggle-row" for="proofreading-sentence-capitalization" data-setting-label="Capitalization suggestions" data-setting-search="capitalize names first word sentence proper nouns i"><span><strong>Capitalize sentences and the word I</strong><small>Off until you turn it on. Arbor can then underline a lowercase first word and a lowercase i. The choice stays in this browser. Name checks, when this is on, load an Arbor model (about 97 MB) on this device; the note is not sent anywhere.</small></span><input id="proofreading-sentence-capitalization" type="checkbox"></label>
               <label class="settings-toggle-row" for="proofreading-grammar-suggestions" data-setting-label="Grammar suggestions" data-setting-search="grammar check grammar as i write suggestions"><span><strong>Check grammar as I write</strong><small>Underlines update as you write. Nothing changes until you accept it. The first check downloads about 137 MB onto this device from Arbor (about 21 MB for Harper and about 116 MB for a grammar model). If the writing model is not already on this device, that is about 97 MB more. The note stays in this browser and is not sent anywhere.</small></span><input id="proofreading-grammar-suggestions" type="checkbox" checked></label>
             </div>
           </div>
@@ -480,6 +481,14 @@ Try replacing this example with something you want to remember.</textarea>
               <div class="personal-dictionary-add-row"><input id="personal-dictionary-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="120" aria-label="Word to add to personal dictionary"><button id="personal-dictionary-add" type="button">Add</button></div>
               <p class="personal-dictionary-status" id="personal-dictionary-status" role="status" aria-live="polite">Sign in to sync your dictionary.</p>
               <ul class="personal-dictionary-entries" id="personal-dictionary-entries" aria-label="Personal dictionary words"></ul>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>Learned preferences</h3>
+            <div class="settings-card settings-dictionary-card" data-setting-label="Learned proofreading preferences" data-setting-search="ignore proofreading learned muted suggestions reset">
+              <p class="settings-description">Ignored suggestions, ignored words, and how often you accept or dismiss a kind of suggestion are stored in this browser’s IndexedDB database <code>arbor-web-proofreading-learning</code>. That record is not a note and not your personal dictionary. It is not uploaded to Arbor, a proofreading model, or iCloud. Signing out deletes it. Reset deletes it too.</p>
+              <ul class="personal-dictionary-entries" id="proofreading-learning-entries" aria-label="Learned proofreading preferences"></ul>
+              <button id="proofreading-learning-reset" type="button">Reset learned preferences</button>
             </div>
           </div>
         </section>
@@ -504,6 +513,7 @@ Try replacing this example with something you want to remember.</textarea>
               <p>Arbor reads and writes notes, proofreading dictionary entries, and keyboard shortcut preferences in the Apple account you sign in with. Shortcut preferences contain Arbor command names and key combinations, not note content. Signing out of this browser removes notes, metadata, dictionary entries, shortcut preferences, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
               <p>The name in Settings stays in this browser. It is not written to iCloud. Each word of that name is added to the proofreading dictionary, and those dictionary entries sync with the Apple Account you sign in with. A note’s revision history on this browser keeps the name you were using when that revision was saved.</p>
               <p>Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. A few edits that have not reached iCloud yet are also kept unencrypted here until they save or you sign out.</p>
+              <p>Proofreading choices you ignore or accept are stored only in this browser, in the IndexedDB database arbor-web-proofreading-learning. They are not notes, not the personal dictionary, and they are not sent to Arbor, a model, or iCloud. Signing out deletes them.</p>
               <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
             </details>
           </div>

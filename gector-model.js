@@ -131,8 +131,10 @@ export function loadGector(options) {
       const resources = await loadResources(onProgress);
       const session = await loadSession(onProgress);
       return {
-        correct: function (text) {
-          return correctText(text, resources, async function (ids) {
+        correct: function (text, runOptions) {
+          const boosts = runOptions && runOptions.acceptBoosts;
+          const model = boosts ? Object.assign({}, resources, { acceptBoosts: boosts }) : resources;
+          return correctText(text, model, async function (ids) {
             const input = new ort.Tensor("int64", BigInt64Array.from(ids, function (value) { return BigInt(value); }), [1, ids.length]);
             const mask = new ort.Tensor("int64", BigInt64Array.from(ids, function () { return 1n; }), [1, ids.length]);
             let output;

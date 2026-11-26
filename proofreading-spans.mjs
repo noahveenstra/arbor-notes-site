@@ -221,6 +221,9 @@ function protectedRanges(text, options) {
   pushMatches(source, /\b[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}\b/gu, "email", ranges);
   pushMatches(source, /<\/?[A-Za-z][^>\r\n]*>/g, "tag", ranges);
   pushMatches(source, /(^|\s)#[\p{L}\p{N}_-]+/gu, "tag", ranges);
+  pushMatches(source, /(^|[^\p{L}\p{N}])@[\p{L}\p{N}_.-]+/gu, "mention", ranges);
+  pushMatches(source, /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/giu, "number", ranges);
+  pushMatches(source, /\b\d+\s*[.\-–—/]\s*\d+\b/gu, "number", ranges);
   pushMatches(source, /\b[\p{L}\p{N}_-]*\d[\p{L}\p{N}_-]*\b/gu, "digit", ranges);
   const terms = [];
   String(config.displayName || "").split(/[\s-]+/u).forEach(function (part) { if (part) terms.push(part); });
@@ -229,11 +232,20 @@ function protectedRanges(text, options) {
     const pattern = new RegExp("(?<![\\p{L}\\p{N}])" + escapeRegExp(term) + "(?![\\p{L}\\p{N}])", "giu");
     pushMatches(source, pattern, "name", ranges);
   });
-  const capital = /\b\p{Lu}[\p{L}'’]*\b/gu;
+  const capital = /\b\p{Lu}[\p{L}'’.-]*\b/gu;
+  const lexicon = config.lexicon;
   let match;
   while ((match = capital.exec(source))) {
-    if (match[0] === "I" || isSentenceStart(source, match.index)) continue;
-    ranges.push({ start: match.index, end: match.index + match[0].length, kind: "name" });
+    const word = match[0].replace(/[.'’-]+$/u, "");
+    if (word === "I") continue;
+    const known = Boolean(lexicon && lexicon.has && (lexicon.has(word) || lexicon.has(word.toLocaleLowerCase())));
+    if (isSentenceStart(source, match.index)) {
+      const lower = word.toLocaleLowerCase();
+      const grammarToken = /^(?:its|whats|thats|theres|heres|wheres|whos|dont|doesnt|didnt|cant|wont|isnt|arent|wasnt|werent|im|ive|id|youre|youve|youll|youd|theyre|theyve|theyll|theyd|weve|hes|shes|aint|lets|recieved|seperate|tomorow|accomodating|untill|wich|nite|alot)$/u.test(lower);
+      if (!known && word.length > 1 && !grammarToken) ranges.push({ start: match.index, end: match.index + match[0].length, kind: "name" });
+      continue;
+    }
+    if (!known || word !== "I") ranges.push({ start: match.index, end: match.index + match[0].length, kind: "name" });
   }
   pushMatches(source, /\b[A-Z]{2,}[A-Z0-9]*\b/g, "name", ranges);
   return ranges;
@@ -264,11 +276,37 @@ function levenshtein(left, right) {
   return row[b.length];
 }
 
+const MORPHOLOGY = new Map([
+  ["person", "people"], ["people", "person"], ["man", "men"], ["men", "man"], ["woman", "women"], ["women", "woman"],
+  ["mouse", "mice"], ["mice", "mouse"], ["goose", "geese"], ["geese", "goose"], ["tooth", "teeth"], ["teeth", "tooth"],
+  ["foot", "feet"], ["feet", "foot"], ["ox", "oxen"], ["oxen", "ox"], ["child", "children"], ["children", "child"],
+  ["knife", "knives"], ["knives", "knife"], ["wife", "wives"], ["wives", "wife"], ["life", "lives"], ["lives", "life"],
+  ["leaf", "leaves"], ["leaves", "leaf"], ["loaf", "loaves"], ["loaves", "loaf"], ["half", "halves"], ["halves", "half"], ["wolf", "wolves"], ["wolves", "wolf"],
+  ["self", "selves"], ["selves", "self"], ["index", "indexes"], ["indexes", "index"], ["analysis", "analyses"],
+  ["their", "they're"], ["they're", "their"], ["there", "they're"], ["they're", "there"], ["your", "you're"], ["you're", "your"],
+  ["its", "it's"], ["it's", "its"],
+  ["dont", "doesn't"], ["don't", "doesn't"], ["doesnt", "don't"], ["doesn't", "don't"]
+]);
+
+function pluralRelated(left, right) {
+  if (left.endsWith("y") && right === left.slice(0, -1) + "ies") return true;
+  if (right.endsWith("y") && left === right.slice(0, -1) + "ies") return true;
+  if (/(?:s|x|z|ch|sh)$/u.test(left) && right === left + "es") return true;
+  if (/(?:s|x|z|ch|sh)$/u.test(right) && left === right + "es") return true;
+  if (left.endsWith("fe") && right === left.slice(0, -2) + "ves") return true;
+  if (right.endsWith("fe") && left === right.slice(0, -2) + "ves") return true;
+  if (left.endsWith("f") && !left.endsWith("ff") && right === left.slice(0, -1) + "ves") return true;
+  if (right.endsWith("f") && !right.endsWith("ff") && left === right.slice(0, -1) + "ves") return true;
+  return false;
+}
+
 function relatedWords(left, right) {
   const a = String(left || "").toLocaleLowerCase();
   const b = String(right || "").toLocaleLowerCase();
   if (!a || !b) return false;
   if (a === b) return true;
+  if (MORPHOLOGY.get(a) === b) return true;
+  if (pluralRelated(a, b)) return true;
   if (NEGATION.get(a) && NEGATION.get(a) === NEGATION.get(b)) return true;
   if (levenshtein(a, b) <= 2) return true;
   const shorter = a.length <= b.length ? a : b;
@@ -320,6 +358,20 @@ function unrelatedSwap(source, replacement) {
   });
 }
 
+function gluedWord(replacement, lexicon) {
+  if (!lexicon || !lexicon.has) return false;
+  return wordTokens(replacement).some(function (word) {
+    const lower = word.toLocaleLowerCase();
+    if (lower.length < 6 || lexicon.has(lower)) return false;
+    for (let index = 2; index <= lower.length - 2; index += 1) {
+      const right = lower.slice(index);
+      if (right.length < 2) continue;
+      if (lexicon.has(lower.slice(0, index)) && lexicon.has(right)) return true;
+    }
+    return false;
+  });
+}
+
 function capitalizesOrdinaryMidSentence(text, span, options) {
   const source = String(text || "");
   const original = source.slice(span.start, span.end);
@@ -363,7 +415,10 @@ function guardSpans(text, spans, options) {
     const fromCount = wordTokens(original).length;
     const toCount = wordTokens(replacement).length;
     if (fromCount > 3 || toCount > 3) return false;
+    if (span.trusted) return true;
+    if (original.toLocaleLowerCase() === replacement.toLocaleLowerCase() && !(options && options.allowCapitalization)) return false;
     if (unrelatedSwap(original, replacement)) return false;
+    if (gluedWord(replacement, options && options.lexicon)) return false;
     if (swapsTheA(original, replacement)) return false;
     if (capitalizesOrdinaryMidSentence(source, span, options)) return false;
     return true;

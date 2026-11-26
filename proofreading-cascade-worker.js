@@ -1,6 +1,6 @@
-import { contractionSpans } from "./proofreading-contractions.mjs";
-import { fragmentSpan } from "./proofreading-fragments.mjs";
-import { CONFIDENCE_THRESHOLD, confidentEdits, guardSpans, mergeCascade, protectedRanges } from "./proofreading-spans.mjs";
+import { assembleCascade } from "./proofreading-cascade.mjs";
+import { CONFIDENCE_THRESHOLD, confidentEdits } from "./proofreading-spans.mjs";
+import { builtinLexicon, lexiconFromDic } from "./proofreading-lexicon.mjs";
 
 const latest = new Map();
 let ruleChain = Promise.resolve();
@@ -9,6 +9,19 @@ let skipModels = false;
 let harperPromise;
 let gecPromise;
 let gectorPromise;
+let lexiconPromise;
+
+function loadLexicon() {
+  if (!lexiconPromise) {
+    lexiconPromise = fetch(new URL("./vendor/spellcheck/en.dic", import.meta.url)).then(function (response) {
+      if (!response.ok) throw new Error("dictionary-unavailable");
+      return response.text();
+    }).then(lexiconFromDic).catch(function () {
+      return builtinLexicon;
+    });
+  }
+  return lexiconPromise;
+}
 
 function post(message) {
   self.postMessage(message);
@@ -50,12 +63,20 @@ async function harperSpans(text) {
     const start = Number(span.start);
     const end = Number(span.end);
     if (Number.isInteger(start) && Number.isInteger(end) && end > start) {
+      let lintKind = "";
+      try {
+        if (typeof lint.lint_kind === "function") lintKind = String(lint.lint_kind() || "");
+      } catch (_) { lintKind = ""; }
+      const transformClass = lintKind ? "harper:" + lintKind : "harper";
       spans.push({
         start: start,
         end: end,
         replacement: suggestions.length ? replacement : null,
         detectOnly: suggestions.length === 0,
         kind: "grammar",
+        ruleId: transformClass,
+        transformClass: transformClass,
+        patternText: text.slice(start, end),
         message: lint.message() || "Grammar suggestion"
       });
     }
@@ -64,13 +85,6 @@ async function harperSpans(text) {
     if (lint.free) lint.free();
   });
   return spans;
-}
-
-function ruleSpans(text, options, ranges) {
-  const contractions = contractionSpans(text, ranges);
-  const fragment = fragmentSpan(text);
-  const fragments = fragment ? guardSpans(text, [fragment], options) : [];
-  return { contractions: contractions, fragments: fragments };
 }
 
 async function gecSpans(text, onProgress) {
@@ -89,21 +103,21 @@ async function gecSpans(text, onProgress) {
   return confidentEdits(text, generated && generated.pieces, CONFIDENCE_THRESHOLD);
 }
 
-async function gectorSpans(text, onProgress) {
+async function gectorSpans(text, onProgress, options) {
   if (!gectorPromise) {
     gectorPromise = import("./gector-model.js").then(function (model) {
       return model.loadGector({ onProgress: onProgress });
     });
   }
   const loaded = await gectorPromise;
-  return loaded.correct(text);
+  return loaded.correct(text, { acceptBoosts: options && options.acceptBoosts || {} });
 }
 
 function progress(phase, detail) {
   post(Object.assign({ type: "cascade-progress", phase: phase }, detail || {}));
 }
 
-async function runModels(message, options, rules) {
+async function runModels(message, options) {
   if (!isLatest(message)) return;
   const onProgress = function (update) {
     if (!isLatest(message)) return;
@@ -117,15 +131,16 @@ async function runModels(message, options, rules) {
     // Rules and Harper still run, which is what the browser checks cover.
     const results = await Promise.all([
       skipModels ? Promise.resolve([]) : gecSpans(message.text, onProgress).catch(function () { return []; }),
-      skipModels ? Promise.resolve([]) : gectorSpans(message.text, onProgress).catch(function () { return []; }),
+      skipModels ? Promise.resolve([]) : gectorSpans(message.text, onProgress, options).catch(function () { return []; }),
       harperSpans(message.text).catch(function () { return []; })
     ]);
-    gec = guardSpans(message.text, results[0], options);
-    gector = guardSpans(message.text, results[1], options);
-    harper = guardSpans(message.text, results[2], options);
+    gec = results[0];
+    gector = results[1];
+    harper = results[2];
   } catch (_) {
     gec = [];
     gector = [];
+    harper = [];
   }
   if (!isLatest(message)) return;
   post({
@@ -133,7 +148,7 @@ async function runModels(message, options, rules) {
     requestId: message.requestId,
     key: message.key,
     text: message.text,
-    spans: mergeCascade([gec, harper, gector, rules.contractions, rules.fragments])
+    spans: assembleCascade(message.text, Object.assign({}, options, { gec: gec, harper: harper, gector: gector }))
   });
 }
 
@@ -147,13 +162,13 @@ function postPartial(message, text, spans) {
   });
 }
 
-async function finishSentence(message, options, rules) {
+async function finishSentence(message, options) {
   let harper = [];
-  try { harper = guardSpans(message.text, await harperSpans(message.text), options); }
+  try { harper = await harperSpans(message.text); }
   catch (_) { harper = []; }
   if (!isLatest(message)) return;
-  postPartial(message, message.text, mergeCascade([harper, rules.contractions, rules.fragments]));
-  modelChain = modelChain.then(function () { return runModels(message, options, rules); }).catch(function () {});
+  postPartial(message, message.text, assembleCascade(message.text, Object.assign({}, options, { harper: harper })));
+  modelChain = modelChain.then(function () { return runModels(message, options); }).catch(function () {});
 }
 
 self.onmessage = function (event) {
@@ -161,6 +176,7 @@ self.onmessage = function (event) {
   if (message.skipModels === true) skipModels = true;
   if (message.type === "warm") {
     loadHarper().catch(function () {});
+    loadLexicon().catch(function () {});
     return;
   }
   if (message.type !== "check-sentence" || !Number.isInteger(message.requestId) || typeof message.key !== "string") return;
@@ -168,18 +184,24 @@ self.onmessage = function (event) {
   const text = String(message.text || "");
   const options = {
     protectedTerms: Array.isArray(message.protectedTerms) ? message.protectedTerms : [],
-    displayName: String(message.displayName || "")
+    displayName: String(message.displayName || ""),
+    allowCapitalization: message.allowCapitalization === true
   };
-  const rules = ruleSpans(text, options, protectedRanges(text, options));
-  postPartial(message, text, mergeCascade([rules.contractions, rules.fragments]));
-  ruleChain = ruleChain.then(function () { return finishSentence(message, options, rules); }).catch(function (error) {
+  const boosts = message.acceptBoosts && typeof message.acceptBoosts === "object" ? message.acceptBoosts : {};
+  options.acceptBoosts = boosts;
+  ruleChain = ruleChain.then(async function () {
+    options.lexicon = await loadLexicon();
+    if (!isLatest(message)) return;
+    postPartial(message, text, assembleCascade(text, options));
+    return finishSentence(message, options);
+  }).catch(function (error) {
     if (!isLatest(message)) return;
     post({
       type: "cascade-final",
       requestId: message.requestId,
       key: message.key,
       text: text,
-      spans: mergeCascade([rules.contractions, rules.fragments]),
+      spans: assembleCascade(text, Object.assign({}, options, { lexicon: builtinLexicon })),
       error: String(error && error.message || error)
     });
   });

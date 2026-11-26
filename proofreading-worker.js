@@ -1,6 +1,6 @@
 "use strict";
 
-importScripts("./proofreading.js?v=arb-140-capitalization-whole-word-20261123-c", "./autocorrect.js?v=arb-109-context-autocorrect-20261123-a", "./vendor/spellcheck/nspell.js");
+importScripts("./proofreading.js?v=arb-proofreading-real-models-20261126-a", "./autocorrect.js?v=arb-109-context-autocorrect-20261123-a", "./vendor/spellcheck/nspell.js");
 
 let dictionaryPromise = null;
 let spellChecker = null;
@@ -37,7 +37,7 @@ self.onmessage = async function (event) {
     const results = request.blocks.map(function (block) {
       return self.ArborProofreading.scan(String(block || ""), checker, {
         checkGrammarSuggestions: request.checkGrammarSuggestions !== false,
-        checkSentenceCapitalization: request.checkSentenceCapitalization !== false
+        checkSentenceCapitalization: request.checkSentenceCapitalization === true
       });
     });
     const autocorrection = request.autocorrect

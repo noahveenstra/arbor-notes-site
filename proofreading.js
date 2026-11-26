@@ -69,7 +69,7 @@
       });
     }
 
-    if (!options || options.checkSentenceCapitalization !== false) {
+    if (options && options.checkSentenceCapitalization === true) {
       const sentenceStart = /(^|[\r\n]|[.!?]\s+)\s*([\p{L}][\p{L}'’]*)/gu;
       while ((match = sentenceStart.exec(text))) {
         const word = match[2];
@@ -83,7 +83,7 @@
       }
     }
 
-    if (!options || options.checkGrammarSuggestions !== false) {
+    if (options && options.checkSentenceCapitalization === true) {
       const firstPerson = /\bi\b/g;
       while ((match = firstPerson.exec(text))) {
         result.push(issue(match.index, match.index + 1, "grammar", match[0], ["I"], "Capitalize the pronoun I"));
@@ -100,6 +100,9 @@
     while ((match = WORD_RE.exec(text))) {
       const word = match[0];
       if (word.length < 2 || /\p{Lu}/u.test(word.slice(1)) || word === word.toUpperCase()) continue;
+      if (match.index > 0 && (text[match.index - 1] === "@" || text[match.index - 1] === "#")) continue;
+      const capital = word[0] !== word[0].toLocaleLowerCase() && word[0] === word[0].toLocaleUpperCase();
+      if (capital && word !== "I" && !spell.correct(word) && !spell.correct(word.toLowerCase())) continue;
       const missingContraction = word.toLocaleLowerCase() === "im";
       if (!missingContraction && (spell.correct(word) || spell.correct(word.toLowerCase()))) continue;
       const suggestions = missingContraction ? ["I'm"] : spell.suggest(word);

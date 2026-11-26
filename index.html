@@ -177,6 +177,7 @@ Try replacing this example with something you want to remember.</textarea>
           <article class="note-page" id="note-page">
             <div class="draft-banner" id="draft-banner" role="status" hidden>
               <p>Recovered an unsaved edit from this browser.</p>
+              <button type="button" id="draft-review" hidden>Review edit</button>
               <button type="button" id="draft-discard">Discard</button>
             </div>
             <p class="editor-greeting" id="note-greeting" hidden></p>
@@ -542,6 +543,11 @@ Try replacing this example with something you want to remember.</textarea>
               <div class="settings-setting-row" data-setting-label="Name" data-setting-search="name profile display name"><div class="settings-setting-copy"><label for="settings-display-name">Name</label><small id="settings-display-name-note">Shown in greetings and in this browser’s note revision history. The name stays on this device. Each word is added to your personal dictionary, which syncs with your Apple Account.</small></div><input id="settings-display-name" type="text" value="Noah" autocomplete="name" maxlength="80"></div>
               <div class="settings-setting-row" data-setting-label="Apple account" data-setting-search="apple account sign in sign out icloud connected sync"><div class="settings-setting-copy"><span>Apple account</span><small class="connection-line" id="settings-connection-line"><span class="connection-dot"></span><span id="settings-connection-label" aria-live="polite">Not connected</span></small></div><div class="auth-buttons"><div id="apple-sign-out-button"></div></div></div>
             </div>
+          </div>
+          <div class="settings-group" id="recovered-edits" hidden>
+            <h3>Recovered edits</h3>
+            <p class="settings-description">Download your local Markdown or check whether the original iCloud note can safely receive the edit.</p>
+            <div class="settings-card" id="recovered-edit-list"></div>
           </div>
           <div class="settings-group">
             <h3>Plan</h3>

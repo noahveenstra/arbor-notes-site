@@ -116,6 +116,9 @@
     previewActiveCount: 0,
     cacheWriteTimer: null,
     editQueue: [],
+    editsStartedHere: new Set(),
+    recoveredEditNames: new Set(),
+    pendingEditFlush: null,
     titleQueryTimer: 0,
     titleQueryRequest: 0,
     paintedFromCache: false,
@@ -508,6 +511,8 @@
     refreshLexicalIndex();
     state.syncToken = null;
     state.editQueue = [];
+    state.editsStartedHere.clear();
+    state.recoveredEditNames.clear();
     state.syncBaselines.clear();
     state.pendingRemoteRecords.clear();
     state.nativeZoneID = null;
@@ -1138,6 +1143,7 @@
   function showDraftBanner() {
     const banner = $("draft-banner");
     if (banner) banner.hidden = false;
+    $("draft-review").hidden = !state.recoveredEditNames.has(state.selectedRecordName);
   }
 
   function hideDraftBanner() {
@@ -2191,6 +2197,7 @@
   }
 
   function renderAll() {
+    if (!$("settings-modal").hidden) renderRecoveredEdits();
     updateArborName();
     renderFolderTree();
     renderNotes();
@@ -3470,7 +3477,7 @@
     }).join("") + (openedRelated ? "</div>" : "");
   }
 
-  function captureOwner() {
+  function browserLibraryOwner() {
     if (state.demo || !state.connectionUserID || state.accountCacheSuspended) return "";
     try {
       return localStorage.getItem("arbor.web.account-id") === state.connectionUserID ? draftAccountKey() : "";
@@ -3485,7 +3492,7 @@
     }
     if (captureDraft?.opening) return;
     if (!captureDraft) {
-      const draft = { id: crypto.randomUUID().toUpperCase(), folder: state.selectedFolder, owner: captureOwner(),
+      const draft = { id: crypto.randomUUID().toUpperCase(), folder: state.selectedFolder, owner: browserLibraryOwner(),
         submitted: false, attempted: false, busy: false, opening: true };
       captureDraft = draft;
       $("capture-input").value = "";
@@ -3494,7 +3501,7 @@
         let claim;
         try { claim = await (await loadAccountCache()).claimCapture(localStorage, navigator.locks, draft.owner, draft.id); }
         catch (_) { /* Capture still works in memory when browser storage is unavailable. */ }
-        if (captureDraft !== draft || captureOwner() !== draft.owner) {
+        if (captureDraft !== draft || browserLibraryOwner() !== draft.owner) {
           claim?.release();
           if (captureDraft === draft) clearCapture();
           return;
@@ -3523,7 +3530,7 @@
 
   function persistCapture(draft) {
     if (!draft.claim) return false;
-    if (captureOwner() !== draft.owner) { clearCapture(); return false; }
+    if (browserLibraryOwner() !== draft.owner) { clearCapture(); return false; }
     const text = $("capture-input").value;
     try {
       if (text.trim()) {
@@ -8013,7 +8020,6 @@
       });
       window.addEventListener("online", function () {
         if (state.database && !state.accountCacheSuspended) {
-          flushPendingEdits();
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
           syncKeyboardShortcutPreferences(state.accountSession);
@@ -8412,7 +8418,18 @@
 
   function persistCurrentDraft() {
     if (!state.dirty || !state.selectedRecordName) return;
-    writeDraft(state.selectedRecordName, editorDraftParts());
+    const parts = editorDraftParts();
+    const previous = state.draftBaseline?.recovered;
+    if (state.recoveredEditNames.has(state.selectedRecordName) && previous) {
+      if (!browserLibraryOwner()) return;
+      if (sameSyncDocument(parts, previous)) return;
+      if (!sameSyncDocument(draftFor(state.selectedRecordName), previous)) {
+        showSaveProblem("The recovered copy changed in another tab. Keep this tab open to copy your latest words.", state.selectedRecordName);
+        return;
+      }
+    }
+    writeDraft(state.selectedRecordName, parts);
+    if (previous && sameSyncDocument(draftFor(state.selectedRecordName), parts)) state.draftBaseline.recovered = parts;
   }
 
   function persistDraftSnapshot(recordName, parts) {
@@ -8442,21 +8459,152 @@
   }
 
   function editQueueStorageKey() {
-    const account = state.connectionUserID || state.cacheKey || "";
-    return launchLibrary ? launchLibrary.editQueueKey(account) : "arbor.web.pending-edit.";
+    // Earlier account-only keys cannot establish a container or environment.
+    // Their separately scoped editor drafts remain available for local rescue.
+    return launchLibrary.editQueueKey(draftAccountKey());
+  }
+
+  function readEditQueue() {
+    try {
+      return launchLibrary.normalizeEditQueue(JSON.parse(localStorage.getItem(editQueueStorageKey()) || "null"));
+    } catch (_) { return []; }
   }
 
   function loadEditQueue() {
-    if (!launchLibrary) { state.editQueue = []; return; }
-    try {
-      state.editQueue = launchLibrary.normalizeEditQueue(JSON.parse(localStorage.getItem(editQueueStorageKey()) || "null"));
-    } catch (_) { state.editQueue = []; }
+    state.editQueue = readEditQueue();
+    const drafts = readDraftStore()[draftAccountKey()] || {};
+    const names = [...Object.keys(drafts), ...state.editQueue.map(edit => edit.recordName)];
+    state.recoveredEditNames = new Set(names.filter(name => !state.editsStartedHere.has(name)));
   }
 
-  function storeEditQueue() {
+  function recoveredEditDocument(edit) {
+    if (!edit) return null;
+    if (typeof edit.body !== "string") return edit.body;
+    const separator = edit.body.indexOf("\n\n");
+    return separator < 0 ? null : { title: edit.body.slice(0, separator), body: edit.body.slice(separator + 2) };
+  }
+
+  function renderRecoveredEdits() {
+    const section = $("recovered-edits");
+    const list = $("recovered-edit-list");
+    list.replaceChildren();
+    const owner = browserLibraryOwner();
+    if (owner) {
+      const queue = readEditQueue();
+      for (const name of state.recoveredEditNames) {
+        const edit = queue.find(item => item.recordName === name);
+        const queued = recoveredEditDocument(edit);
+        const draft = draftFor(name) || queued;
+        if (!draft) continue;
+        const row = document.createElement("div");
+        row.className = "settings-setting-row";
+        const label = document.createElement("span");
+        label.textContent = draft.title;
+        const download = document.createElement("button");
+        download.type = "button";
+        download.textContent = "Download Markdown";
+        download.onclick = async function () {
+          try {
+            const files = await import("./markdown-export.mjs?v=arb-20-zip-paths-20261126-a");
+            if (owner !== browserLibraryOwner()) return;
+            files.downloadFile(files.downloadName(exportStem(draft.title), ".md"),
+              new Blob([draft.body], { type: "text/markdown;charset=utf-8" }));
+          } catch (error) { showToast(readableError(error), true); }
+        };
+        row.append(label, download);
+        if (edit?.base?.recordChangeTag && sameSyncDocument(draft, queued) && state.records.has(name) &&
+            state.nativeZoneExists && state.database && navigator.locks) {
+          const sync = document.createElement("button");
+          sync.type = "button";
+          sync.textContent = "Check and sync";
+          sync.onclick = function () { syncRecoveredEdit(owner, edit, draft); };
+          row.append(sync);
+        }
+        list.append(row);
+      }
+    }
+    section.hidden = !list.childElementCount;
+  }
+
+  async function recoveryDocument(record) {
+    if (isNativeModelRecord(record, "CapturedNote")) return documentFromCloudKitRecord(record);
+    const body = fieldValue(record, "bodyStorageRaw") === "asset" ? await loadAssetBody(record) : fieldValue(record, "body");
+    // Compare the actual web file, including its line endings and title prefix.
+    return typeof body === "string" ? recoveredEditDocument({ body }) : null;
+  }
+
+  async function syncRecoveredEdit(owner, edit, draft) {
+    const name = edit.recordName;
+    const session = state.accountSession;
+    const database = state.database;
+    function checkRecovery() {
+      const pending = readEditQueue().find(item => item.recordName === name);
+      if (browserOffline() || browserLibraryOwner() !== owner || !accountSessionCurrent(session) || state.database !== database ||
+          !state.recoveredEditNames.has(name) || !pending || pending.updatedAt !== edit.updatedAt ||
+          JSON.stringify(pending.base) !== JSON.stringify(edit.base) ||
+          (state.selectedRecordName === name && state.dirty && !sameSyncDocument(editorDraftParts(), draft)) ||
+          !sameSyncDocument(recoveredEditDocument(pending), draft) ||
+          !sameSyncDocument(draftFor(name) || recoveredEditDocument(pending), draft)) {
+        throw new Error("This edit changed. Review the current copy before syncing.");
+      }
+    }
+    try {
+      await navigator.locks.request("arbor.recover-edit." + JSON.stringify([owner, name]), { ifAvailable: true }, async function (lock) {
+        if (!lock) return;
+        checkRecovery();
+        const record = await fetchCurrentNoteRecord(edit);
+        checkRecovery();
+        const native = isNativeModelRecord(record, "CapturedNote");
+        if (!record.recordChangeTag || isArchived(record) ||
+            (state.nativeSchema ? !native : record.recordType !== "ArborNote") ||
+            native !== (typeof edit.body === "object")) {
+          throw new Error("The original note could not be verified. Download your Markdown to keep a copy.");
+        }
+        const current = await recoveryDocument(record);
+        checkRecovery();
+        let saved = record;
+        if (!sameSyncDocument(current, draft)) {
+          if (record.recordChangeTag !== edit.base.recordChangeTag || !sameSyncDocument(current, edit.base)) {
+            throw new Error("The iCloud note changed. Download your Markdown to compare the two versions.");
+          }
+          await saveRecord(record, edit.body, { checkRecovery });
+          checkRecovery();
+          saved = await fetchCurrentNoteRecord(edit);
+          checkRecovery();
+          const confirmed = await recoveryDocument(saved);
+          checkRecovery();
+          if (saved.recordType !== record.recordType || !saved.recordChangeTag || !sameSyncDocument(confirmed, draft)) {
+            throw new Error("iCloud has not confirmed the recovered text. Your Markdown is still here.");
+          }
+        }
+        state.records.set(name, saved);
+        rememberSyncBaseline(name, draft);
+        rememberRecordBody(name, native ? draft.body : edit.body, session);
+        dropPendingEdit(name);
+        clearDraft(name);
+        state.recoveredEditNames.delete(name);
+        if (state.selectedRecordName === name) {
+          state.dirty = false;
+          state.bodyDirty = false;
+          applyRemoteDocumentToActiveEditor(saved, draft);
+        }
+        scheduleLibraryCacheWrite();
+        showToast("Your recovered edit is in iCloud.");
+      });
+    } catch (error) {
+      if (owner === browserLibraryOwner()) showToast(readableError(error), true);
+    } finally {
+      renderRecoveredEdits();
+    }
+  }
+
+  function storeEditQueue(recordName) {
     if (!launchLibrary) return;
     try {
       const key = editQueueStorageKey();
+      const entry = pendingEditFor(recordName);
+      const others = readEditQueue().filter(edit => edit.recordName !== recordName);
+      state.editQueue = launchLibrary.normalizeEditQueue(entry ? others.concat(entry) : others);
       if (!state.editQueue.length) localStorage.removeItem(key);
       else localStorage.setItem(key, JSON.stringify(state.editQueue));
     } catch (_) {}
@@ -8498,7 +8646,9 @@
   }
 
   function rememberPendingEdit(recordName, body) {
-    if (!launchLibrary || !recordName || body == null) return;
+    if (!launchLibrary || !recordName || body == null || state.recoveredEditNames.has(recordName)) return;
+    state.editsStartedHere.add(recordName);
+    const scope = draftAccountKey();
     const documentValue = documentForSaveBody(body, state.records.get(recordName) || state.selectedRecord);
     const existing = state.editQueue.find(function (edit) { return edit.recordName === recordName; });
     const base = existing && existing.base ? existing.base : captureEditBase(recordName);
@@ -8509,10 +8659,11 @@
       updatedAt: Date.now(),
       base: base
     });
-    storeEditQueue();
+    storeEditQueue(recordName);
     if (!base.contentFingerprint && (base.title || base.body)) {
       const stamp = base.recordChangeTag + "\n" + base.modifiedAt;
       fingerprint(base.title + "\n" + base.body).then(function (hash) {
+        if (scope !== draftAccountKey() || !state.editsStartedHere.has(recordName)) return;
         let changed = false;
         state.editQueue = state.editQueue.map(function (edit) {
           if (edit.recordName !== recordName || !edit.base) return edit;
@@ -8521,7 +8672,7 @@
           changed = true;
           return Object.assign({}, edit, { base: Object.assign({}, edit.base, { contentFingerprint: hash }) });
         });
-        if (changed) storeEditQueue();
+        if (changed) storeEditQueue(recordName);
       }).catch(function () {});
     }
   }
@@ -8546,7 +8697,7 @@
       title: savedDocument.title,
       body: savedDocument.body
     });
-    storeEditQueue();
+    storeEditQueue(recordName);
   }
 
   function recordForPendingEdit(record, edit) {
@@ -8564,8 +8715,9 @@
 
   function dropPendingEdit(recordName) {
     if (!launchLibrary || !recordName) return;
+    state.editsStartedHere.delete(recordName);
     state.editQueue = launchLibrary.removePendingEdit(state.editQueue, recordName);
-    storeEditQueue();
+    storeEditQueue(recordName);
   }
 
   function browserOffline() {
@@ -8574,6 +8726,8 @@
 
   function clearDrafts() {
     try { localStorage.removeItem(DRAFT_STORAGE_KEY); } catch (_) {}
+    state.editsStartedHere.clear();
+    state.recoveredEditNames.clear();
     state.editQueue = [];
     try { localStorage.removeItem(editQueueStorageKey()); } catch (_) {}
     window.clearTimeout(state.saveTimer);
@@ -8593,7 +8747,7 @@
     hideDraftBanner();
     const draft = draftFor(note.recordName);
     if (!draft) return false;
-    if (!draftDiffers(draft, note)) {
+    if (!draftDiffers(draft, note) && !state.recoveredEditNames.has(note.recordName)) {
       clearDraft(note.recordName);
       return false;
     }
@@ -8601,7 +8755,8 @@
       recordName: note.recordName,
       title: note.title,
       body: note.body,
-      editorBody: note.editorBody || ""
+      editorBody: note.editorBody || "",
+      recovered: { title: draft.title, body: draft.body }
     };
     const title = normalizedTitle(draft.title);
     state.bodyDirty = String(draft.body || "") !== String(note.editorBody || "");
@@ -8615,7 +8770,6 @@
     if (state.editor) { state.editor.destroy(); state.editor = null; }
     createEditor(draft.body);
     state.dirty = true;
-    writeDraft(note.recordName, { title: title, body: draft.body });
     if (browserOffline()) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, note.recordName);
     showDraftBanner();
     window.clearTimeout(state.saveTimer);
@@ -8625,12 +8779,21 @@
   function discardRecoveredDraft() {
     const recordName = state.selectedRecordName;
     const baseline = state.draftBaseline;
+    if (state.recoveredEditNames.has(recordName) &&
+        (!browserLibraryOwner() || !sameSyncDocument(draftFor(recordName), baseline?.recovered))) {
+      showToast("The recovered edit changed in another tab. Reopen it before discarding.", true);
+      return;
+    }
     const discardedDraft = captureEditorHistorySnapshot();
     window.clearTimeout(state.saveTimer);
     state.saveGeneration += 1;
     state.dirty = false;
     state.bodyDirty = false;
-    if (recordName) clearDraft(recordName);
+    if (recordName) {
+      dropPendingEdit(recordName);
+      clearDraft(recordName);
+      state.recoveredEditNames.delete(recordName);
+    }
     hideDraftBanner();
     state.draftBaseline = null;
     if (!baseline || baseline.recordName !== recordName) {
@@ -8802,6 +8965,20 @@
     return stem + "-" + Date.now() + ".md";
   }
 
+  async function submitNoteVersion(record, historyContext, options, isCurrent) {
+    if (!isCurrent()) throw new Error("The account changed before this edit could save.");
+    if (options.checkRecovery) options.checkRecovery();
+    const response = assertResponse(await saveToDatabase(record, historyContext));
+    if (options.checkRecovery) {
+      options.checkRecovery();
+      const ack = response.records && response.records[0];
+      if (!ack || ack.recordName !== record.recordName || ack.recordType !== record.recordType || !ack.recordChangeTag) {
+        throw new Error("iCloud did not confirm this edit. Your Markdown is still here.");
+      }
+    }
+    return response;
+  }
+
   async function saveRecord(record, body, options, historyContext, mergeAttempt) {
     const opts = options || {};
     const attempt = Number(mergeAttempt) || 0;
@@ -8821,8 +8998,11 @@
       if (Object.prototype.hasOwnProperty.call(opts, "folderID")) setNullableField(next, "folderID", opts.folderID);
       if (historyContext) assertHistoryContext(historyContext);
       let response;
-      try { response = assertResponse(await saveToDatabase(next, historyContext)); }
-      catch (error) { return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error); }
+      try { response = await submitNoteVersion(next, historyContext, opts, isCurrent); }
+      catch (error) {
+        if (opts.checkRecovery || !isCurrent()) throw error;
+        return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error);
+      }
       const saved = response.records && response.records[0] ? response.records[0] : next;
       if (!isCurrent()) return saved;
       state.records.set(saved.recordName, saved);
@@ -8864,8 +9044,11 @@
 
     if (historyContext) assertHistoryContext(historyContext);
     let response;
-    try { response = assertResponse(await saveToDatabase(next, historyContext)); }
-    catch (error) { return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error); }
+    try { response = await submitNoteVersion(next, historyContext, opts, isCurrent); }
+    catch (error) {
+      if (opts.checkRecovery || !isCurrent()) throw error;
+      return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error);
+    }
     const saved = response.records && response.records[0] ? response.records[0] : next;
     if (!isCurrent()) return saved;
     state.records.set(saved.recordName, saved);
@@ -8878,13 +9061,28 @@
 
   async function flushPendingEdits() {
     if (browserOffline() || !state.database || !state.editQueue.length) return;
+    const session = state.accountSession;
+    if (state.pendingEditFlush?.session === session) return state.pendingEditFlush.promise;
+    const flight = { session };
+    state.pendingEditFlush = flight;
+    flight.promise = sendPendingEdits(session).finally(function () {
+      if (state.pendingEditFlush === flight) state.pendingEditFlush = null;
+    });
+    return flight.promise;
+  }
+
+  async function sendPendingEdits(session) {
     const pending = state.editQueue.slice();
     for (let index = 0; index < pending.length; index += 1) {
+      if (!accountSessionCurrent(session) || browserOffline()) return;
       const edit = pending[index];
+      if (pendingEditFor(edit.recordName)?.updatedAt !== edit.updatedAt) continue;
+      if (!state.editsStartedHere.has(edit.recordName) || state.recoveredEditNames.has(edit.recordName)) continue;
       if (state.selectedRecordName === edit.recordName && state.dirty) {
         await flushSave();
         continue;
       }
+      if (state.selectedRecordName === edit.recordName && state.saveFlightCount > 0) continue;
       const record = state.records.get(edit.recordName);
       if (!record) continue;
       const based = recordForPendingEdit(record, edit);
@@ -8897,11 +9095,19 @@
       try {
         rememberPendingEditBaseline(edit);
         await saveRecord(based, edit.body);
+        if (!accountSessionCurrent(session)) return;
+        const submitted = recoveredEditDocument(edit);
+        const latest = pendingEditFor(edit.recordName);
+        if (!latest || latest.updatedAt !== edit.updatedAt || !sameSyncDocument(recoveredEditDocument(latest), submitted)) continue;
+        const stored = draftFor(edit.recordName);
+        if (stored && !sameSyncDocument(stored, submitted)) continue;
+        const saved = state.syncBaselines.get(edit.recordName);
         dropPendingEdit(edit.recordName);
         clearDraft(edit.recordName);
-        rememberRecordBody(edit.recordName, typeof edit.body === "string" ? edit.body : edit.body.title + "\n\n" + edit.body.body, state.accountSession);
+        if (saved) rememberRecordBody(edit.recordName, state.nativeSchema ? saved.body : saved.title + "\n\n" + saved.body, session);
         if (state.selectedRecordName === edit.recordName && !state.dirty) clearSaveProblem(edit.recordName);
       } catch (error) {
+        if (!accountSessionCurrent(session)) return;
         if (launchLibrary && launchLibrary.isNetworkSaveFailure(error) || browserOffline()) {
           if (state.selectedRecordName === edit.recordName) showSaveProblem(saveProblemMessage(error), edit.recordName);
           return;
@@ -8917,6 +9123,7 @@
 
   async function flushSave() {
     window.clearTimeout(state.saveTimer);
+    if (state.recoveredEditNames.has(state.selectedRecordName)) return;
     if (browserOffline()) {
       if (state.dirty && state.selectedRecordName) rememberPendingEdit(state.selectedRecordName, currentMarkdown());
       if (state.dirty || state.editQueue.length) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, state.selectedRecordName);
@@ -9190,7 +9397,7 @@
       if (!accountSessionCurrent(session)) return false;
       let saved = draft?.submitted ? await findSubmittedCapture(record, draft, session) : null;
       if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
-      if (draft?.owner && captureOwner() !== draft.owner) { clearCapture(); return false; }
+      if (draft?.owner && browserLibraryOwner() !== draft.owner) { clearCapture(); return false; }
       if (!saved) {
         if (draft) {
           draft.submitted = true;
@@ -9199,7 +9406,7 @@
         }
         const response = assertResponse(await saveToDatabase(record));
         if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
-        if (draft?.owner && captureOwner() !== draft.owner) { clearCapture(); return false; }
+        if (draft?.owner && browserLibraryOwner() !== draft.owner) { clearCapture(); return false; }
         saved = response?.records?.find(item => item.recordName === record.recordName);
         if (!saved && draft) throw new Error("Arbor couldn’t confirm whether this note was saved. Press Enter to check again.");
         saved = saved || record;
@@ -10485,6 +10692,7 @@
     $("export-note-markdown").disabled = !state.selectedRecordName || state.searchPage;
     $("export-folder-markdown").disabled = !state.selectedFolder || state.showingArchive;
     pushFocus();
+    renderRecoveredEdits();
     renderSettingsShortcuts();
     setMotionVisibility(modal, true);
     document.body.classList.add("settings-open");
@@ -11437,6 +11645,11 @@
       if (recordName) openNote(recordName);
     });
     $("note-title").addEventListener("input", function () { fitTitle(); scheduleSave(false); });
+    $("draft-review").addEventListener("click", function () {
+      openSettings();
+      $("settings-tab-account").click();
+      $("recovered-edits").scrollIntoView({ block: "nearest" });
+    });
     const discardDraftButton = $("draft-discard");
     if (discardDraftButton) discardDraftButton.addEventListener("click", discardRecoveredDraft);
     window.addEventListener("beforeunload", function (event) {
@@ -11930,12 +12143,18 @@
   });
   wireEvents();
   window.addEventListener("storage", function (event) {
+    if (!$("settings-modal").hidden) renderRecoveredEdits();
+    if (state.recoveredEditNames.has(state.selectedRecordName) && !browserLibraryOwner()) {
+      window.clearTimeout(state.saveTimer);
+      state.dirty = false;
+      selectNote(null);
+    }
     if (captureDraft?.owner && (event.key === null || event.key === "arbor.web.account-id") &&
         (!event.newValue || event.newValue !== state.connectionUserID)) clearCapture();
   });
   window.addEventListener("online", retryVisibleCapture);
   function retryVisibleCapture() {
-    if (captureDraft?.retryOnReconnect && captureDraft.owner && captureOwner() === captureDraft.owner &&
+    if (captureDraft?.retryOnReconnect && captureDraft.owner && browserLibraryOwner() === captureDraft.owner &&
         state.database && state.nativeZoneExists && $("capture-dialog").open) commitCapture();
   }
   window.addEventListener("online", function () {

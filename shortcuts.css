@@ -26,7 +26,7 @@ dialog.shortcut-sheet {
 }
 
 dialog.shortcut-sheet::backdrop {
-  background: rgba(0, 0, 0, 0.62);
+  background: var(--scrim-shortcuts);
 }
 
 dialog.shortcut-sheet[open] .shortcut-sheet-card {
@@ -57,11 +57,11 @@ dialog.shortcut-sheet.is-closing::backdrop {
 
 @keyframes arbor-shortcut-backdrop-enter {
   from { background-color: transparent; }
-  to { background-color: rgba(0, 0, 0, .62); }
+  to { background-color: var(--scrim-shortcuts); }
 }
 
 @keyframes arbor-shortcut-backdrop-exit {
-  from { background-color: rgba(0, 0, 0, .62); }
+  from { background-color: var(--scrim-shortcuts); }
   to { background-color: transparent; }
 }
 

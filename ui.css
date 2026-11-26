@@ -631,6 +631,12 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .settings-backdrop, .folder-dialog::backdrop, .quick-dialog::backdrop {
   background: var(--scrim);
 }
+@media (prefers-reduced-transparency: reduce) {
+  .settings-backdrop, .folder-dialog::backdrop, .quick-dialog::backdrop {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}
 .app-shell {
   border-color: var(--separator);
   border-width: var(--hairline);
@@ -1262,7 +1268,7 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
     height: 100%;
     padding: 0;
     border: 0;
-    background: rgb(0 0 0 / 48%);
+    background: var(--scrim-sidebar);
     opacity: 0;
     visibility: hidden;
     pointer-events: none;

@@ -6,7 +6,7 @@ const WEB_RECORD_TYPES = Object.freeze(["ArborNote", "ArborFolder"]);
 const NATIVE_METADATA_KEYS = Object.freeze([
   "CD_entityName", "CD_id", "CD_noteUUID", "CD_userTitle", "CD_generatedTitle",
   "CD_modifiedAt", "CD_createdAt", "CD_archivedAt", "CD_folderID",
-  "CD_name", "CD_parentID", "CD_isStarred", "CD_headerFontStyle", "CD_bodyFontStyle"
+  "CD_name", "CD_parentID", "CD_headerFontStyle", "CD_bodyFontStyle"
 ]);
 
 const WEB_METADATA_KEYS = Object.freeze([

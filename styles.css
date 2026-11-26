@@ -135,6 +135,8 @@
   --highlight-text: light-dark(#3d3200, #ffe7a8);
   --scrim: rgba(0, 0, 0, 0.4);
   --scrim: light-dark(rgba(0, 0, 0, 0.4), rgba(0, 0, 0, 0.55));
+  --scrim-shortcuts: rgb(0 0 0 / 62%);
+  --scrim-sidebar: rgb(0 0 0 / 48%);
   --focus-ring: var(--cyan);
   --focus-ring-halo: rgba(0, 192, 232, 0.2);
   --focus-ring-halo: color-mix(in srgb, var(--focus-ring) 24%, transparent);
@@ -314,6 +316,9 @@
 
 @media (prefers-reduced-transparency: reduce) {
   :root {
+    --scrim: var(--surface-canvas);
+    --scrim-shortcuts: var(--surface-canvas);
+    --scrim-sidebar: var(--surface-canvas);
     --material-sidebar: var(--surface-sidebar-solid);
     --material-toolbar: var(--surface-elevated);
     --material-chrome: var(--surface-elevated);

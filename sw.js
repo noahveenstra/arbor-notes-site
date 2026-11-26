@@ -16,6 +16,7 @@ const APP_SCOPE_PATH = new URL(self.registration.scope).pathname;
 const APP_ROOT_PATH = APP_SCOPE_PATH === "/" ? "" : APP_SCOPE_PATH.replace(/\/$/, "");
 const APP_INDEX_URL = new URL("index.html", self.registration.scope).href;
 const APP_INDEX_PATH = new URL("index.html", self.registration.scope).pathname;
+const AUTH_CALLBACK_URL = new URL("auth-callback.html", self.registration.scope);
 const RUNTIME_VENDOR_PATH = new URL("vendor/", self.registration.scope).pathname;
 const RUNTIME_MODELS_PATH = new URL("models/", self.registration.scope).pathname;
 
@@ -201,6 +202,17 @@ self.addEventListener("fetch", function (event) {
   try { url = new URL(request.url); } catch (_) { return; }
   if (isCloudKitHost(url.hostname)) return;
   if (url.origin !== self.location.origin) return;
+  if (request.mode === "navigate" && url.pathname === AUTH_CALLBACK_URL.pathname) {
+    // Only the canonical, integrity-checked document may enter Cache Storage.
+    // Keep the original navigation URL out of network requests and cache keys.
+    event.respondWith(readShellAsset(AUTH_CALLBACK_URL).then(function (response) {
+      const headers = new Headers(response.headers);
+      headers.set("Cache-Control", "no-store");
+      headers.set("Referrer-Policy", "no-referrer");
+      return new Response(response.body, { status: response.status, headers: headers });
+    }));
+    return;
+  }
   if (request.headers.has("range")) return;
 
   if (isAppNavigation(url, request)) {

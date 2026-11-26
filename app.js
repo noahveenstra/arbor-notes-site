@@ -7840,6 +7840,52 @@
     returnButton.hidden = false;
   }
 
+  // CloudKit JS opens a new window synchronously from its sign-in control.
+  // That window inherits a copy of this origin's sessionStorage. Remove the
+  // opener's copy after the click, keeping the expected nonce only in memory.
+  function enableApplePopupReturn(store) {
+    const container = config.containerIdentifier;
+    const callbackPath = new URL("./auth-callback.html", document.baseURI).pathname;
+    const key = "arbor.web.apple-popup-attempt";
+    const buttonHost = $("apple-sign-in-button");
+    buttonHost.addEventListener("click", function (event) {
+      if (!event.isTrusted || !event.target.closest(".apple-auth-button") || state.user || state.database) return;
+      const session = state.accountSession;
+      const expires = Date.now() + 10 * 60 * 1000;
+      let nonce;
+      try {
+        if (store.getToken(container)) return;
+        nonce = crypto.randomUUID();
+        sessionStorage.setItem(key, nonce);
+      } catch (_) { return; }
+      window.setTimeout(function () { sessionStorage.removeItem(key); }, 0);
+      window.arborFinishApplePopup = function (popup, attempt, token) {
+        if (attempt !== nonce || Date.now() >= expires || session !== state.accountSession
+            || state.user || state.database || store.getToken(container)
+            || popup.opener !== window || popup.top !== popup
+            || popup.location.origin !== location.origin || popup.location.pathname !== callbackPath
+            || popup.location.search || popup.location.hash
+            || typeof token !== "string" || !token || token.length > 4096 || /[\s\u0000-\u001f\u007f]/.test(token)) return false;
+        delete window.arborFinishApplePopup;
+        store.putToken(container, token);
+        if (store.getToken(container) !== token) return false;
+        // Let the existing whenUserSignsIn listener connect only after Apple's
+        // private current-user check. Keep the original tab and its drafts.
+        function failedReturn() {
+          if (session !== state.accountSession) return;
+          if (store.getToken(container) === token) store.putToken(container, null);
+          if (state.paintedFromCache) showCachedSignInFailure("Arbor couldn’t reconnect to iCloud. Your saved browser copy is still available.");
+          else showWelcomeCheckError();
+        }
+        setWelcomeStatus("Checking your Apple Account session…", true);
+        state.container.setUpAuth().then(function (identity) {
+          if (!identity) failedReturn();
+        }, failedReturn);
+        return true;
+      };
+    }, true);
+  }
+
   function initializeCloudKit() {
     if (demoMode) {
       initializeDemo();
@@ -7883,6 +7929,7 @@
         }]
       });
       state.container = CloudKit.getDefaultContainer();
+      if (state.arborCloudKitTransport) enableApplePopupReturn(state.arborCloudKitTransport.authTokenStore);
       const cachedFailure = "Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple. These notes are the unencrypted copy saved in this browser. Reload to try again.";
       if (state.paintedFromCache) setConnection("Checking your Apple Account…", false);
       else {

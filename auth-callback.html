@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wLsgu4IgwxsmlTnPIj0b3a6VmUdzEaQ1qbTBZn+G4Bc='; base-uri 'none'; form-action 'none'">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Return to Arbor Notes</title>
+  <script>
+    (() => {
+      const query = location.search;
+      const fragment = location.hash;
+      history.replaceState(null, "", location.pathname);
+      try {
+        const key = "arbor.web.apple-popup-attempt";
+        const attempt = sessionStorage.getItem(key);
+        sessionStorage.removeItem(key);
+        if (!attempt || window.top !== window || !window.opener || fragment) return;
+        const tokens = new URLSearchParams(query).getAll("ckWebAuthToken");
+        if (tokens.length === 1 && window.opener.arborFinishApplePopup(window, attempt, tokens[0])) {
+          window.close();
+        }
+      } catch (_) {
+        // A closed, cross-origin, or older opener cannot accept this return.
+      }
+    })();
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Return to Arbor Notes</h1>
+    <p>Go back to the Notes tab where you started signing in. If Notes still asks you to sign in, reload that tab and try again.</p>
+    <a href="./">Open Notes</a>
+  </main>
+</body>
+</html>

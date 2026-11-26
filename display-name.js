@@ -6,11 +6,11 @@
 (function attachArborDisplayName(root, factory) {
   const dictionary = root.ArborPersonalProofreadingDictionary
     || (typeof require === "function" ? require("./personal-dictionary.js") : null);
+  if (!dictionary) return;
   const api = factory(dictionary);
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.ArborDisplayName = api;
 })(typeof globalThis !== "undefined" ? globalThis : this, function createArborDisplayName(dictionary) {
-  if (!dictionary) throw new Error("The personal dictionary contract is unavailable.");
 
   function greetingPhrase(hour) {
     const value = Number(hour);

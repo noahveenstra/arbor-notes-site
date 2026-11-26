@@ -116,14 +116,16 @@
     const baseLines = base.split("\n");
     const localLines = local.split("\n");
     const remoteLines = remote.split("\n");
-    if (remoteLines.length > localLines.length) return false;
+    // A missing base line may be an intentional deletion on the other device.
+    if (remoteLines.length < baseLines.length || remoteLines.length > localLines.length) return false;
     for (let index = 0; index < remoteLines.length; index += 1) {
       const baseLine = index < baseLines.length ? baseLines[index] : "";
       const remoteLine = remoteLines[index];
       const localLine = localLines[index];
       if (remoteLine === localLine || remoteLine === baseLine) continue;
-      if (remoteLine.length < baseLine.length && baseLine.startsWith(remoteLine) && localLine.startsWith(baseLine)) return false;
-      if (!localLine.startsWith(remoteLine)) return false;
+      // Only recognize successive additions to the same baseline. A shorter
+      // prefix can also be the result of deleting or replacing words.
+      if (!remoteLine.startsWith(baseLine) || !localLine.startsWith(remoteLine)) return false;
     }
     return true;
   }

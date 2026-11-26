@@ -1,13 +1,13 @@
 (function attachArborProofreadingDictionarySync(root, factory) {
   const contract = root.ArborPersonalProofreadingDictionary
     || (typeof require === "function" ? require("./personal-dictionary.js") : null);
+  if (!contract) return;
   const api = factory(contract);
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.ArborProofreadingDictionarySync = api;
 })(globalThis, function createArborProofreadingDictionarySync(dictionary) {
   "use strict";
 
-  if (!dictionary) throw new Error("The personal dictionary contract is unavailable.");
   const contract = dictionary.contract;
 
   function fieldValue(record, key) {

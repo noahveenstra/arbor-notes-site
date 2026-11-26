@@ -18,7 +18,7 @@ const RUST_SEARCH_URL = "./rust-search.js?v=arb-125-rust-index-20261125-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=cloudkit-web-zone-20261124-a";
 const CLOUDKIT_WEB_SERVICES_URL = "./cloudkit-encrypted-web-services.mjs?v=arb-190-instant-launch-20261125-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-64-auth-recovery-20261126-b";
+const APP_SCRIPT_URL = "./app.js?v=arb-212-startup-20261126-a";
 const PROOFREADING_SCHEDULE_URL = "./proofreading-schedule.mjs?v=arb-always-on-proofreading-20261125-a";
 let startupStatusTimer = null;
 
@@ -184,6 +184,9 @@ async function startApp() {
     "Arbor is still starting. It is preparing the workspace and Apple sign-in connection."
   );
   if (!(await prepareShell())) return;
+  for (const script of document.querySelectorAll("script[data-required-global]")) {
+    if (!window[script.dataset.requiredGlobal]) throw new Error("A required Arbor component is unavailable: " + script.dataset.requiredGlobal);
+  }
   if (window.__arborFirstControlReloadStarted) return;
   window.__arborFirstControlReloadStarted = true;
   setStartupStatus(
@@ -206,7 +209,11 @@ async function startApp() {
   globalThis.ArborPassageAnchor = await importModule(PASSAGE_ANCHOR_URL);
   globalThis.ArborCloudKitWebZone = await importModule(CLOUDKIT_WEB_ZONE_URL);
   globalThis.ArborCloudKitWebServices = await importModule(CLOUDKIT_WEB_SERVICES_URL);
-  globalThis.ArborProofreadingSchedule = await importModule(PROOFREADING_SCHEDULE_URL);
+  try {
+    globalThis.ArborProofreadingSchedule = await importModule(PROOFREADING_SCHEDULE_URL);
+  } catch (error) {
+    console.warn("Scheduled proofreading is unavailable.", error);
+  }
   await rustSearchPromise;
   await appendClassicScript(NOTE_SORT_URL);
   if (!isSamplePreview && !cloudKitLoaded) {
@@ -217,12 +224,11 @@ async function startApp() {
   }
   window.__arborStartFromBootstrap = true;
   await appendClassicScript(APP_SCRIPT_URL);
+  if (typeof window.arborWeb?.finishStartup !== "function") throw new Error("The Arbor editor could not start.");
   clearStartupStatusTimer();
   document.documentElement.classList.remove("is-preparing-shell");
   const cloudKitError = await cloudKitLoad;
-  if (window.arborWeb && typeof window.arborWeb.finishStartup === "function") {
-    await window.arborWeb.finishStartup(cloudKitError);
-  }
+  await window.arborWeb.finishStartup(cloudKitError);
 }
 
 const retry = document.getElementById("shell-boot-retry");

@@ -596,9 +596,14 @@
           state.records = new Map(cached.records.map(function (record) { return [record.recordName, record]; }));
           state.syncToken = cached.syncToken || null; state.nativeZoneID = cached.nativeZoneID || null;
           state.bodyCache = new Map(Array.isArray(cached.bodies) ? cached.bodies : []);
-          state.dictionaryEntries = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryEntries);
-          state.dictionaryPending = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryPending);
-          state.dictionaryEntries = proofreadingDictionary.mergeSnapshotEntries(state.dictionaryEntries, state.dictionaryPending);
+          if (proofreadingDictionary) {
+            state.dictionaryPending = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryPending);
+            state.dictionaryEntries = proofreadingDictionary.mergeSnapshotEntries(cached.dictionaryEntries, state.dictionaryPending);
+          } else {
+            // Preserve pending edits verbatim for the next launch with the dictionary available.
+            state.dictionaryEntries = Array.isArray(cached.dictionaryEntries) ? cached.dictionaryEntries : [];
+            state.dictionaryPending = Array.isArray(cached.dictionaryPending) ? cached.dictionaryPending : [];
+          }
           state.nativeSchema = config.schemaMode === "web" ? false : cached.nativeSchema !== false;
           if (config.schemaMode === "web" && cached.nativeSchema !== false) {
             state.nativeZoneID = null;
@@ -660,8 +665,15 @@
 
   function renderPersonalDictionarySettings() {
     const status = $("personal-dictionary-status");
+    if (!proofreadingDictionary) {
+      $("personal-dictionary-input").disabled = true;
+      $("personal-dictionary-add").disabled = true;
+      if (status) status.textContent = "Your personal dictionary is unavailable until Arbor reloads.";
+      return;
+    }
     if (status) {
-      status.textContent = state.dictionarySyncStatus;
+      status.textContent = !proofreadingDictionarySync && !state.demo
+        ? "Dictionary sync is unavailable until Arbor reloads." : state.dictionarySyncStatus;
       status.dataset.state = state.dictionarySyncError ? "error" : (state.dictionarySyncPromise ? "syncing" : "ready");
     }
     const list = $("personal-dictionary-entries");
@@ -755,6 +767,7 @@
   }
 
   function syncPersonalDictionary(session) {
+    if (!proofreadingDictionarySync) return Promise.resolve(false);
     if (state.demo) return Promise.resolve(true);
     if (!state.database || state.accountCacheSuspended || session !== state.accountSession) return Promise.resolve(false);
     if (state.dictionarySyncPromise) return state.dictionarySyncPromise;
@@ -867,7 +880,7 @@
   }
 
   function reconcileDisplayNameDictionary() {
-    if (!displayNameTools) return Promise.resolve(false);
+    if (!displayNameTools || !proofreadingDictionary) return Promise.resolve(false);
     const plan = displayNameTools.planNameDictionary(state.dictionaryEntries, nameDictionaryLedger(), accountDisplayName());
     state.accountSettings.nameDictionary = plan.ledger;
     persistAccountSettings();
@@ -4317,6 +4330,7 @@
   }
 
   function ensureProofreadingWorker() {
+    if (!proofreadingDictionary || !window.ArborProofreading) return null;
     if (state.proofreadingWorker) return state.proofreadingWorker;
     if (typeof Worker !== "function") return null;
     try {
@@ -4529,7 +4543,7 @@
   }
 
   function autoCorrectionTrigger(body, event) {
-    if (!state.preferences.autoCorrectHighConfidence || !event || event.isComposing || event.inputType !== "insertText" ||
+    if (!window.ArborAutocorrect || !state.preferences.autoCorrectHighConfidence || !event || event.isComposing || event.inputType !== "insertText" ||
         typeof event.data !== "string" || !/^[\p{White_Space}\p{P}]$/u.test(event.data) || /^['’]$/u.test(event.data)) return null;
     const context = editorCaretContext(body);
     if (!context) return null;
@@ -4849,6 +4863,7 @@
   }
 
   function ensureCascadeWorker() {
+    if (!proofreadingDictionary || !window.ArborProofreading || !window.ArborProofreadingSchedule) return null;
     if (state.cascadeWorker) return state.cascadeWorker;
     if (typeof Worker !== "function") return null;
     try {
@@ -6239,6 +6254,7 @@
   }
 
   function ensureSelectionReviewWorker() {
+    if (!proofreadingDictionary || !window.ArborProofreading || !window.ArborParagraphProofreader) return null;
     if (state.selectionReviewWorker) return state.selectionReviewWorker;
     if (typeof Worker !== "function") return null;
     try {

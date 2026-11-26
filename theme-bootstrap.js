@@ -21,3 +21,10 @@
     meta.removeAttribute("media");
   });
 })();
+
+// The bootstrap itself cannot report a failed download.
+document.addEventListener("DOMContentLoaded", function () {
+  if (typeof startApp === "function") return;
+  document.getElementById("shell-boot-error").hidden = false;
+  document.getElementById("shell-boot-retry").addEventListener("click", function () { window.location.reload(); });
+});

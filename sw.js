@@ -1,4 +1,4 @@
-// Cache one complete, integrity-checked release of the static app shell.
+// Cache one integrity-checked release of the static app shell.
 // This worker never caches CloudKit traffic or user data.
 
 importScripts("./shell-release.js");
@@ -59,6 +59,14 @@ async function verifyWorkerRelease() {
   }
 }
 
+function isOptionalWritingAsset(asset) {
+  const filename = new URL(asset.url, self.registration.scope).pathname.split("/").pop();
+  return filename.startsWith("proofreading-") || filename.startsWith("paragraph-proofreading-")
+    || filename.startsWith("gector-")
+    || ["proofreading.js", "paragraph-proofreader.js", "personal-dictionary.js", "autocorrect.js",
+      "display-name.js", "note-revisions.js", "theme-bootstrap.js"].includes(filename);
+}
+
 async function cacheShellAsset(cache, asset) {
   const url = new URL(asset.url, self.registration.scope);
   const response = await fetch(url.href, {
@@ -70,13 +78,18 @@ async function cacheShellAsset(cache, asset) {
   if (await responseHash(response) !== asset.sha256) {
     throw new Error("App shell integrity check failed: " + asset.url);
   }
-  await cache.put(url.href, response);
+  await cache.put(url.href, response.clone());
+  return response;
 }
 
 async function precacheShell(cache) {
   for (let start = 0; start < SHELL_ASSETS.length; start += 6) {
-    await Promise.all(SHELL_ASSETS.slice(start, start + 6).map(function (asset) {
-      return cacheShellAsset(cache, asset);
+    await Promise.all(SHELL_ASSETS.slice(start, start + 6).map(async function (asset) {
+      try {
+        await cacheShellAsset(cache, asset);
+      } catch (error) {
+        if (!isOptionalWritingAsset(asset)) throw error;
+      }
     }));
   }
 }
@@ -145,10 +158,13 @@ function offlineShellResponse() {
 
 function readShellAsset(url) {
   const key = `${url.pathname}${url.search}`;
-  if (!SHELL_ASSET_BY_URL.has(key)) return Promise.resolve(offlineShellResponse());
+  const asset = SHELL_ASSET_BY_URL.get(key);
+  if (!asset) return Promise.resolve(offlineShellResponse());
   return caches.open(APP_SHELL_CACHE).then(function (cache) {
     return cache.match(new URL(key, self.registration.scope).href).then(function (cached) {
-      return cached || offlineShellResponse();
+      if (cached) return cached;
+      if (isOptionalWritingAsset(asset)) return cacheShellAsset(cache, asset).catch(offlineShellResponse);
+      return offlineShellResponse();
     });
   });
 }

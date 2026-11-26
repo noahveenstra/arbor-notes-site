@@ -16,7 +16,7 @@
   <link rel="icon" href="./icons/favicon.ico" sizes="any">
   <link rel="icon" href="./icons/favicon-32.png" type="image/png" sizes="32x32">
   <link rel="icon" href="./icons/favicon-16.png" type="image/png" sizes="16x16">
-  <script src="./theme-bootstrap.js?v=arb-29-csp-1"></script>
+  <script src="./theme-bootstrap.js?v=arb-212-startup-20261126-a"></script>
   <script src="./rust-search.js?v=arb-125-rust-index-20261125-a" defer></script>
   <style>
     /* First paint matches the notes mockup: canvas #141414, editor card #1c1c1c.
@@ -37,24 +37,24 @@
   <link rel="stylesheet" href="./ui.css?v=arb-proofreading-learning-20261125-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
-  <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b"></script>
-  <script type="module" src="./shortcuts.js?v=arb-179-custom-shortcuts-20261124-a"></script>
-  <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" defer></script>
+  <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b" data-required-global="ARBOR_CLOUDKIT_CONFIG"></script>
+  <script type="module" src="./shortcuts.js?v=arb-179-custom-shortcuts-20261124-a" data-required-global="ArborShortcuts"></script>
+  <script src="./markdown.js?v=arb-139-markdown-roundtrip-20261123-a" data-required-global="ArborMarkdown" defer></script>
   <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
-  <script src="./proofreading-dictionary-sync.js?v=arb-112-dictionary-sync-20261120-a" defer></script>
-  <script src="./keyboard-shortcut-preferences.js?v=arb-179-shortcut-preferences-20261124-a" defer></script>
-  <script src="./keyboard-shortcut-sync.js?v=arb-179-shortcut-sync-20261124-a" defer></script>
+  <script src="./proofreading-dictionary-sync.js?v=arb-212-startup-20261126-a" defer></script>
+  <script src="./keyboard-shortcut-preferences.js?v=arb-179-shortcut-preferences-20261124-a" data-required-global="ArborKeyboardShortcutPreferences" defer></script>
+  <script src="./keyboard-shortcut-sync.js?v=arb-179-shortcut-sync-20261124-a" data-required-global="ArborKeyboardShortcutSync" defer></script>
   <script src="./proofreading.js?v=arb-proofreading-real-models-20261126-a" defer></script>
   <script src="./autocorrect.js?v=arb-109-context-autocorrect-20261123-a" defer></script>
   <script src="./paragraph-proofreader.js?v=arb-115-selection-review-20261120-b" defer></script>
-  <script src="./note-history.js?v=arb-136-restore-20261123-a" defer></script>
-  <script src="./display-name.js?v=arb-display-name-20261125-a" defer></script>
+  <script src="./note-history.js?v=arb-136-restore-20261123-a" data-required-global="ArborNoteHistory" defer></script>
+  <script src="./display-name.js?v=arb-212-startup-20261126-a" defer></script>
   <script src="./note-revisions.js?v=arb-display-name-20261125-a" defer></script>
-  <script src="./cloudkit-fields.js?v=arb-22-logic-1" defer></script>
-  <script src="./search-logic.js?v=arb-related-margin-20261125-a" defer></script>
-  <script src="./note-sync.js?v=arb-148-live-sync-20261123-a" defer></script>
-  <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" defer></script>
-  <script src="./app-bootstrap.js?v=arb-64-auth-recovery-20261126-b" defer></script>
+  <script src="./cloudkit-fields.js?v=arb-22-logic-1" data-required-global="ArborCloudKitFields" defer></script>
+  <script src="./search-logic.js?v=arb-related-margin-20261125-a" data-required-global="ArborSearchLogic" defer></script>
+  <script src="./note-sync.js?v=arb-214-remote-deletions-20261126-a" data-required-global="ArborNoteSync" defer></script>
+  <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" data-required-global="ArborLaunchLibrary" defer></script>
+  <script src="./app-bootstrap.js?v=arb-212-startup-20261126-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>

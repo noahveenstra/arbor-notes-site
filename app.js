@@ -227,6 +227,7 @@
   if (keyboardShortcutPreferences) state.shortcutOperations = keyboardShortcutPreferences.normalizeOperations(state.shortcutOperations);
   if (window.ArborShortcuts) state.shortcutBindings = window.ArborShortcuts.resolveShortcutBindings(state.shortcutOperations);
   let captureResizeAnimation = null;
+  let captureDraft = null;
   let layoutMotionReadyScheduled = false;
   let shortcutCloseTimer = 0;
   let themeTransitionGeneration = 0;
@@ -476,6 +477,7 @@
   }
 
   function discardInMemoryLibrary() {
+    clearCapture();
     window.clearInterval(state.realtimeSyncTimer);
     state.realtimeSyncTimer = null;
     state.realtimeSyncPromise = null;
@@ -3398,7 +3400,12 @@
       state.selectedFolder = "";
       renderAll();
     }
-    $("capture-input").value = ""; resizeCaptureInput();
+    if (!captureDraft) {
+      captureDraft = { id: crypto.randomUUID().toUpperCase(), folder: state.selectedFolder, submitted: false, busy: false, attempted: false };
+      $("capture-input").value = "";
+      $("capture-status").textContent = "";
+    }
+    resizeCaptureInput();
     if (!$("capture-dialog").open) $("capture-dialog").showModal();
     window.requestAnimationFrame(function () { $("capture-input").focus(); });
   }
@@ -3431,11 +3438,38 @@
     animation.onfinish = function () { if (captureResizeAnimation === animation) captureResizeAnimation = null; };
   }
 
-  function commitCapture() {
-    const text = $("capture-input").value;
-    if (!text.trim()) return;
-    $("capture-dialog").close();
-    createNote(text, true);
+  function clearCapture() {
+    captureDraft = null;
+    $("capture-input").value = "";
+    $("capture-input").readOnly = false;
+    $("capture-status").textContent = "";
+    if ($("capture-dialog").open) $("capture-dialog").close();
+  }
+
+  function hasUnsavedCapture() {
+    return Boolean(captureDraft && $("capture-input").value.trim());
+  }
+
+  async function commitCapture() {
+    const draft = captureDraft;
+    const input = $("capture-input");
+    if (!draft || draft.busy || !input.value.trim()) return;
+    draft.busy = true;
+    draft.attempted = true;
+    input.readOnly = true;
+    $("capture-status").textContent = "Saving…";
+    try {
+      await createNote(input.value, true, undefined, { draft });
+    } catch (error) {
+      if (draft === captureDraft) {
+        $("capture-status").textContent = readableError(error) + " Your text is still in this tab.";
+      }
+    } finally {
+      if (draft === captureDraft) {
+        draft.busy = false;
+        input.readOnly = false;
+      }
+    }
   }
 
   function openSearch() {
@@ -7290,6 +7324,7 @@
     const userID = String(identity.userRecordName || "").trim();
     if (state.database && state.connectionUserID === userID && !state.accountCacheSuspended) return;
     const session = ++state.accountSession;
+    if (captureDraft && state.connectionUserID && state.connectionUserID !== userID) clearCapture();
     const keepCachedLibrary = state.paintedFromCache && state.connectionUserID === userID;
     if (!keepCachedLibrary) showWelcomeChecking();
     setWelcomeStatus("Preparing your private notes…", true);
@@ -8739,17 +8774,40 @@
     }
   }
 
-  async function createNote(initialBody, focusBody, initialTitle, importFolder) {
-    if (!state.database) { showToast("Sign in with Apple before creating notes.", true); return false; }
-    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return false; }
+  async function findSubmittedCapture(record, draft, session) {
+    // A timed-out create may already exist. Read that exact identity before issuing another write.
+    const zoneID = state.nativeSchema ? state.nativeZoneID : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    let response;
+    try {
+      response = assertResponse(await state.database.fetchRecords([record.recordName], { zoneID: zoneID }));
+    } catch (error) {
+      if ([error?.serverErrorCode, error?.code, error?.errorCode].includes("UNKNOWN_ITEM")) return null;
+      throw error;
+    }
+    if (!accountSessionCurrent(session) || draft !== captureDraft) return null;
+    const current = response?.records?.find(item => item.recordName === record.recordName);
+    if (!current) throw new Error("Arbor couldn’t confirm whether this note was saved. Retry when connected.");
+    const textField = state.nativeSchema ? "text" : "body";
+    if (current.recordType !== record.recordType || noteUUID(current) !== draft.id ||
+        (state.nativeSchema && fieldValue(current, "userTitle") !== fieldValue(record, "userTitle")) ||
+        fieldValue(current, textField) !== fieldValue(record, textField)) {
+      throw new Error("The saved note differs from this capture. Copy your text before closing it and check the note in your library.");
+    }
+    return current;
+  }
+
+  async function createNote(initialBody, focusBody, initialTitle, { draft, importFolder } = {}) {
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
     const importing = typeof importFolder === "string";
-    const folderPath = importing ? importFolder : state.selectedFolder;
+    const folderPath = importFolder ?? draft?.folder ?? state.selectedFolder;
     try {
+      if (draft && browserOffline()) throw new Error("You’re offline. Press Enter to retry after reconnecting.");
+      if (!state.database) throw new Error("Sign in with Apple before creating notes.");
+      if (!state.demo && !state.nativeZoneExists) throw new Error("Arbor is still connecting to iCloud. Try again when the library has finished loading.");
       await flushSave();
       if (!accountSessionCurrent(session)) return false;
-      const id = crypto.randomUUID().toUpperCase();
+      const id = draft ? draft.id : crypto.randomUUID().toUpperCase();
       const requestedTitle = String(initialTitle || "").trim();
       const noteTitle = (importing ? requestedTitle.replace(/[\r\n]+/g, " ") : requestedTitle.slice(0, 180)) || "Untitled";
       const noteBody = String(initialBody || "");
@@ -8777,9 +8835,17 @@
         setField(record, "contentFingerprint", await fingerprint(legacyBody));
       }
       if (!accountSessionCurrent(session)) return false;
-      const response = assertResponse(await saveToDatabase(record));
-      if (!accountSessionCurrent(session)) return false;
-      const saved = response.records && response.records[0] ? response.records[0] : record;
+      let saved = draft?.submitted ? await findSubmittedCapture(record, draft, session) : null;
+      if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
+      if (!saved) {
+        if (draft) draft.submitted = true;
+        const response = assertResponse(await saveToDatabase(record));
+        if (!accountSessionCurrent(session)) return false;
+        saved = response?.records?.find(item => item.recordName === record.recordName);
+        if (!saved && draft) throw new Error("Arbor couldn’t confirm whether this note was saved. Press Enter to check again.");
+        saved = saved || record;
+      }
+      if (draft) clearCapture();
       state.records.set(saved.recordName, saved);
       syncDerivedCollections();
       const content = { title: noteTitle, body: noteBody, userTitle: noteTitle };
@@ -8806,6 +8872,7 @@
       }
       return true;
     } catch (error) {
+      if (draft) throw error;
       showToast(readableError(error), true);
       return false;
     }
@@ -8825,7 +8892,7 @@
         const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
         const body = decoder.decode(await file.arrayBuffer());
         if (!accountSessionCurrent(session)) return;
-        if (!await createNote(body, false, file.name.replace(/\.(md|markdown)$/i, ""), destination)) {
+        if (!await createNote(body, false, file.name.replace(/\.(md|markdown)$/i, ""), { importFolder: destination })) {
           if (!accountSessionCurrent(session)) return;
           throw new Error($("toast").textContent || "The note could not be created.");
         }
@@ -10933,7 +11000,7 @@
     if (discardDraftButton) discardDraftButton.addEventListener("click", discardRecoveredDraft);
     window.addEventListener("beforeunload", function (event) {
       persistCurrentDraft();
-      if (!state.dirty && state.saveFlightCount === 0) return;
+      if (!state.dirty && state.saveFlightCount === 0 && !hasUnsavedCapture()) return;
       event.preventDefault();
       event.returnValue = "";
     });
@@ -10985,6 +11052,7 @@
     });
     $("capture-dialog").addEventListener("click", function (event) { if (event.target === $("capture-dialog")) $("capture-dialog").close(); });
     $("capture-dialog").addEventListener("close", function () {
+      if (!$("capture-dialog").open && (!captureDraft?.attempted || !$("capture-input").value.trim())) clearCapture();
       if (captureResizeAnimation) {
         captureResizeAnimation.cancel();
         captureResizeAnimation = null;
@@ -11417,7 +11485,7 @@
   });
   async function prepareForShellUpdate() {
     const capture = $("capture-dialog");
-    if (capture.open && $("capture-input").value.trim()) return { ok: false, reason: "capture" };
+    if (hasUnsavedCapture()) return { ok: false, reason: "capture" };
     if (state.demo && state.dirty) return { ok: false, reason: "sample" };
 
     frame.inert = true;

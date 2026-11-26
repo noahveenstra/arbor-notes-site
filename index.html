@@ -329,7 +329,8 @@ Try replacing this example with something you want to remember.</textarea>
   </dialog>
 
   <dialog class="quick-dialog capture-dialog" id="capture-dialog" aria-label="Capture a thought">
-    <form class="quick-dialog-bar" id="capture-form"><label class="sr-only" for="capture-input">Capture a thought</label><textarea id="capture-input" rows="1" placeholder="Capture a thought…" autocomplete="off" maxlength="2000"></textarea></form>
+    <form class="quick-dialog-bar" id="capture-form"><label class="sr-only" for="capture-input">Capture a thought</label><textarea id="capture-input" rows="1" placeholder="Capture a thought…" autocomplete="off" maxlength="2000" aria-describedby="capture-status"></textarea></form>
+    <p id="capture-status" role="status"></p>
   </dialog>
   <dialog class="quick-dialog search-dialog" id="search-dialog" aria-label="Search notes">
     <form class="quick-dialog-bar search-dialog-bar" id="search-form">

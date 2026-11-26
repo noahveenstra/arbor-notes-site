@@ -240,8 +240,8 @@ function protectedRanges(text, options) {
     if (word === "I") continue;
     const known = Boolean(lexicon && lexicon.has && (lexicon.has(word) || lexicon.has(word.toLocaleLowerCase())));
     if (isSentenceStart(source, match.index)) {
-      const lower = word.toLocaleLowerCase();
-      const grammarToken = /^(?:its|whats|thats|theres|heres|wheres|whos|dont|doesnt|didnt|cant|wont|isnt|arent|wasnt|werent|im|ive|id|youre|youve|youll|youd|theyre|theyve|theyll|theyd|weve|hes|shes|aint|lets|recieved|seperate|tomorow|accomodating|untill|wich|nite|alot)$/u.test(lower);
+      const lower = word.toLocaleLowerCase().replace(/['’]/gu, "");
+      const grammarToken = /^(?:its|whats|thats|theres|heres|wheres|whos|whose|who|what|where|why|how|which|dont|doesnt|didnt|cant|wont|isnt|arent|wasnt|werent|im|ive|id|youre|youve|youll|youd|theyre|theyve|theyll|theyd|weve|hes|shes|aint|lets|after|before|although|though|because|while|when|if|unless|until|since|once|whereas|whether|and|but|or|the|recieved|seperate|tomorow|accomodating|untill|wich|nite|alot)$/u.test(lower);
       if (!known && word.length > 1 && !grammarToken) ranges.push({ start: match.index, end: match.index + match[0].length, kind: "name" });
       continue;
     }
@@ -410,7 +410,7 @@ function guardSpans(text, spans, options) {
     const original = source.slice(span.start, span.end);
     const replacement = String(span.replacement);
     if (original === replacement) return false;
-    if (negationKey(original) !== negationKey(replacement)) return false;
+    if (negationKey(original) !== negationKey(replacement) && span.ruleId !== "usage-double-negative") return false;
     if (numberKey(original) !== numberKey(replacement)) return false;
     const fromCount = wordTokens(original).length;
     const toCount = wordTokens(replacement).length;

@@ -25,7 +25,6 @@ function err(category, items) {
 const casualLowercaseClean = clean("casual-lowercase-clean", [
   "coffee tasted burnt today so i poured it out.",
   "stayed up reading until midnight.",
-  "yeah i can bring extra chairs on sunday.",
   "nothing felt urgent all morning.",
   "went back to the old draft and liked it better.",
   "maybe we wait until next week to decide.",
@@ -55,12 +54,12 @@ const casualLowercaseErrors = err("casual-lowercase-errors", [
   { text: "this is seperate from the main budget.", expect: ["separate"] },
   { text: "there are two bench behind the shed.", expect: ["benches"] },
   { text: "youre keys are still in the ignition.", expect: ["Your"], acceptableOutputs: ["Your keys are still in the ignition.", "your keys are still in the ignition."] },
-  { text: "it doesnt look like rain anymore.", expect: ["doesn't"] }
+  { text: "it doesnt look like rain anymore.", expect: ["doesn't"] },
+  { text: "yeah i can bring extra chairs on sunday.", expect: ["Sunday"] }
 ]);
 
 const notesClean = clean("notes-and-lists-clean", [
   "- milk and oat bread",
-  "- call dentist about tuesday",
   { text: "- [ ] send updated schedule to Hannah", protected: ["Hannah"] },
   "Meeting notes: budget and timeline",
   "Prep for Sunday",
@@ -80,7 +79,8 @@ const notesErrors = err("notes-and-lists-errors", [
   { text: "- buy three bag of coffee", expect: ["bags"], acceptableOutputs: ["- buy three bags of coffee"] },
   { text: "- check if Sam have the receipt", expect: ["has"], protected: ["Sam"], acceptableOutputs: ["- check if Sam has the receipt"] },
   { text: "- we cant ship until Friday", expect: ["can't"], protected: ["Friday"], acceptableOutputs: ["- we can't ship until Friday"] },
-  { text: "- replace the broken hinge tomorow", expect: ["tomorrow"], acceptableOutputs: ["- replace the broken hinge tomorrow"] }
+  { text: "- replace the broken hinge tomorow", expect: ["tomorrow"], acceptableOutputs: ["- replace the broken hinge tomorrow"] },
+  { text: "- call dentist about tuesday", expect: ["Tuesday"], acceptableOutputs: ["- call dentist about Tuesday"] }
 ]);
 
 const scriptureClean = clean("scripture-and-sermon-clean", [

@@ -3,10 +3,10 @@
 // dictionary entry (Hunspell flag S for regular plurals). The global model
 // threshold is not involved.
 
-import { builtinLexicon } from "./proofreading-lexicon.mjs";
+import { NO_PLURAL, builtinLexicon } from "./proofreading-lexicon.mjs";
 
 const QUANTIFIERS = new Set("two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen seventeen eighteen nineteen twenty thirty forty fifty sixty seventy eighty ninety hundred thousand million dozen several many few various numerous multiple both these those".split(" "));
-const MODIFIERS = new Set("big small old new young long short high low good bad great little large early late next other own same such real only very more most quite rather almost really just red blue green black white brown gray grey hot cold hard soft full free clear quiet slow fast happy sad nice kind poor rich open whole entire single local simple different important possible public private major minor main spare extra final broken updated printed".split(" "));
+const MODIFIERS = new Set("big small old new young long short high low good bad great little large early late next other own same such real only very more most quite rather almost really just red blue green black white brown gray grey hot cold hard soft full free clear quiet slow fast happy sad nice kind poor rich open whole entire single local simple different important possible public private major minor main spare extra final broken updated printed heavy wooden padded folded thick thin empty fresh clean narrow wide deep light dark round square metal plastic wool cotton ceramic".split(" "));
 const SAFE_FOLLOWERS = new Set("of in on at to for with from by about into over after before during without within through across around under upon off out up down near like than as per via among between against toward towards except and or but nor yet so behind beside inside outside along despite above below onto past until till since while because if when where that who whom which am is are was were be been being do does did have has had can could will would shall should may might must i you he she it we they this that these those there not never always really just still already also even only today yesterday tomorrow now then here again away back home too very lives live plays play needs need walks walk likes like wants want seems seem goes go".split(" "));
 const ADVERBS = new Set("really always never often just still also usually sometimes already even only ever soon later now then here there today yesterday tomorrow not simply actually probably".split(" "));
 const PREVIOUS_BLOCK = new Set("do does did be am is are was were been being have has had can could will would shall should may might must to that which who whom dont don't doesnt doesn't didnt didn't isnt isn't arent aren't wasnt wasn't werent weren't hasnt hasn't havent haven't hadnt hadn't wont won't cant can't cannot couldnt couldn't shouldnt shouldn't wouldnt wouldn't".split(" "));
@@ -55,7 +55,8 @@ const VERBS = [
   ["wash", "washes"], ["catch", "catches"], ["teach", "teaches"], ["touch", "touches"], ["match", "matches"],
   ["agree", "agrees"], ["belong", "belongs"], ["care", "cares"], ["sound", "sounds"], ["matter", "matters"],
   ["forget", "forgets"], ["remember", "remembers"], ["bring", "brings"], ["announce", "announces"],
-  ["reply", "replies"], ["arrive", "arrives"], ["rest", "rests"], ["ship", "ships"], ["use", "uses"]
+  ["reply", "replies"], ["arrive", "arrives"], ["rest", "rests"], ["ship", "ships"], ["use", "uses"],
+  ["bark", "barks"], ["live", "lives"], ["know", "knows"], ["walk", "walks"], ["forget", "forgets"]
 ];
 
 const BASE_OF = new Map();
@@ -94,6 +95,14 @@ function isModifier(token) {
   return /(?:ful|ous|ive|less|able|ible|ish|ent|ant|ly)$/u.test(token.lower);
 }
 
+function looksLikeModifier(token, next) {
+  if (isModifier(token)) return true;
+  if (!token || !next || /^[.!?]$/u.test(next.text)) return false;
+  if (!/(?:ed|ing)$/u.test(token.lower)) return false;
+  if (SAFE_FOLLOWERS.has(next.lower) || /^(?:ed|ied)$/u.test(next.lower)) return false;
+  return true;
+}
+
 function joinedToNumber(source, token) {
   if (!source || !token) return false;
   const prev = token.start > 0 ? source[token.start - 1] : "";
@@ -121,21 +130,59 @@ function regularPlural(word) {
   return word + "s";
 }
 
+const NOT_COUNT_HEAD = new Set(("the a an this that these those my your his her our their its i you he she it we they me us them " +
+  "of in on at to for with from by about into over after before during without within through across around under upon off out up down near like than as per via among between against toward towards " +
+  "and or but nor yet so if when while because although though since unless until than then too very not never always really just still already also even only " +
+  "am is are was were be been being do does did have has had can could will would shall should may might must " +
+  "big small old new young long short high low good bad great little large early late next other cold hot hard soft heavy wooden padded thick thin empty fresh clean wide deep light dark " +
+  "go come make take see know think say get give find tell leave keep feel become begin run sit stand grow mean meet pay hear bring buy catch teach build send spend hold lead speak write break choose drive eat fall fly forget hide ride rise sing sink sleep steal swim throw wake wear win lose sell feed draw show read put set let cut hit cost spread shut hurt quit " +
+  "walk talk look want need try call ask help start stop turn use work live play move seem " +
+  "two three four five six seven eight nine ten").split(/\s+/u));
+
+function alreadyPluralForm(lower, dict) {
+  if (Object.keys(IRREGULAR_PLURAL).some(function (key) { return IRREGULAR_PLURAL[key] === lower; })) return true;
+  if (!dict || !dict.has) return false;
+  if (lower.endsWith("ies") && dict.has(lower.slice(0, -3) + "y")) return true;
+  if (/(?:ches|shes|sses|xes|zes|oes)$/u.test(lower) && dict.has(lower.slice(0, -2))) return true;
+  if (lower.endsWith("s") && !lower.endsWith("ss") && !lower.endsWith("us") && dict.has(lower.slice(0, -1))) return true;
+  return false;
+}
+
 function pluralOf(word, lexicon) {
   const lower = word.toLocaleLowerCase();
   if (!lower || lower.indexOf("'") >= 0 || lower.indexOf("’") >= 0) return null;
-  if (BOOKS.has(lower)) return null;
+  if (BOOKS.has(lower) || NOT_COUNT_HEAD.has(lower) || NO_PLURAL.has(lower)) return null;
   if (IRREGULAR_PLURAL[lower]) return IRREGULAR_PLURAL[lower];
   const dict = lexicon || builtinLexicon;
+  if (alreadyPluralForm(lower, dict)) return null;
   const knownCount = Boolean(dict.has && dict.has(lower) && COUNT_WITHOUT_FLAG.has(lower));
-  if (!dict.allowsPlural(lower) && !knownCount) return null;
+  if (!dict.allowsPlural(lower) && !knownCount) {
+    if (!(dict.has && dict.has(lower) && lower.length > 2 && !/ly$/u.test(lower))) return null;
+  }
   return regularPlural(lower);
+}
+
+function pastCueBefore(tokens, index) {
+  const words = [];
+  for (let cursor = Math.max(0, index - 6); cursor < index; cursor += 1) {
+    if (tokens[cursor] && !/^[.!?]$/u.test(tokens[cursor].text)) words.push(tokens[cursor].lower);
+  }
+  const text = words.join(" ");
+  if (/\byesterday\b/u.test(text) || /\bago\b/u.test(text) || /\bearlier today\b/u.test(text)) return true;
+  return /\blast (?:night|week|weekend|month|year|summer|winter|spring|fall|autumn|morning|evening)\b/u.test(text);
 }
 
 function safeFollower(token) {
   if (!token) return true;
   if (/^[.!?]$/u.test(token.text)) return true;
   return SAFE_FOLLOWERS.has(token.lower);
+}
+
+function nounPhraseEnd(token) {
+  if (safeFollower(token)) return true;
+  if (/(?:ed|ied)$/u.test(token.lower)) return true;
+  if (/^(?:upstairs|downstairs|inside|outside|home|today|tonight|yesterday|tomorrow|here|there|away|ahead|aloud|again)$/u.test(token.lower)) return true;
+  return /^(?:stood|sat|came|went|gave|took|saw|found|left|made|got|ran|swam|bought|told|drank|ate|wrote|began|spoke|fell|drove|wore|woke|sang|threw|caught|taught|thought|brought|built|spent|sent|kept|meant|heard|held|met|paid|sold|lost|won|slept|felt|knew|grew|drew|flew|broke|chose|hid|rode|rose|stole|became)$/u.test(token.lower);
 }
 
 function agreementSpan(start, end, replacement, ruleId, patternText, message) {
@@ -157,7 +204,7 @@ function pluralSpans(tokens, ranges, lexicon, source) {
     if (!isQuantifier(token, source)) return;
     let cursor = index + 1;
     let modifiers = 0;
-    while (cursor < tokens.length && modifiers < 3 && isModifier(tokens[cursor]) && !isQuantifier(tokens[cursor])) {
+    while (cursor < tokens.length && modifiers < 3 && looksLikeModifier(tokens[cursor], tokens[cursor + 1]) && !isQuantifier(tokens[cursor])) {
       const next = tokens[cursor + 1];
       if (!next || /^[.!?]$/u.test(next.text) || (safeFollower(next) && !isModifier(next))) break;
       cursor += 1;
@@ -165,9 +212,11 @@ function pluralSpans(tokens, ranges, lexicon, source) {
     }
     const head = tokens[cursor];
     if (!head || /^[.!?]$/u.test(head.text)) return;
-    if (!safeFollower(tokens[cursor + 1])) return;
+    if (!nounPhraseEnd(tokens[cursor + 1])) return;
     if (head.text.indexOf("'") >= 0 || head.text.indexOf("’") >= 0) return;
     if (capitalized(head)) return;
+    if (head.start > 0 && source[head.start - 1] === "-") return;
+    if (/^(?:foot|inch|mile|pound)$/u.test(head.lower) && tokens[cursor + 1] && /^(?:long|tall|wide|high|deep|thick|old)$/u.test(tokens[cursor + 1].lower)) return;
     if (overlaps(head.start, head.end, ranges)) return;
     const plural = pluralOf(head.text, lexicon);
     if (!plural || plural === head.lower) return;
@@ -225,6 +274,7 @@ function verbSpans(tokens, ranges) {
     if (!verb || /^[.!?]$/u.test(verb.text)) return;
     if (overlaps(verb.start, verb.end, ranges)) return;
     if (capitalized(verb) && person !== "i") return;
+    if (pastCueBefore(tokens, cursor)) return;
     const next = verbReplacement(person, verb.text);
     if (!next) return;
     const replacement = matchCase(verb.text, next);
@@ -260,7 +310,7 @@ function usageSpans(text, ranges) {
     if (overlaps(match.index, match.index + match[1].length, ranges)) continue;
     spans.push(agreementSpan(match.index, match.index + match[1].length, matchCase(match[1], "it's"), "usage-its", "its " + match[2].toLocaleLowerCase(), "Contraction"));
   }
-  const going = /\b(their|there)\s+(?:going|planning|coming|bringing|making|trying|looking|working|getting|having|doing|leaving|taking|running|starting|waiting|hoping|asking)\b/giu;
+  const going = /\b(their|there)\s+(?:going|planning|coming|bringing|making|trying|looking|working|getting|having|doing|leaving|taking|running|starting|waiting|hoping|asking|arriving|picking)\b/giu;
   while ((match = going.exec(source))) {
     if (overlaps(match.index, match.index + match[1].length, ranges)) continue;
     const before = source.slice(0, match.index);
@@ -268,7 +318,8 @@ function usageSpans(text, ranges) {
     const after = source.slice(match.index + match[0].length);
     const gerund = match[0].split(/\s+/u).pop().toLocaleLowerCase();
     if (gerund === "going" && !/^\s+to\b/iu.test(after)) continue;
-    if (/\b(?:am|is|are|was|were|be|been|being|seem|seems|seemed|matter|matters|mattered|mean|means|meant|help|helps|helped|make|makes|made|take|takes|took|has|have|had|do|does|did)\b/iu.test(after)) continue;
+    if (/\b(?:am|is|are|was|were|be|been|being|seem|seems|seemed|gave|given|started|stayed|crossed|left|came|went|got|made|took|had|did|does|do|has|have|matter|matters|mattered|mean|means|meant|help|helps|helped|make|makes|take|takes)\b/iu.test(after)) continue;
+    if (/\b[\p{L}]+(?:ed|ied)\b/iu.test(after)) continue;
     spans.push(agreementSpan(match.index, match.index + match[1].length, matchCase(match[1], "they're"), "usage-theyre", match[1].toLocaleLowerCase() + " " + gerund, "Contraction"));
   }
   const theyPredicative = new RegExp("\\b(their|there)\\s+" + predicative + "(?=\\s*[.!]|$)", "giu");
@@ -294,4 +345,4 @@ function thirdOfBase(word) {
   return thirdForm(String(word || "").toLocaleLowerCase());
 }
 
-export { agreementSpans, baseOfThird, pluralOf, thirdOfBase, usageSpans, verbReplacement };
+export { agreementSpans, baseOfThird, pastCueBefore, pluralOf, thirdOfBase, usageSpans, verbReplacement };

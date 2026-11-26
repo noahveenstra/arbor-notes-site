@@ -1,8 +1,9 @@
 // Precise, local fixes for errors the models both miss and over-flag.
 // A rule here has to be narrow enough that correct prose does not match it.
 
-import { baseOfThird, thirdOfBase } from "./proofreading-agreement.mjs";
+import { baseOfThird, pastCueBefore, thirdOfBase } from "./proofreading-agreement.mjs";
 import { NO_PLURAL } from "./proofreading-lexicon.mjs";
+import { usageFixSpans } from "./proofreading-usage.mjs";
 
 const TYPOS = new Map([
   ["recieve", "receive"], ["recieved", "received"], ["recieving", "receiving"],
@@ -17,7 +18,12 @@ const TYPOS = new Map([
   ["independant", "independent"], ["existance", "existence"], ["comming", "coming"],
   ["thier", "their"], ["freind", "friend"], ["beleive", "believe"],
   ["acheive", "achieve"], ["acheived", "achieved"], ["mispell", "misspell"],
-  ["adress", "address"], ["succesful", "successful"], ["publically", "publicly"]
+  ["adress", "address"], ["succesful", "successful"], ["publically", "publicly"],
+  ["acommodate", "accommodate"], ["acommodating", "accommodating"], ["calender", "calendar"],
+  ["embarass", "embarrass"], ["embarassed", "embarrassed"], ["maintainance", "maintenance"],
+  ["rythm", "rhythm"], ["priviledge", "privilege"], ["questionaire", "questionnaire"],
+  ["flourescent", "fluorescent"], ["concensus", "consensus"], ["occurence", "occurrence"],
+  ["seperate", "separate"]
 ]);
 
 const VARIANT_OK = new Set(("cancelled cancelling travelled travelling labelled labelling modelled modelling " +
@@ -43,9 +49,12 @@ const PAST_TO_BASE = new Map([
   ["ate", "eat"], ["ran", "run"], ["bought", "buy"], ["thought", "think"], ["brought", "bring"], ["seen", "see"],
   ["done", "do"], ["gone", "go"], ["spoke", "speak"], ["drank", "drink"], ["drove", "drive"], ["fell", "fall"],
   ["felt", "feel"], ["found", "find"], ["got", "get"], ["knew", "know"], ["left", "leave"], ["made", "make"],
-  ["said", "say"], ["told", "tell"], ["paid", "pay"], ["met", "meet"], ["sat", "sit"], ["stood", "stand"]
+  ["said", "say"], ["told", "tell"], ["paid", "pay"], ["met", "meet"], ["sat", "sit"], ["stood", "stand"],
+  ["forgot", "forget"], ["knew", "know"], ["swam", "swim"], ["bought", "buy"], ["began", "begin"],
+  ["broke", "break"], ["chose", "choose"], ["drove", "drive"], ["flew", "fly"], ["caught", "catch"],
+  ["taught", "teach"], ["thought", "think"], ["found", "find"], ["made", "make"], ["got", "get"]
 ]);
-const BASE_TO_PAST = new Map([["go", "went"], ["come", "came"], ["see", "saw"], ["buy", "bought"], ["eat", "ate"], ["take", "took"], ["give", "gave"]]);
+const BASE_TO_PAST = new Map([["go", "went"], ["come", "came"], ["see", "saw"], ["buy", "bought"], ["eat", "ate"], ["take", "took"], ["give", "gave"], ["tell", "told"], ["swim", "swam"], ["drink", "drank"], ["run", "ran"], ["write", "wrote"], ["know", "knew"], ["think", "thought"]]);
 const INVARIANT_THIRD = new Map([["read", "reads"], ["put", "puts"], ["set", "sets"], ["let", "lets"], ["cut", "cuts"], ["hit", "hits"], ["cost", "costs"], ["spread", "spreads"], ["shut", "shuts"], ["hurt", "hurts"], ["quit", "quits"]]);
 const BE_PLURAL = new Map([["is", "are"], ["was", "were"], ["has", "have"], ["does", "do"]]);
 const BE_SINGULAR = new Map([["are", "is"], ["have", "has"], ["do", "does"]]);
@@ -164,20 +173,22 @@ function chooseSpelling(source, candidates, lexicon) {
   if (TYPOS.has(from)) return TYPOS.get(from);
   if ((Array.isArray(candidates) ? candidates : []).some(function (word) { return String(word || "").toLocaleLowerCase() === from; })) return null;
   if (dictionaryWord(from, lexicon)) return null;
-  const ranked = (Array.isArray(candidates) ? candidates : []).map(function (word) {
+  const ranked = (Array.isArray(candidates) ? candidates : []).map(function (word, index) {
     const lower = String(word || "").toLocaleLowerCase();
     return {
       word: word,
       lower: lower,
       distance: levenshtein(from, lower),
-      sameSound: skeleton(from).length > 0 && skeleton(from) === skeleton(lower)
+      sameSound: skeleton(from).length > 0 && skeleton(from) === skeleton(lower),
+      index: index
     };
   }).filter(function (item) {
     return item.lower && item.lower !== from && !dropsDoubledConsonant(from, item.lower);
   });
   ranked.sort(function (left, right) {
+    if (left.distance !== right.distance) return left.distance - right.distance;
     if (left.sameSound !== right.sameSound) return left.sameSound ? -1 : 1;
-    return left.distance - right.distance;
+    return left.index - right.index;
   });
   const best = ranked[0];
   if (!best) return null;
@@ -195,7 +206,9 @@ function typoSpans(text, ranges) {
     const lower = match[0].toLocaleLowerCase();
     const replacement = TYPOS.get(lower);
     if (!replacement || overlaps(match.index, match.index + match[0].length, ranges)) continue;
-    const shown = replacement === "a lot" ? "a lot" : matchCase(match[0], replacement);
+    const shown = replacement === "a lot"
+      ? (match[0][0] === match[0][0].toLocaleUpperCase() && match[0][0] !== match[0][0].toLocaleLowerCase() ? "A lot" : "a lot")
+      : matchCase(match[0], replacement);
     if (shown === match[0]) continue;
     spans.push(span(match.index, match.index + match[0].length, shown, "spelling-typo", lower, "Spelling"));
   }
@@ -298,13 +311,15 @@ function isCapital(token) {
 function verbFollows(token) {
   if (!token || /^[.!?]$/u.test(token.text)) return false;
   if (/^\d+$/u.test(token.lower)) return true;
-  return VERB_NEXT.has(token.lower);
+  if (VERB_NEXT.has(token.lower) || PREPOSITIONS.has(token.lower)) return true;
+  return /^(?:past|across|around|along|toward|towards|until|during|without|within|off|near|every|always|usually|often|never|sometimes|here|there|today|tonight|home|away|again|too|very|really|just|still|also|not|one|two|three|four|five|six|seven|eight|nine|ten)$/u.test(token.lower);
 }
 
 function nounVerbSpans(tokens, ranges, lexicon) {
   const spans = [];
   function push(token, replacement, patternText) {
     if (!token || overlaps(token.start, token.end, ranges)) return;
+    if (pastCueBefore(tokens, tokens.indexOf(token)) && thirdOfBase(token.lower) === String(replacement || "").toLocaleLowerCase()) return;
     const shown = matchCase(token.text, replacement);
     if (!shown || shown === token.text) return;
     spans.push(span(token.start, token.end, shown, "agreement-verb", patternText, "Subject-verb agreement"));
@@ -332,7 +347,8 @@ function nounVerbSpans(tokens, ranges, lexicon) {
       }
     }
     const counted = /^(?:several|many|two|three|four|five|six|seven|eight|nine|ten)$/u.test(token.lower);
-    if (counted && next && third && !MASS.has(next.lower)) {
+    const nextIsModifier = next && (/^(?:cold|hot|wooden|heavy|padded|folded|thick|thin|empty|fresh|clean|narrow|wide|deep|light|dark|round|square|metal|plastic|wool|cotton|ceramic)$/u.test(next.lower) || /(?:ful|ous|ive|less|able|ible|ish)$/u.test(next.lower));
+    if (counted && next && third && !MASS.has(next.lower) && !nextIsModifier) {
       const count = numberOf(next.lower, lexicon);
       if (count === "singular" || COLLECTIVE.has(next.lower)) {
         const base = baseOfThird(third.lower);
@@ -340,10 +356,15 @@ function nounVerbSpans(tokens, ranges, lexicon) {
       }
     }
     if (!DETERMINERS.has(token.lower)) return;
-    const adjective = new Set("main spare extra final broken big small old new young long short good bad great little large open whole other next red blue green black white".split(" "));
+    const adjective = new Set("main spare extra final broken big small old new young long short good bad great little large open whole other next red blue green black white honest real local only very quite rather almost".split(" "));
+    function descriptive(token) {
+      if (!token) return false;
+      if (adjective.has(token.lower)) return true;
+      return /(?:ful|ous|ive|less|able|ible|ish)$/u.test(token.lower);
+    }
     let cursor = index + 1;
     let modifiers = 0;
-    while (cursor < tokens.length && modifiers < 2 && adjective.has(tokens[cursor].lower)) {
+    while (cursor < tokens.length && modifiers < 2 && descriptive(tokens[cursor])) {
       cursor += 1;
       modifiers += 1;
     }
@@ -455,6 +476,7 @@ function vetoModelSpan(text, spanItem, lexicon) {
   if (/^\s+(?:long|tall|wide|high|deep|thick)\b/iu.test(after) && from !== to) return true;
   if (/\b(?:that|lest)\s+(?:he|she|it|i|you|we|they|[A-Z][\p{L}]*)\s+$/u.test(before) && to !== from) return true;
   if (/^(?:they'?re|their|there)\s+$/iu.test(before) && lexicon && numberOf(from, lexicon) === "singular" && numberOf(to, lexicon) === "plural") return true;
+  if (/^(?:cold|hot|hard|soft|fast|slow|long|short|high|low|big|small|old|young|good|bad|tired|sick|warm|cool|bright|dark|loud|quiet|late|early)$/u.test(from) && to === from + "s" && /\b(?:two|to|too)\s+$/iu.test(before) && /^\s*(?:for|to|of|and|[.!?])/iu.test(after)) return true;
   if (/^(?:their|there)$/iu.test(from) && /^they'?re$/iu.test(to) && /^\s+(?:going|planning|coming|bringing|making|trying|looking|working|getting|having|doing)\b[\s\S]*\b(?:is|are|was|were|seems?|seemed|matters?|mattered|means?|meant|helps?|helped|makes?|made|takes?|took|has|have|had|does|did)\b/iu.test(after)) return true;
   return false;
 }
@@ -489,6 +511,14 @@ function isReliableSpelling(original, replacement, lexicon) {
   return Boolean(chosen && chosen.toLocaleLowerCase() === right.toLocaleLowerCase());
 }
 
+function engineOf(spanItem) {
+  const blob = String((spanItem && spanItem.ruleId) || "") + " " + String((spanItem && spanItem.transformClass) || "");
+  if (blob.indexOf("harper") >= 0) return "harper";
+  if (blob.indexOf("gector") >= 0) return "gector";
+  if (/\bgec\b/u.test(blob)) return "gec";
+  return "";
+}
+
 function hasAgreement(spanItem, others, rulesOnly) {
   const replacement = String(spanItem.replacement || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
   return (others || []).some(function (other) {
@@ -499,6 +529,19 @@ function hasAgreement(spanItem, others, rulesOnly) {
   });
 }
 
+function modelAgrees(spanItem, others) {
+  const replacement = String(spanItem.replacement || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
+  const mine = engineOf(spanItem);
+  return (others || []).some(function (other) {
+    if (!other || other === spanItem || other.detectOnly || other.replacement == null || other.trusted) return false;
+    if (spanItem.start >= other.end || other.start >= spanItem.end) return false;
+    if (String(other.replacement).replace(/\s+/gu, " ").trim().toLocaleLowerCase() !== replacement) return false;
+    const theirs = engineOf(other);
+    if (!mine || !theirs || mine === theirs) return false;
+    return mine === "gector" || theirs === "gector";
+  });
+}
+
 function keepModelSpan(text, spanItem, lexicon, others, options) {
   if (!spanItem || spanItem.detectOnly || spanItem.replacement == null) return false;
   if (vetoModelSpan(text, spanItem, lexicon)) return false;
@@ -506,9 +549,10 @@ function keepModelSpan(text, spanItem, lexicon, others, options) {
   const replacement = String(spanItem.replacement);
   if (caseOnly(original, replacement)) return Boolean(options && options.allowCapitalization);
   if (wordTokens(original).some(function (word) { return dropsDoubledConsonant(word, replacement); }) && !TYPOS.has(original.toLocaleLowerCase())) return false;
+  if (wordTokens(original).some(function (word) { return VARIANT_OK.has(word.toLocaleLowerCase()); })) return false;
   if (isReliableSpelling(original, replacement, lexicon)) return true;
   const known = wordTokens(original).length > 0 && wordTokens(original).every(function (word) { return dictionaryWord(word, lexicon); });
-  if (known) return hasAgreement(spanItem, others, true);
+  if (known) return hasAgreement(spanItem, others, true) || modelAgrees(spanItem, others);
   const agreed = hasAgreement(spanItem, others, false);
   if (deletesFunctionWord(original, replacement) && !agreed) return false;
   if (swapsPreposition(original, replacement) && !agreed) return false;
@@ -523,7 +567,8 @@ function precisionSpans(text, ranges, lexicon) {
     .concat(nounVerbSpans(tokens, ranges, lexicon))
     .concat(frequencyInvariantSpans(tokens, ranges))
     .concat(pastBaseSpans(tokens, ranges))
-    .concat(fixedPhraseSpans(text, ranges));
+    .concat(fixedPhraseSpans(text, ranges))
+    .concat(usageFixSpans(text, ranges, lexicon));
 }
 
 export {

@@ -644,7 +644,7 @@ const hardErrors = change("hard-errors", [
   ["If in doubt.", "fragment"],
   ["He dont know the answer.", "doesn't"],
   ["They doesnt know.", "don't"],
-  ["I doesnt care.", "don't"],
+  ["I doesnt care.", "It doesn't"],
   ["I saw two ox.", "oxen"],
   ["I saw two goose.", "geese"],
   ["I saw both man.", "men"],

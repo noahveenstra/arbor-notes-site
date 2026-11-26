@@ -6,13 +6,13 @@
 // opener is still missing a main-clause subject and finite verb. A missed
 // fragment is preferred to a line under a sentence that already has one.
 
-const STARTERS = ["because", "although", "though", "if", "which", "while", "when", "since", "unless", "until", "whereas", "whether", "whenever", "wherever", "once"];
+const STARTERS = ["because", "although", "though", "if", "which", "while", "when", "since", "unless", "until", "whereas", "whether", "whenever", "wherever", "once", "after", "before"];
 const PHRASAL = new Set(["since", "until", "when", "once", "while", "before", "after"]);
-const STARTER = new RegExp("^\\s*([" + "\"'“”‘’" + "]*)\\b(" + STARTERS.join("|") + ")\\b", "iu");
+const STARTER = new RegExp("^\\s*([" + "\"'“”‘’" + "]*)(?:even\\s+)?(" + STARTERS.join("|") + ")\\b", "iu");
 const CLOSED = /[.!]["'”’)\]]*\s*$/u;
 const WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu;
 
-const PRONOUNS = new Set("i you he she it we they this that these those there who whoever someone anyone everyone somebody anybody everybody one".split(" "));
+const PRONOUNS = new Set("i you he she it we they this that these those there who whoever someone anyone everyone somebody anybody everybody one nobody".split(" "));
 const THIRD_PRONOUNS = new Set("he she it this that someone anyone everyone somebody anybody everybody one".split(" "));
 const DETERMINERS = new Set("the a an my your his her its our their this that these those some any no every each both few another".split(" "));
 const PLURAL_DETERMINERS = new Set("these those few both".split(" "));
@@ -341,6 +341,14 @@ function hasMainClause(text, starter) {
   const rest = at < 0 ? source : source.slice(at + starter.length);
   const tokens = tokenize(rest);
   if (starterLower === "which") return whichHasMain(tokens);
+  if (PHRASAL.has(starterLower)) {
+    for (let index = 1; index < tokens.length; index += 1) {
+      if (!PRONOUNS.has(tokens[index].lower)) continue;
+      let verb = index + 1;
+      while (verb < tokens.length && isAdverb(tokens[verb])) verb += 1;
+      if (isFiniteVerb(tokens[verb])) return true;
+    }
+  }
   const nuclei = clauseNuclei(tokens);
   if (!nuclei.length) return hasImperative(tokens, 0);
   if (!clauseIntro(tokens, nuclei[0])) return true;
@@ -355,18 +363,10 @@ function hasMainClause(text, starter) {
   return hasImperative(tokens, after);
 }
 
-function fragmentSpan(text) {
-  const source = String(text || "");
-  const match = STARTER.exec(source);
-  if (!match) return null;
-  if (!CLOSED.test(source.trim())) return null;
-  const starter = match[2];
-  if (hasMainClause(source, starter)) return null;
-  const quoted = match.index + match[1].length;
-  const start = quoted + source.slice(quoted).toLocaleLowerCase().indexOf(starter.toLocaleLowerCase());
+function fragmentNote(source, start, end) {
   return {
     start: start,
-    end: start + starter.length,
+    end: end,
     replacement: null,
     detectOnly: true,
     kind: "fragment",
@@ -375,6 +375,71 @@ function fragmentSpan(text) {
     patternText: source.trim().replace(/\s+/gu, " ").toLocaleLowerCase(),
     message: "This looks like a sentence fragment."
   };
+}
+
+function subordinateStart(text) {
+  return /^\s*(?:even\s+)?(?:because|although|though|if|while|when|since|unless|until|whereas|whether|whenever|wherever|once|after|before|which)\b/iu.test(String(text || ""));
+}
+
+function independentClause(text) {
+  const trimmed = String(text || "").trim();
+  if (!trimmed || subordinateStart(trimmed)) return false;
+  if (/^(?:and|or|but|so|yet|nor)\b/iu.test(trimmed)) return false;
+  const tokens = tokenize(trimmed);
+  const nuclei = clauseNuclei(tokens);
+  return nuclei.some(function (nucleus, index) { return !isEmbedded(tokens, nuclei, index); });
+}
+
+function runOnSpan(text) {
+  const source = String(text || "");
+  const trimmed = source.trim();
+  if (!CLOSED.test(trimmed) || subordinateStart(trimmed)) return null;
+  if (/^\s*(?:[-*+]|\d+[.)])/u.test(source)) return null;
+  if (/[;:]/u.test(source)) return null;
+  const comma = source.indexOf(",");
+  if (comma >= 0) {
+    if (source.indexOf(",", comma + 1) >= 0) return null;
+    const left = source.slice(0, comma);
+    const right = source.slice(comma + 1);
+    if (!independentClause(left) || !independentClause(right)) return null;
+    if (!/^\s*(?:i|you|he|she|it|we|they|a|an|the|nobody|someone|everybody|everyone|somebody|this|these|those)\b/iu.test(right)) return null;
+    return fragmentNote(source, comma, comma + 1);
+  }
+  const tokens = tokenize(source);
+  const linker = /^(?:and|or|but|nor|yet|so|then|than|until|till|unless|since|while|because|although|though|if|before|after|as|that|which|who|what|when|where|how|why|to|for|with|about|of|in|on|at)$/u;
+  const second = /^(?:it|he|she|nobody)$/u;
+  for (let index = 1; index < tokens.length; index += 1) {
+    const previous = tokens[index - 1];
+    if (!second.test(tokens[index].lower) || linker.test(previous.lower) || isFiniteVerb(previous) || ADJECTIVES.has(previous.lower)) continue;
+    let verbAt = index + 1;
+    if (verbAt < tokens.length && isAdverb(tokens[verbAt])) verbAt += 1;
+    if (verbAt >= tokens.length || !isFiniteVerb(tokens[verbAt])) continue;
+    for (let earlier = index - 1; earlier >= 1; earlier -= 1) {
+      if (!isFiniteVerb(tokens[earlier])) continue;
+      const gap = tokens.slice(earlier + 1, index);
+      if (gap.some(function (token) { return linker.test(token.lower); })) break;
+      const before = tokens[earlier - 1];
+      if (before && (/^(?:i|you|he|she|it|we|they)$/u.test(before.lower) || DETERMINERS.has(before.lower))) {
+        return fragmentNote(source, tokens[index].start, tokens[index].end);
+      }
+      break;
+    }
+  }
+  return null;
+}
+
+function fragmentSpan(text) {
+  const source = String(text || "");
+  const match = STARTER.exec(source);
+  if (match && CLOSED.test(source.trim())) {
+    const starter = match[2];
+    if (!hasMainClause(source, starter)) {
+      const quoted = match.index + match[1].length;
+      const start = quoted + source.slice(quoted).toLocaleLowerCase().indexOf(starter.toLocaleLowerCase());
+      if (start >= quoted) return fragmentNote(source, start, start + starter.length);
+    }
+  }
+  return runOnSpan(source);
 }
 
 export { BASE_VERBS, fragmentSpan, hasMainClause, thirdPerson };

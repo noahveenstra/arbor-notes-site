@@ -39,7 +39,9 @@ const FORMS = new Map([
   ["wouldve", "would've"],
   ["mightve", "might've"],
   ["mustve", "must've"],
-  ["whos", "who's"]
+  ["whos", "who's"],
+  ["shes", "she's"],
+  ["hes", "he's"]
 ]);
 
 const PATTERN = new RegExp("\\b(" + Array.from(FORMS.keys()).join("|") + ")\\b", "giu");

@@ -4422,6 +4422,8 @@
 
   function splitProofreadingTextNode(node, offset, saved) {
     const splitOffset = Math.max(0, Math.min(Number(offset) || 0, node.length));
+    const parent = node.parentNode;
+    const childIndex = parent ? Array.prototype.indexOf.call(parent.childNodes, node) : -1;
     const remainder = node.splitText(splitOffset);
     if (saved) {
       ["anchor", "focus"].forEach(function (side) {
@@ -4430,6 +4432,11 @@
         if (saved[nodeKey] === node && saved[offsetKey] > splitOffset) {
           saved[nodeKey] = remainder;
           saved[offsetKey] -= splitOffset;
+        } else if (parent && saved[nodeKey] === parent && childIndex >= 0 && saved[offsetKey] > childIndex) {
+          // selectNodeContents anchors on the block, not the text node. Each
+          // split inserts a sibling, so an offset past this child has to move
+          // with it or the selection stops at the new grammar mark.
+          saved[offsetKey] += 1;
         }
       });
     }

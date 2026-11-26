@@ -1,5 +1,5 @@
 import { SEMANTIC_VECTOR_DATABASE } from "./account-cache.js?v=arb-190-instant-launch-20261125-a";
-import { createPassageAnchor } from "./passage-anchor.js?v=recall-anchor-1";
+import { createPassageAnchor } from "./passage-anchor.js?v=arb-161-verify-1";
 
 export const MODEL_ID = "Snowflake/snowflake-arctic-embed-s";
 export const MODEL_REVISION = "e596f507467533e48a2e17c007f0e1dacc837b33";

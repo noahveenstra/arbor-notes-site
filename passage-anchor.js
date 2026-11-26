@@ -67,15 +67,16 @@ export async function resolvePassageAnchor(anchor, current) {
   }
   if (latest.archived) return { noteId: original.noteId, resolutionStatus: "archived" };
   const body = String(latest.body || "");
-  if (!original.excerpt || original.offsetUnit !== PASSAGE_OFFSET_UNIT) {
+  if (original.anchorVersion !== PASSAGE_ANCHOR_VERSION || typeof original.excerpt !== "string" ||
+      !original.excerpt || original.offsetUnit !== PASSAGE_OFFSET_UNIT) {
     return { noteId: original.noteId, resolutionStatus: "stale" };
   }
   const sourceRevision = await sha256(body);
-  if (sourceRevision === original.sourceRevision &&
-      Number.isInteger(original.start) && Number.isInteger(original.end) &&
+  if (sourceRevision === original.sourceRevision) {
+    const verified = Number.isInteger(original.start) && Number.isInteger(original.end) &&
       original.start >= 0 && original.end <= body.length &&
-      body.slice(original.start, original.end) === original.excerpt) {
-    return Object.assign({}, original, { resolutionStatus: "resolved" });
+      body.slice(original.start, original.end) === original.excerpt;
+    return Object.assign({}, original, { resolutionStatus: verified ? "resolved" : "stale" });
   }
 
   let matches = occurrencesOf(body, original.excerpt);

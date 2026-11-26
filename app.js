@@ -128,6 +128,8 @@
     preferences: loadPreference("arbor.web.preferences.v1", { tabsEnabled: false, confirmFolderArchive: true, checkGrammarSuggestions: true, checkSentenceCapitalization: false, autoCorrectHighConfidence: true, noteSortOrder: "created-newest" }),
     accountSettings: loadPreference("arbor.web.account.v1", { name: "" }),
     searchItems: [],
+    searchVisits: new Map(),
+    searchRestoreSelection: null,
     searchActiveIndex: -1,
     searchPage: false,
     searchQuery: "",
@@ -516,6 +518,8 @@
     state.actionMenuInvoker = null;
     state.query = "";
     state.searchQuery = "";
+    state.searchVisits.clear();
+    state.searchRestoreSelection = null;
     state.searchPage = false;
     state.searchItems = [];
     state.searchActiveIndex = -1;
@@ -3294,6 +3298,7 @@
   function renderSearchSuggestions(query) {
     const list = $("search-suggestions"); const input = $("global-search-input"); const text = String(query || "").trim();
     scheduleSemanticSearch(text); scheduleCloudKitTitleSearch(text); state.searchItems = text ? searchNotes(text).slice(0, 8) : [];
+    restoreSearchSelection(text);
     if (!text) { state.searchActiveIndex = -1; input.removeAttribute("aria-activedescendant"); setMotionVisibility(list, false); list.innerHTML = ""; return; }
     if (!state.searchItems.length && lexicalIndex && lexicalIndex.isQueryPending()) {
       state.searchActiveIndex = -1;
@@ -3360,6 +3365,7 @@
     if (document.activeElement !== input) input.value = state.searchQuery;
     const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query); scheduleCloudKitTitleSearch(query);
     state.searchItems = searchNotes(query).slice(0, 100);
+    restoreSearchSelection(query);
     const results = $("expanded-search-results");
     const waitingForIndex = query && lexicalIndex && lexicalIndex.isQueryPending();
     results.setAttribute("role", query && !waitingForIndex && state.searchItems.length ? "listbox" : "group");
@@ -3495,8 +3501,53 @@
     window.requestAnimationFrame(function () { $("search-nav-button").focus({ preventScroll: true }); });
   }
 
-  function openSearchResult(recordName) {
+  function restoreSearchSelection(query) {
+    const visit = state.searchRestoreSelection;
+    if (!visit) return;
+    if (visit.query.trim() === query) {
+      const index = state.searchItems.findIndex(item => item.id === visit.recordName);
+      if (index === -1) return;
+      state.searchActiveIndex = index;
+    }
+    state.searchRestoreSelection = null;
+  }
+
+  // Browser history contains only an opaque key. Terms and note identities
+  // stay in this tab and are discarded on library or account changes.
+  function rememberSearchVisit(recordName) {
+    const key = crypto.randomUUID();
+    const quick = $("search-dialog").open;
+    const query = $(quick ? "global-search-input" : "expanded-search-input").value;
+    if (state.searchVisits.size >= 32) state.searchVisits.delete(state.searchVisits.keys().next().value);
+    state.searchVisits.set(key, { query, recordName, quick });
+    window.history.replaceState({ ...window.history.state, arborSearchVisit: key, view: "results" }, "");
+    window.history.pushState({ ...window.history.state, view: "note" }, "");
+  }
+
+  window.addEventListener("popstate", function (event) {
+    const entry = event.state;
+    const visit = entry && state.searchVisits.get(entry.arborSearchVisit);
+    if (!visit) return;
+    if (entry.view === "note") {
+      openSearchResult(visit.recordName, true);
+      return;
+    }
+    if (visit.quick) {
+      openSearch();
+      const input = $("global-search-input");
+      input.value = visit.query;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    } else {
+      openExpandedSearch(visit.query);
+    }
+    state.searchRestoreSelection = visit;
+    if (visit.quick) renderSearchSuggestions(visit.query);
+    else renderSearchPage();
+  });
+
+  function openSearchResult(recordName, fromHistory) {
     const result = state.searchItems.find(function (item) { return item.id === recordName; });
+    if (result && !fromHistory && (state.searchPage || $("search-dialog").open)) rememberSearchVisit(recordName);
     const candidate = result && result._passageCandidate;
     const session = state.accountSession;
     if ($("search-dialog").open) $("search-dialog").close();
@@ -3510,7 +3561,7 @@
       const note = state.notes.find(function (item) { return item.recordName === recordName; });
       if (!note || !accountSessionCurrent(session)) { renderAll(); return; }
       const index = window.ArborPassageAnchor;
-      let anchor = candidate.anchor || null;
+      let anchor = candidate.range ? null : candidate;
       if (!anchor && candidate.range && typeof candidate.body === "string") {
         try {
           anchor = await index.createPassageAnchor({
@@ -3523,13 +3574,19 @@
         } catch (_) { anchor = null; }
       }
       if (!anchor || !accountSessionCurrent(session)) { renderAll(); return; }
+      if (state.selectedRecordName !== recordName) return;
+      const body = currentEditorBodyMarkdown();
       const resolved = await index.resolvePassageAnchor(anchor, {
         exists: true,
         noteId: recordName,
         archived: isArchived(note.record),
-        body: currentEditorBodyMarkdown()
+        body: body
       });
-      if (!accountSessionCurrent(session)) return;
+      if (!accountSessionCurrent(session) || state.selectedRecordName !== recordName || state.searchPage || $("search-dialog").open) return;
+      if (currentEditorBodyMarkdown() !== body) {
+        showToast("This passage changed while the note was opening.", true);
+        return;
+      }
       if (resolved.resolutionStatus === "resolved") {
         if (!selectSearchPassage(resolved)) showToast("The note opened, but its current Markdown could not place this passage exactly.", true);
       } else if (resolved.resolutionStatus !== "archived") {

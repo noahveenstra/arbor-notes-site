@@ -33,8 +33,8 @@
   </style>
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
-  <link rel="stylesheet" href="./styles.css?v=arb-save-indicator-20261125-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-proofreading-learning-20261125-a">
+  <link rel="stylesheet" href="./styles.css?v=arb-editor-parity-20261126-a">
+  <link rel="stylesheet" href="./ui.css?v=arb-editor-parity-20261126-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-88-shortcut-motion-20261120-b">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b" data-required-global="ARBOR_CLOUDKIT_CONFIG"></script>
@@ -54,7 +54,7 @@
   <script src="./search-logic.js?v=arb-related-margin-20261125-a" data-required-global="ArborSearchLogic" defer></script>
   <script src="./note-sync.js?v=arb-214-remote-deletions-20261126-a" data-required-global="ArborNoteSync" defer></script>
   <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" data-required-global="ArborLaunchLibrary" defer></script>
-  <script src="./app-bootstrap.js?v=arb-125-integrity-20261126-b" defer></script>
+  <script src="./app-bootstrap.js?v=arb-editor-search-20261126-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -131,7 +131,7 @@ Try replacing this example with something you want to remember.</textarea>
         <button class="settings-link" id="settings-open" type="button" title="Settings"><span>Settings</span></button>
       </div>
     </aside>
-    <div class="pane-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-orientation="vertical" aria-label="Resize folders sidebar" aria-valuemin="150" aria-valuemax="360" aria-valuenow="195" tabindex="0"></div>
+    <div class="pane-resizer sidebar-resizer" id="sidebar-resizer" role="separator" aria-controls="sidebar" aria-description="Use the arrow keys to resize. Double-click or press Enter to reset." aria-orientation="vertical" aria-label="Resize folders sidebar" aria-valuemin="150" aria-valuemax="360" aria-valuenow="195" tabindex="0"></div>
 
     <section class="list-panel" id="list-panel" aria-labelledby="list-heading">
       <header class="list-header">
@@ -153,7 +153,7 @@ Try replacing this example with something you want to remember.</textarea>
       <div class="note-list" id="note-list" role="listbox" aria-label="Notes"></div>
       <div class="list-message list-empty" id="list-message" role="status" aria-live="polite" hidden><span id="list-message-text"></span><button class="list-message-retry" id="list-message-retry" type="button" hidden>Try again</button></div>
     </section>
-    <div class="pane-resizer list-resizer" id="list-resizer" role="separator" aria-orientation="vertical" aria-label="Resize note list" aria-valuemin="240" aria-valuemax="620" aria-valuenow="340" tabindex="0"></div>
+    <div class="pane-resizer list-resizer" id="list-resizer" role="separator" aria-controls="list-panel" aria-description="Use the arrow keys to resize. Double-click or press Enter to reset." aria-orientation="vertical" aria-label="Resize note list" aria-valuemin="240" aria-valuemax="620" aria-valuenow="340" tabindex="0"></div>
 
     <main class="editor-panel" id="note-pane">
       <div class="note-editor-column" id="note-editor-column">
@@ -204,7 +204,7 @@ Try replacing this example with something you want to remember.</textarea>
               <span class="search-page-input-shell"><input id="expanded-search-input" type="text" placeholder="Search for an idea…" autocomplete="off"></span>
             </form>
             <p class="search-page-count" id="expanded-search-count" aria-live="polite"></p>
-            <div class="search-page-results" id="expanded-search-results" role="listbox" aria-label="Search results"></div>
+            <div class="search-page-results" id="expanded-search-results" role="group" aria-label="Search results"></div>
           </div>
         </section>
       </div>
@@ -351,7 +351,7 @@ Try replacing this example with something you want to remember.</textarea>
         <div class="settings-search-shell">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.6"></circle><path d="m16 16 4.3 4.3"></path></svg>
           <label class="sr-only" for="settings-search">Find a setting</label>
-          <input id="settings-search" type="search" placeholder="Find a setting" autocomplete="off" aria-controls="settings-search-results" aria-expanded="false">
+          <input id="settings-search" type="search" placeholder="Find a setting" autocomplete="off" aria-controls="settings-search-results">
         </div>
         <div class="settings-search-results" id="settings-search-results" role="group" aria-label="Matching settings" hidden></div>
         <nav class="settings-sections" role="tablist" aria-orientation="vertical" aria-label="Settings sections">
@@ -405,6 +405,24 @@ Try replacing this example with something you want to remember.</textarea>
                   <option value="title-ascending">Title · A to Z</option>
                   <option value="title-descending">Title · Z to A</option>
                 </select>
+              </div>
+            </div>
+          </div>
+          <div class="settings-group">
+            <h3>Markdown files</h3>
+            <div class="settings-card">
+              <div class="settings-setting-row" data-setting-label="Import Markdown" data-setting-search="files choose markdown import">
+                <div class="settings-setting-copy"><div class="settings-field-label">Import Markdown</div><small>Each UTF-8 .md or .markdown file becomes a note in the selected folder. Its filename supplies the title.</small></div>
+                <button type="button" id="import-markdown">Choose files…</button>
+                <input type="file" id="import-markdown-files" accept=".md,.markdown" multiple hidden>
+              </div>
+              <div class="settings-setting-row" data-setting-label="Export open note" data-setting-search="markdown file download">
+                <div class="settings-setting-copy"><div class="settings-field-label">Export open note</div><small>Download the note body as a Markdown file.</small></div>
+                <button type="button" id="export-note-markdown">Download .md</button>
+              </div>
+              <div class="settings-setting-row" data-setting-label="Export selected folder" data-setting-search="markdown files zip download">
+                <div class="settings-setting-copy"><div class="settings-field-label">Export selected folder</div><small>Download this folder and its subfolders as a ZIP of Markdown files.</small></div>
+                <button type="button" id="export-folder-markdown">Download ZIP</button>
               </div>
             </div>
           </div>

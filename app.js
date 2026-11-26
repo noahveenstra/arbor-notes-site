@@ -22,6 +22,8 @@
   const $ = function (id) { return document.getElementById(id); };
   const savedNoteTabs = loadPreference("arbor.web.open-tabs.v1", { recordNames: [], activeRecordName: "" });
   const frame = $("app-frame");
+  const defaultLayout = { sidebarWidth: 195, listWidth: 340, sidebarCollapsed: false };
+  const overlayNavigation = window.matchMedia("(max-width: 899px)");
   const state = {
     container: null,
     arborCloudKitTransport: null,
@@ -121,7 +123,7 @@
     startupFinished: false,
     accountSession: 0,
     accountCacheSuspended: false,
-    layout: loadPreference("arbor.web.layout.v1", { sidebarWidth: 195, listWidth: 340, sidebarCollapsed: false }),
+    layout: loadPreference("arbor.web.layout.v1", defaultLayout),
     appearance: loadPreference("arbor.web.appearance.v1", { bodyWidth: 70, bodySize: 18, theme: "system", font: "sans", headerFont: "sans", bodyFont: "sans", textSize: "small", margins: "compact" }),
     preferences: loadPreference("arbor.web.preferences.v1", { tabsEnabled: false, confirmFolderArchive: true, checkGrammarSuggestions: true, checkSentenceCapitalization: false, autoCorrectHighConfidence: true, noteSortOrder: "created-newest" }),
     accountSettings: loadPreference("arbor.web.account.v1", { name: "" }),
@@ -1336,7 +1338,8 @@
   }
 
   function firstLineTitle(source) {
-    const stripped = String(source || "").replace(/^#+\s*/, "").trim();
+    const line = String(source || "").trimStart().split(/\r\n?|\n/, 1)[0];
+    const stripped = line.replace(/^#+\s*/, "").trim();
     const plain = stripped
       .replace(/\x60([^\x60]+)\x60/g, "$1")
       .replace(/\*\*([^*]+)\*\*/g, "$1")
@@ -1868,6 +1871,7 @@
       heading.className = "date-group-title note-group-title";
       heading.id = "note-group-" + label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       heading.textContent = label;
+      heading.setAttribute("aria-hidden", "true");
       section.setAttribute("aria-labelledby", heading.id);
       section.appendChild(heading);
       const noteRows = notes.map(function (note) {
@@ -2199,7 +2203,9 @@
   function applyLayout() {
     frame.style.setProperty("--sidebar-width", state.layout.sidebarWidth + "px");
     frame.style.setProperty("--list-width", state.layout.listWidth + "px");
-    const collapsed = Boolean(state.layout.sidebarCollapsed);
+    $("sidebar-resizer").setAttribute("aria-valuenow", String(state.layout.sidebarWidth));
+    $("list-resizer").setAttribute("aria-valuenow", String(state.layout.listWidth));
+    const collapsed = Boolean(state.layout.sidebarCollapsed) && !overlayNavigation.matches;
     frame.classList.toggle("is-sidebar-collapsed", collapsed);
     const resizer = $("sidebar-resizer");
     if (resizer) resizer.inert = collapsed;
@@ -2295,7 +2301,7 @@
 
   function noteBodyWordCount(note) {
     const body = $("note-body") && state.selectedRecordName === note.recordName
-      ? currentMarkdown()
+      ? currentEditorBodyMarkdown()
       : String(note.editorBody || "");
     if (typeof Intl.Segmenter === "function") {
       const segmenter = new Intl.Segmenter(undefined, { granularity: "word" });
@@ -2436,33 +2442,32 @@
   function saveNoteFontValue(kind, value) {
     const note = state.notes.find(function (item) { return item.recordName === state.selectedRecordName; });
     if (!note) return Promise.resolve(false);
-    const header = kind === "header" ? value : noteFontValue(note.record, "header");
-    const body = kind === "body" ? value : noteFontValue(note.record, "body");
-    return saveNoteFontOverrides(note, header, body);
+    return saveNoteFontOverrides(note, { [kind]: value });
   }
 
-  function saveNoteFontOverrides(note, header, body) {
+  function saveNoteFontOverrides(note, changes) {
     const recordName = note && note.recordName;
     if (!recordName || !state.database) return Promise.resolve(false);
+    const session = state.accountSession;
     const saveTask = state.noteStyleSavePromise.catch(function () {}).then(async function () {
-      const session = state.accountSession;
+      if (!accountSessionCurrent(session)) return false;
       let before = null;
       try {
         await flushSave();
         if (!accountSessionCurrent(session)) return false;
         before = cloneRecord(state.records.get(recordName) || note.record);
         const updated = cloneRecord(before);
-        const headerDefault = state.appearance.headerFont || state.appearance.font || "sans";
-        const bodyDefault = state.appearance.bodyFont || state.appearance.font || "sans";
-        if (header == null || header === headerDefault) setNullableField(updated, "headerFontStyle", null);
-        else setField(updated, "headerFontStyle", header);
-        if (body == null || body === bodyDefault) setNullableField(updated, "bodyFontStyle", null);
-        else setField(updated, "bodyFontStyle", body);
+        for (const [kind, value] of Object.entries(changes)) {
+          const inherited = state.appearance[kind + "Font"] || state.appearance.font || "sans";
+          setNullableField(updated, kind + "FontStyle", value === inherited ? null : value);
+        }
         setField(updated, "modifiedAt", new Date());
         state.records.set(recordName, updated);
         note.record = updated;
-        if (state.selectedRecordName === recordName) state.selectedRecord = updated;
-        applyNoteFontStyle(note);
+        if (state.selectedRecordName === recordName) {
+          state.selectedRecord = updated;
+          applyNoteFontStyle(note);
+        }
         renderAboutPanel();
 
         const response = assertResponse(await saveToDatabase(updated));
@@ -2554,7 +2559,7 @@
     const recordName = state.selectedRecordName;
     const note = state.notes.find(function (item) { return item.recordName === recordName; });
     if (!note) return;
-    saveNoteFontOverrides(note, null, null);
+    saveNoteFontOverrides(note, { header: null, body: null });
   }
 
   function selectedSettingsValue(group) {
@@ -2775,14 +2780,20 @@
   }
 
   function beginPaneResize(event, name) {
+    if (event.button !== 0 || !event.isPrimary) return;
     event.preventDefault();
     const before = capturePreferences();
     const startX = event.clientX;
     const initial = name === "sidebar" ? state.layout.sidebarWidth : state.layout.listWidth;
-    const direction = name === "sidebar" ? 1 : 1;
+    const defaultWidth = defaultLayout[name + "Width"];
     document.body.classList.add("is-resizing-pane");
-    const move = function (moveEvent) { resizePane(name, initial + (moveEvent.clientX - startX) * direction, false); };
-    const finish = function () {
+    const move = function (moveEvent) {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      const width = initial + moveEvent.clientX - startX;
+      resizePane(name, Math.abs(width - defaultWidth) <= 4 ? defaultWidth : width, false);
+    };
+    const finish = function (upEvent) {
+      if (upEvent.pointerId !== event.pointerId) return;
       document.removeEventListener("pointermove", move);
       document.removeEventListener("pointerup", finish);
       document.removeEventListener("pointercancel", finish);
@@ -2791,8 +2802,8 @@
       recordPreferenceChange(before, "Resize panes");
     };
     document.addEventListener("pointermove", move);
-    document.addEventListener("pointerup", finish, { once: true });
-    document.addEventListener("pointercancel", finish, { once: true });
+    document.addEventListener("pointerup", finish);
+    document.addEventListener("pointercancel", finish);
   }
 
   function setSidebarCollapsed(collapsed) {
@@ -3347,14 +3358,17 @@
     if (document.activeElement !== input) input.value = state.searchQuery;
     const query = input.value.trim(); state.searchQuery = input.value; scheduleSemanticSearch(query); scheduleCloudKitTitleSearch(query);
     state.searchItems = searchNotes(query).slice(0, 100);
-    if (query && lexicalIndex && lexicalIndex.isQueryPending()) {
+    const results = $("expanded-search-results");
+    const waitingForIndex = query && lexicalIndex && lexicalIndex.isQueryPending();
+    results.setAttribute("role", query && !waitingForIndex && state.searchItems.length ? "listbox" : "group");
+    if (waitingForIndex) {
       $("expanded-search-count").textContent = "";
-      $("expanded-search-results").innerHTML = "";
+      results.innerHTML = "";
       return;
     }
     if (!query) {
       $("expanded-search-count").textContent = "";
-      $("expanded-search-results").innerHTML = '<div class="search-page-empty">Search your notes by a word or phrase.</div>';
+      results.innerHTML = '<div class="search-page-empty">Search your notes by a word or phrase.</div>';
       return;
     }
     const status = semanticProgressText(query);
@@ -3363,7 +3377,7 @@
     $("expanded-search-count").textContent = state.searchItems.length + (state.searchItems.length === 1 ? " result" : " results") + " for “" + query + "”" + (countStatus ? " · " + countStatus : "");
     if (!state.searchItems.length) {
       const message = state.semanticLoadingQuery === query.toLocaleLowerCase() ? "Looking for related notes…" : state.semanticErrorQuery === query.toLocaleLowerCase() ? "Related-note search unavailable." : "No notes match this search.";
-      $("expanded-search-results").innerHTML = '<div class="search-page-empty">' + message + "</div>"; return;
+      results.innerHTML = '<div class="search-page-empty">' + message + "</div>"; return;
     }
     let openedRelated = false;
     $("expanded-search-results").innerHTML = state.searchItems.map(function (note, index) {
@@ -6780,7 +6794,7 @@
         });
       }
     }
-    if (window.matchMedia("(max-width: 820px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
+    if (window.matchMedia("(max-width: 760px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
     renderNotes();
     renderAccountGreeting();
   }
@@ -6793,7 +6807,7 @@
     if (state.selectedRecordName === recordName) {
       prepareNoteTabOpen(recordName, tabIntent);
       renderOpenNoteTabs();
-      if (window.matchMedia("(max-width: 820px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
+      if (window.matchMedia("(max-width: 760px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
       applyListCursor(); return true;
     }
     try {
@@ -8719,20 +8733,24 @@
     }
   }
 
-  async function createNote(initialBody, focusBody, initialTitle) {
+  async function createNote(initialBody, focusBody, initialTitle, importFolder) {
     if (!state.database) { showToast("Sign in with Apple before creating notes.", true); return false; }
     if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return false; }
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
+    const importing = typeof importFolder === "string";
+    const folderPath = importing ? importFolder : state.selectedFolder;
     try {
       await flushSave();
+      if (!accountSessionCurrent(session)) return false;
       const id = crypto.randomUUID().toUpperCase();
-      const noteTitle = String(initialTitle || "Untitled").trim().slice(0, 180) || "Untitled";
+      const requestedTitle = String(initialTitle || "").trim();
+      const noteTitle = (importing ? requestedTitle.replace(/[\r\n]+/g, " ") : requestedTitle.slice(0, 180)) || "Untitled";
       const noteBody = String(initialBody || "");
       const legacyBody = noteTitle + "\n\n" + noteBody;
       let record;
       if (state.nativeSchema) {
-        const folder = state.folders.find(function (item) { return item.path === state.selectedFolder; });
+        const folder = state.folders.find(function (item) { return item.path === folderPath; });
         record = {
           recordName: "CD_CapturedNote_" + id,
           recordType: "CD_CapturedNote",
@@ -8748,9 +8766,11 @@
         };
         if (folder) record.fields.CD_folderID = field(folder.uuid);
       } else {
-        record = makeNewNoteRecord(id, legacyBody, state.selectedFolder);
+        record = makeNewNoteRecord(id, legacyBody, folderPath);
+        if (importing) setField(record, "relativePath", currentPathForTitle(noteTitle, record.recordName, recordPath(record)));
         setField(record, "contentFingerprint", await fingerprint(legacyBody));
       }
+      if (!accountSessionCurrent(session)) return false;
       const response = assertResponse(await saveToDatabase(record));
       if (!accountSessionCurrent(session)) return false;
       const saved = response.records && response.records[0] ? response.records[0] : record;
@@ -8762,11 +8782,12 @@
         record: cloneRecord(saved), content: content,
         signature: creationSignature(saved, content),
         navigationBefore: navigationBefore,
-        navigationAfter: { note: saved.recordName, folder: state.selectedFolder, archive: false },
+        navigationAfter: { note: saved.recordName, folder: folderPath, archive: false },
         updatedAt: Date.now()
       });
       state.skipNextListTransition = true;
       renderAll();
+      if (importing) return true;
       const opened = await openNote(saved.recordName, { tabIntent: "new" });
       if (!opened) return false;
       if (!accountSessionCurrent(session)) return false;
@@ -8781,6 +8802,73 @@
     } catch (error) {
       showToast(readableError(error), true);
       return false;
+    }
+  }
+
+  async function importMarkdownFiles(files, target) {
+    if (!files.length || !target || !accountSessionCurrent(target.session)) return;
+    const session = target.session;
+    const destination = target.folder;
+    const button = $("import-markdown");
+    if (button.disabled) return;
+    button.disabled = true;
+    let imported = 0;
+    try {
+      for (const file of files) {
+        if (!/\.(md|markdown)$/i.test(file.name)) throw new Error("Choose .md or .markdown files.");
+        const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+        const body = decoder.decode(await file.arrayBuffer());
+        if (!accountSessionCurrent(session)) return;
+        if (!await createNote(body, false, file.name.replace(/\.(md|markdown)$/i, ""), destination)) {
+          if (!accountSessionCurrent(session)) return;
+          throw new Error($("toast").textContent || "The note could not be created.");
+        }
+        imported++;
+      }
+      if (accountSessionCurrent(session)) showToast("Imported " + imported + (imported === 1 ? " note." : " notes."));
+    } catch (error) {
+      if (accountSessionCurrent(session)) showToast("Imported " + imported + " of " + files.length + ". Could not import " + files[imported].name + ": " + readableError(error), true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  function exportStem(title) {
+    const stem = cleanFilenameStem(title).replace(/[<>:"|?*]/g, "-").replace(/[. ]+$/, "") || "Untitled";
+    return /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(stem) ? "_" + stem : stem;
+  }
+
+  async function exportMarkdownNotes(notes, folder) {
+    if (!notes.length) { showToast("This folder has no notes to export."); return; }
+    const session = state.accountSession;
+    try {
+      const files = await import("./markdown-export.mjs?v=arb-20-zip-paths-20261126-a");
+      const entries = [];
+      for (const note of notes) {
+        if (!accountSessionCurrent(session)) return;
+        const editing = note.recordName === state.selectedRecordName;
+        const title = editing && state.dirty ? $("note-title").value : note.title;
+        let text;
+        if (editing && state.bodyDirty) text = currentEditorBodyMarkdown();
+        else if (isNativeModelRecord(note.record, "CapturedNote")) text = await ensureNativeTextBody(note);
+        else {
+          const record = note.record;
+          const source = fieldValue(record, "bodyStorageRaw") === "asset" && fieldValue(record, "bodyAsset")
+            ? await loadAssetBody(record) : await ensureWebTextBody(note);
+          text = files.webFileBody(source);
+        }
+        if (!accountSessionCurrent(session)) return;
+        entries.push({ folder: folder ? note.folderPath.slice(folder.length + 1) : "", title, text });
+      }
+      if (folder) {
+        const name = files.downloadName(exportStem(folder.split("/").pop()), ".zip");
+        files.downloadFile(name, files.markdownArchive(entries, exportStem));
+      } else {
+        const name = files.downloadName(exportStem(entries[0].title), ".md");
+        files.downloadFile(name, new Blob([entries[0].text], { type: "text/markdown;charset=utf-8" }));
+      }
+    } catch (error) {
+      if (accountSessionCurrent(session)) showToast("Markdown export failed: " + readableError(error), true);
     }
   }
 
@@ -9791,8 +9879,9 @@
   }
 
   function setMobileNavigationOpen(open) {
+    const wasOpen = frame.classList.contains("sidebar-open");
     const expanded = Boolean(open);
-    const isDrawerLayout = window.matchMedia("(max-width: 760px)").matches;
+    const isDrawerLayout = overlayNavigation.matches;
     const sidebar = $("sidebar");
     const scrim = $("mobile-sidebar-scrim");
     const trigger = $("mobile-menu-button");
@@ -9813,7 +9902,7 @@
         const first = $("all-notes-button");
         if (first) first.focus({ preventScroll: true });
       });
-    } else if (trigger) {
+    } else if (wasOpen && trigger) {
       trigger.focus({ preventScroll: true });
     }
   }
@@ -9821,9 +9910,10 @@
   function closeMobileNavigation() { setMobileNavigationOpen(false); }
 
   function synchronizeMobileNavigationBreakpoint() {
-    const isDrawerLayout = window.matchMedia("(max-width: 760px)").matches;
+    const isDrawerLayout = overlayNavigation.matches;
     const expanded = isDrawerLayout && frame.classList.contains("sidebar-open");
     setMobileNavigationOpen(expanded);
+    applyLayout();
   }
 
   const focusStack = [];
@@ -9889,6 +9979,8 @@
   function openSettings() {
     const modal = $("settings-modal");
     if (!modal.hidden) { focusSettingsStart(); return; }
+    $("export-note-markdown").disabled = !state.selectedRecordName || state.searchPage;
+    $("export-folder-markdown").disabled = !state.selectedFolder || state.showingArchive;
     pushFocus();
     renderSettingsShortcuts();
     setMotionVisibility(modal, true);
@@ -10602,6 +10694,29 @@
       event.preventDefault();
       openFolderContextMenu("", event.clientX, event.clientY, this);
     });
+    let markdownImportTarget;
+    $("import-markdown").addEventListener("click", function () {
+      markdownImportTarget = { session: state.accountSession, folder: state.showingArchive ? "" : state.selectedFolder };
+      $("import-markdown-files").click();
+    });
+    $("import-markdown-files").addEventListener("change", function () {
+      const files = Array.from(this.files);
+      this.value = "";
+      importMarkdownFiles(files, markdownImportTarget);
+      markdownImportTarget = null;
+    });
+    $("export-note-markdown").addEventListener("click", function () {
+      const note = state.notes.find(function (item) { return item.recordName === state.selectedRecordName; });
+      if (note) exportMarkdownNotes([note], "");
+    });
+    $("export-folder-markdown").addEventListener("click", function () {
+      const path = state.selectedFolder;
+      if (!path) return;
+      const notes = state.notes.filter(function (note) {
+        return !isArchived(note.record) && (note.folderPath === path || note.folderPath.startsWith(path + "/"));
+      });
+      exportMarkdownNotes(notes, path);
+    });
     $("folder-context-create").addEventListener("click", function () {
       closeFolderContextMenu();
       createFolder("");
@@ -10919,17 +11034,33 @@
       setMobileNavigationOpen(!frame.classList.contains("sidebar-open"));
     });
     $("mobile-sidebar-scrim").addEventListener("click", closeMobileNavigation);
-    const mobileDrawerMedia = window.matchMedia("(max-width: 760px)");
-    if (mobileDrawerMedia.addEventListener) mobileDrawerMedia.addEventListener("change", synchronizeMobileNavigationBreakpoint);
-    else if (mobileDrawerMedia.addListener) mobileDrawerMedia.addListener(synchronizeMobileNavigationBreakpoint);
+    if (overlayNavigation.addEventListener) overlayNavigation.addEventListener("change", synchronizeMobileNavigationBreakpoint);
+    else if (overlayNavigation.addListener) overlayNavigation.addListener(synchronizeMobileNavigationBreakpoint);
+    synchronizeMobileNavigationBreakpoint();
+    $("note-pane").addEventListener("focusin", function (event) {
+      if (event.target.id === "note-title" || event.target.closest("#note-body")) {
+        frame.classList.add("mobile-note-open", "mobile-editor-open");
+      }
+    });
     $("back-to-list-button").addEventListener("click", function () {
       flushSave().finally(function () { frame.classList.remove("mobile-note-open", "mobile-editor-open"); });
     });
     $("collapse-sidebar-button").addEventListener("click", function () { setSidebarCollapsed(!state.layout.sidebarCollapsed); });
     [[$("sidebar-resizer"), "sidebar"], [$("list-resizer"), "list"]].forEach(function (entry) {
       const resizer = entry[0]; const pane = entry[1];
+      const reset = function () {
+        const before = capturePreferences();
+        resizePane(pane, defaultLayout[pane + "Width"]);
+        recordPreferenceChange(before, "Reset pane width");
+      };
+      resizer.addEventListener("dblclick", reset);
       resizer.addEventListener("pointerdown", function (event) { beginPaneResize(event, pane); });
       resizer.addEventListener("keydown", function (event) {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          reset();
+          return;
+        }
         if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
         event.preventDefault();
         const before = capturePreferences();
@@ -10986,7 +11117,6 @@
     function clearSettingsSearch() {
       if (!settingsSearch || !settingsSearchResults) return;
       settingsSearch.value = "";
-      settingsSearch.setAttribute("aria-expanded", "false");
       settingsSearchResults.replaceChildren();
       settingsSearchResults.hidden = true;
       if (settingsSectionsNav) settingsSectionsNav.hidden = false;
@@ -11006,7 +11136,6 @@
       const query = settingsSearch.value.trim().toLowerCase();
       settingsSearchResults.replaceChildren();
       settingsSearchResults.hidden = !query;
-      settingsSearch.setAttribute("aria-expanded", String(Boolean(query)));
       if (settingsSectionsNav) settingsSectionsNav.hidden = Boolean(query);
       if (!query) return;
       const matches = Array.from(document.querySelectorAll("[data-setting-label]"))

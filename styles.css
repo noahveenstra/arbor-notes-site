@@ -72,8 +72,8 @@
 
   --label: #1a1a1a;
   --label: light-dark(#1a1a1a, #ffffff);
-  --secondary-label: #6e6e73;
-  --secondary-label: light-dark(#6e6e73, #8e8e93);
+  --secondary-label: #67676c;
+  --secondary-label: light-dark(#67676c, #8e8e93);
   --tertiary-label: #8e8e93;
   --tertiary-label: light-dark(#8e8e93, #6e6e73);
   --quaternary-label: #aeaeb2;

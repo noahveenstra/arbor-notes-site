@@ -7069,6 +7069,7 @@
         if (!changes) break;
         (changes.records || []).forEach(function (record) {
           if (!cloudKitWebZone.isLibraryRecord(record, nativeSchema)) return;
+          deletedNames.delete(record.recordName);
           changedNames.add(record.recordName);
           if (record.recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
             state.pendingRemoteRecords.set(record.recordName, record);
@@ -7078,8 +7079,9 @@
         });
         (changes.deletedRecords || []).forEach(function (record) {
           const recordName = record.recordName;
+          changedNames.delete(recordName);
           deletedNames.add(recordName);
-          if (recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
+          if (recordName === state.selectedRecordName && noteEditInProgress(recordName)) {
             state.pendingRemoteRecords.set(recordName, null);
             return;
           }
@@ -7096,7 +7098,7 @@
       if (!accountSessionCurrent(session)) return;
       const selectedName = state.selectedRecordName;
       const selectedChanged = selectedName &&
-        (changedNames.has(selectedName) || state.pendingRemoteRecords.has(selectedName)) &&
+        !deletedNames.has(selectedName) && (changedNames.has(selectedName) || state.pendingRemoteRecords.has(selectedName)) &&
         !state.dirty && state.saveFlightCount === 0;
       let selectedDocument = null;
       let selectedRecord = null;
@@ -7120,6 +7122,10 @@
       }
       if (changedNames.size || deletedNames.size || selectedRecord) {
         syncDerivedCollections();
+        if (deletedNames.has(state.selectedRecordName) && !state.records.has(state.selectedRecordName)) {
+          const remaining = restoreOpenTabsForLoadedNotes();
+          selectRestoredNote(remaining.note);
+        }
         if (selectedRecord && selectedDocument && !state.dirty && state.saveFlightCount === 0) {
           applyRemoteDocumentToActiveEditor(selectedRecord, selectedDocument);
         }

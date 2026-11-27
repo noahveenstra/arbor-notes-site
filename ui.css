@@ -1378,6 +1378,7 @@ html[data-theme="light"] .sidebar-brand img { filter: none; }
 .note-tab-new { position: relative; top: auto; right: auto; width: 2.25rem; height: 2.25rem; flex: 0 0 2.25rem; transform: none; cursor: pointer; }
 .note-tab-close { margin-right: 4px; }
 .note-tab-highlight { transition: transform 160ms ease-out, width 160ms ease-out; }
+.note-tab-highlight:only-child { display: none; }
 
 /* A single parent edge avoids the second rounded-card seam at the editor header. */
 #note-pane { border-radius: 0; transition: grid-template-columns 220ms ease-out; }

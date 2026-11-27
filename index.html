@@ -39,7 +39,7 @@
   <link rel="stylesheet" href="./shortcuts.css?v=arb-62-transparency-20261126-a">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b" data-required-global="ARBOR_CLOUDKIT_CONFIG"></script>
   <script type="module" src="./shortcuts.js?v=arb-179-custom-shortcuts-20261124-a" data-required-global="ArborShortcuts"></script>
-  <script src="./markdown.js?v=arb-20-markdown-main-20261127-a" data-required-global="ArborMarkdown" defer></script>
+  <script src="./markdown.js?v=arb-20-manifest-main-fbb20b4-20261127-a" data-required-global="ArborMarkdown" defer></script>
   <script type="module" src="./markdown-typing-ui.mjs?v=arb-markdown-typing-20261126-a"></script>
   <script src="./personal-dictionary.js?v=arb-112-dictionary-contract-20261120-a" defer></script>
   <script src="./proofreading-dictionary-sync.js?v=arb-212-startup-20261126-a" defer></script>
@@ -55,7 +55,7 @@
   <script src="./search-logic.js?v=arb-related-margin-20261125-a" data-required-global="ArborSearchLogic" defer></script>
   <script src="./note-sync.js?v=arb-214-remote-deletions-20261126-a" data-required-global="ArborNoteSync" defer></script>
   <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" data-required-global="ArborLaunchLibrary" defer></script>
-  <script src="./app-bootstrap.js?v=arb-221-post370-20261127-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-20-manifest-filters-date-20261127-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -457,6 +457,11 @@ Try replacing this example with something you want to remember.</textarea>
                 <div class="settings-setting-copy"><div class="settings-field-label">Import Markdown</div><small>Each UTF-8 .md or .markdown file becomes a note in the selected folder. Its filename supplies the title.</small></div>
                 <button type="button" id="import-markdown">Choose files…</button>
                 <input type="file" id="import-markdown-files" accept=".md,.markdown" multiple hidden>
+              </div>
+              <div class="settings-setting-row" data-setting-label="Import notes-exporter folder" data-setting-search="Apple Notes metadata manifest import folder dates">
+                <div class="settings-setting-copy"><div class="settings-field-label">Import notes-exporter folder</div><small>Preview a verified notes-exporter v1 folder. Arbor keeps source dates and folder identity where supported.</small></div>
+                <button type="button" id="import-notes-exporter">Choose folder…</button>
+                <input type="file" id="import-notes-exporter-files" webkitdirectory directory multiple hidden>
               </div>
               <div class="settings-setting-row" data-setting-label="Export open note" data-setting-search="markdown file download">
                 <div class="settings-setting-copy"><div class="settings-field-label">Export open note</div><small>Download the note body as a Markdown file.</small></div>

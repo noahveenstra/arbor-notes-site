@@ -1508,6 +1508,9 @@
     if (/NETWORK_ERROR|network error|did not return a usable response/i.test(text)) {
       return withDiagnostic("Arbor couldn’t reach iCloud. Your Arbor session is still saved; retry sync when your connection is back.");
     }
+    if (/record too large|record size.{0,24}(?:limit|exceed)|(?:limit|exceed).{0,24}record size/i.test(text)) {
+      return withDiagnostic("CloudKit rejected a note because its record exceeded the size limit. Arbor did not truncate the Markdown; earlier notes in this import may already be saved.");
+    }
     if (/ZONE_NOT_FOUND|UNKNOWN_ITEM/i.test(text)) return withDiagnostic("The Arbor notes zone is not available in this CloudKit environment yet.");
     if (/OPLOCK|SERVER_RECORD_CHANGED|serverRecordChanged|RECORD_CHANGED/i.test(text)) return withDiagnostic("This note changed on another device. Arbor kept your local draft and is refreshing the newer iCloud version.");
     if (/SERVER_RECORD_CHANGED|CONFLICT/i.test(text)) return withDiagnostic("This note changed in another place. Reload the note before saving more changes.");
@@ -9689,6 +9692,63 @@
     return changes;
   }
 
+  function createOnlyToDatabase(record) {
+    const nativeSchema = state.nativeSchema;
+    const zoneID = nativeSchema ? state.nativeZoneID : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    const createRecord = Object.assign({}, record);
+    // Use CloudKit JS's explicit create operation. Omit change-tag metadata;
+    // an existing record name must fail with EXISTS instead of being updated.
+    delete createRecord.recordChangeTag;
+    return state.database.newRecordsBatch({ zoneID: zoneID }).create(createRecord).commit();
+  }
+
+  async function fetchCurrentRecordAfterCreateConflict(recordName) {
+    const zoneID = state.nativeSchema ? state.nativeZoneID : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    const response = assertResponse(await state.database.fetchRecords([recordName], { zoneID: zoneID }));
+    return Array.isArray(response && response.records)
+      ? response.records.find(record => record.recordName === recordName) || null
+      : null;
+  }
+
+  function cloudKitCode(error) {
+    return [error && error.serverErrorCode, error && error.code, error && error.errorCode]
+      .find(value => typeof value === "string" && /^[A-Z_]+$/.test(value)) || "";
+  }
+
+  function recordFieldValuesMatch(expected, actual) {
+    if (!expected || !actual || !expected.fields || !actual.fields) return false;
+    return Object.entries(expected.fields).every(([name, expectedField]) => {
+      const actualField = actual.fields[name];
+      if (!actualField || !Object.prototype.hasOwnProperty.call(expectedField || {}, "value") ||
+          !Object.prototype.hasOwnProperty.call(actualField, "value")) return false;
+      const expectedValue = expectedField.value;
+      const actualValue = actualField.value;
+      if (expectedValue instanceof Date || actualValue instanceof Date) {
+        const expectedTime = new Date(expectedValue).getTime();
+        const actualTime = new Date(actualValue).getTime();
+        return Number.isFinite(expectedTime) && expectedTime === actualTime;
+      }
+      return Object.is(expectedValue, actualValue);
+    });
+  }
+
+  function sameImportedNoteIdentity(existing, expected) {
+    if (!existing || existing.recordName !== expected.recordName || existing.recordType !== expected.recordType) return false;
+    const idField = state.nativeSchema ? "id" : "noteUUID";
+    return Boolean(fieldValue(expected, idField)) && fieldValue(existing, idField) === fieldValue(expected, idField);
+  }
+
+  function sameImportedFolderIdentity(existing, plan, parentUUID) {
+    if (!existing || existing.recordName !== plan.recordName ||
+        existing.recordType !== (state.nativeSchema ? "CD_NoteFolder" : "ArborFolder")) return false;
+    if (state.nativeSchema) {
+      return fieldValue(existing, "id") === plan.uuid &&
+        fieldValue(existing, "name") === plan.name &&
+        String(fieldValue(existing, "parentID") || "") === String(parentUUID || "");
+    }
+    return fieldValue(existing, "folderUUID") === plan.uuid && fieldValue(existing, "relativePath") === plan.path;
+  }
+
   function fingerprint(body) {
     const bytes = new TextEncoder().encode(body);
     return crypto.subtle.digest("SHA-256", bytes).then(function (hash) {
@@ -10155,18 +10215,37 @@
     return current;
   }
 
-  async function createNote(initialBody, focusBody, initialTitle, { draft, importFolder } = {}) {
+  async function createNote(initialBody, focusBody, initialTitle, importOptions) {
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
+    // Keep the existing individual-Markdown importer API while accepting validated
+    // manifest metadata as an options object.
+    const options = typeof importOptions === "string"
+      ? { importFolder: importOptions }
+      : (importOptions && typeof importOptions === "object" ? importOptions : {});
+    const { draft, importFolder, importID, createdAt, modifiedAt, importTarget,
+      sourceAccountID, sourceID, importFolderUUID } = options;
     const importing = typeof importFolder === "string";
     const folderPath = importFolder ?? draft?.folder ?? state.selectedFolder;
     try {
       if (draft && browserOffline()) throw new Error("You’re offline. Press Enter to retry after reconnecting.");
       if (!state.database) throw new Error("Sign in with Apple before creating notes.");
       if (!state.demo && !state.nativeZoneExists) throw new Error("Arbor is still connecting to iCloud. Try again when the library has finished loading.");
+      if (importTarget && !manifestImportDestinationCurrent(importTarget)) {
+        showToast("The selected import destination changed or no longer exists. Choose it again; nothing was imported.", true);
+        return false;
+      }
       await flushSave();
       if (!accountSessionCurrent(session)) return false;
-      const id = draft ? draft.id : crypto.randomUUID().toUpperCase();
+      if (importTarget && !manifestImportDestinationCurrent(importTarget)) {
+        showToast("The selected import destination changed or no longer exists. Choose it again; nothing was imported.", true);
+        return false;
+      }
+      if (importing && folderPath && !state.folders.some(item => item.path === folderPath)) {
+        showToast("The imported folder no longer exists. Nothing was written there.", true);
+        return false;
+      }
+      const id = importID || (draft ? draft.id : crypto.randomUUID().toUpperCase());
       const requestedTitle = String(initialTitle || "").trim();
       const noteTitle = (importing ? requestedTitle.replace(/[\r\n]+/g, " ") : requestedTitle.slice(0, 180)) || "Untitled";
       const noteBody = String(initialBody || "");
@@ -10183,34 +10262,72 @@
             CD_text: field(noteBody),
             CD_derivedAssociations: field(""),
             CD_userTitle: field(noteTitle),
-            CD_createdAt: field(new Date()),
-            CD_modifiedAt: field(new Date())
+            CD_createdAt: field(createdAt ? new Date(createdAt) : new Date()),
+            CD_modifiedAt: field(modifiedAt ? new Date(modifiedAt) : new Date())
           }
         };
         if (folder) record.fields.CD_folderID = field(folder.uuid);
       } else {
         record = makeNewNoteRecord(id, legacyBody, folderPath);
         if (importing) setField(record, "relativePath", currentPathForTitle(noteTitle, record.recordName, recordPath(record)));
+        if (createdAt) setField(record, "createdAt", new Date(createdAt));
+        if (modifiedAt) setField(record, "modifiedAt", new Date(modifiedAt));
         setField(record, "contentFingerprint", await fingerprint(legacyBody));
       }
       if (!accountSessionCurrent(session)) return false;
-      let saved = draft?.submitted ? await findSubmittedCapture(record, draft, session) : null;
-      if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
-      if (draft?.owner && browserLibraryOwner() !== draft.owner) { clearCapture(); return false; }
-      if (!saved) {
-        if (draft) {
-          draft.submitted = true;
-          // Persist the identity and ambiguous-write flag before the request can leave this tab.
-          if (draft.claim && !persistCapture(draft)) throw new Error("Arbor couldn’t store the capture for a safe retry.");
+      if (importTarget && !manifestImportDestinationCurrent(importTarget)) {
+        showToast("The selected import destination changed or no longer exists. Choose it again; nothing was imported.", true);
+        return false;
+      }
+      if (importing && folderPath && !state.folders.some(item => item.path === folderPath)) {
+        showToast("The imported folder no longer exists. Nothing was written there.", true);
+        return false;
+      }
+      let saved;
+      if (importID) {
+        let response;
+        try {
+          response = assertResponse(await createOnlyToDatabase(record));
+        } catch (error) {
+          if (cloudKitCode(error) === "EXISTS" && accountSessionCurrent(session)) {
+            let existing = null;
+            try { existing = await fetchCurrentRecordAfterCreateConflict(record.recordName); }
+            catch { /* Keep the original create conflict if the confirming read also fails. */ }
+            if (accountSessionCurrent(session) && sameImportedNoteIdentity(existing, record)) {
+              // A prior request may have committed but lost its response. Adopt only
+              // the fetched record; never write the source body over later user edits.
+              state.records.set(existing.recordName, existing);
+              syncDerivedCollections();
+              renderAll();
+              return { alreadyPresent: true };
+            }
+          }
+          throw error;
         }
-        const response = assertResponse(await saveToDatabase(record));
+        if (!accountSessionCurrent(session)) return false;
+        saved = Array.isArray(response?.records) ? response.records.find(item => item.recordName === record.recordName) : null;
+        if (!saved || saved.recordType !== record.recordType || !recordFieldValuesMatch(record, saved)) {
+          throw new Error(`CloudKit did not confirm the complete imported note “${noteTitle}”. The import stopped; check the library before retrying.`);
+        }
+      } else {
+        saved = draft?.submitted ? await findSubmittedCapture(record, draft, session) : null;
         if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
         if (draft?.owner && browserLibraryOwner() !== draft.owner) { clearCapture(); return false; }
-        saved = response?.records?.find(item => item.recordName === record.recordName);
-        if (!saved && draft) throw new Error("Arbor couldn’t confirm whether this note was saved. Press Enter to check again.");
-        saved = saved || record;
+        if (!saved) {
+          if (draft) {
+            draft.submitted = true;
+            // Persist the identity and ambiguous-write flag before the request can leave this tab.
+            if (draft.claim && !persistCapture(draft)) throw new Error("Arbor couldn’t store the capture for a safe retry.");
+          }
+          const response = assertResponse(await saveToDatabase(record));
+          if (!accountSessionCurrent(session) || (draft && captureDraft !== draft)) return false;
+          if (draft?.owner && browserLibraryOwner() !== draft.owner) { clearCapture(); return false; }
+          saved = response?.records?.find(item => item.recordName === record.recordName);
+          if (!saved && draft) throw new Error("Arbor couldn’t confirm whether this note was saved. Press Enter to check again.");
+          saved = saved || record;
+        }
+        if (draft) clearCapture();
       }
-      if (draft) clearCapture();
       state.records.set(saved.recordName, saved);
       syncDerivedCollections();
       const content = { title: noteTitle, body: noteBody, userTitle: noteTitle };
@@ -10224,7 +10341,20 @@
       });
       state.skipNextListTransition = true;
       renderAll();
-      if (importing) return true;
+      if (importing) {
+        if (importID) {
+          return {
+            created: true,
+            recordName: saved.recordName,
+            title: noteTitle,
+            sourceAccountID: String(sourceAccountID || ""),
+            sourceID: String(sourceID || ""),
+            folderPath: folderPath || "",
+            folderUUID: String(importFolderUUID || "")
+          };
+        }
+        return true;
+      }
       const opened = await openNote(saved.recordName, { tabIntent: "new" });
       if (!opened) return false;
       if (!accountSessionCurrent(session)) return false;
@@ -10237,7 +10367,7 @@
       }
       return true;
     } catch (error) {
-      if (draft) throw error;
+      if (draft || importID) throw error;
       showToast(readableError(error), true);
       return false;
     }
@@ -10266,6 +10396,299 @@
       if (accountSessionCurrent(session)) showToast("Imported " + imported + (imported === 1 ? " note." : " notes."));
     } catch (error) {
       if (accountSessionCurrent(session)) showToast("Imported " + imported + " of " + files.length + ". Could not import " + files[imported].name + ": " + readableError(error), true);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function manifestImportFolderPlan(notes, destination, adapter) {
+    const accountNames = new Map();
+    for (const note of notes) {
+      if (!accountNames.has(note.sourceAccountID)) accountNames.set(note.sourceAccountID, note.sourceAccountName || "Account");
+    }
+    const sameNameAccounts = new Map();
+    for (const [accountID, name] of accountNames) {
+      const key = cleanFolderName(name).toLocaleLowerCase();
+      sameNameAccounts.set(key, (sameNameAccounts.get(key) || 0) + 1);
+    }
+
+    const pathFolderIDs = new Map();
+    for (const note of notes) {
+      if (!note.sourceFolderID || !note.folderPath.length) continue;
+      const pathKey = `${note.sourceAccountID}\u0000${note.folderPath.join("\u0000")}`;
+      if (!pathFolderIDs.has(pathKey)) pathFolderIDs.set(pathKey, new Set());
+      pathFolderIDs.get(pathKey).add(note.sourceFolderID);
+    }
+
+    const nodes = new Map();
+    function addNode(node) {
+      if (!nodes.has(node.key)) nodes.set(node.key, node);
+      return nodes.get(node.key);
+    }
+    for (const [accountID, sourceName] of accountNames) {
+      const duplicateName = sameNameAccounts.get(cleanFolderName(sourceName).toLocaleLowerCase()) > 1;
+      const suffix = duplicateName ? ` (${accountID.slice(-6)})` : "";
+      const key = `account:${accountID}`;
+      addNode({ key, parentKey: destination ? `destination:${destination}` : "", rawName: cleanFolderName(sourceName) + suffix, sourceName, depth: 1, sourceKey: accountID });
+    }
+    const noteFolderKeys = new Map();
+    for (const note of notes) {
+      let parentKey = `account:${note.sourceAccountID}`;
+      let path = [];
+      for (let index = 0; index < note.folderPath.length; index++) {
+        const name = cleanFolderName(note.folderPath[index]);
+        if (!name) throw new Error(`Unsupported empty folder name in ${note.outputPath}.`);
+        path = path.concat(note.folderPath[index]);
+        const pathKey = `${note.sourceAccountID}\u0000${path.join("\u0000")}`;
+        const ids = pathFolderIDs.get(pathKey);
+        const folderID = index === note.folderPath.length - 1 && note.sourceFolderID ? note.sourceFolderID : (ids && ids.size === 1 ? Array.from(ids)[0] : "");
+        const key = folderID
+          ? `folder:${note.sourceAccountID}:${folderID}`
+          : `path:${note.sourceAccountID}:${path.join("\u0000")}`;
+        const distinctIDs = ids && ids.size > 1 ? Array.from(ids).sort() : [];
+        const distinctSuffix = distinctIDs.length ? ` (${String(folderID || "folder").slice(-6)})` : "";
+        addNode({ key, parentKey, rawName: name + distinctSuffix, sourceName: note.folderPath[index], depth: index + 2, sourceKey: note.sourceAccountID, sourceFolderID: folderID });
+        parentKey = key;
+      }
+      noteFolderKeys.set(`${note.sourceAccountID}\u0000${note.sourceID}`, parentKey);
+    }
+
+    const nodesByDepth = Array.from(nodes.values()).sort((a, b) => a.depth - b.depth || a.key.localeCompare(b.key));
+    const allPlans = [];
+    const pathsByKey = new Map();
+    const folderIDsByKey = new Map();
+    const plannedSiblingPaths = new Set();
+    const incomingByParentName = new Map();
+    for (const node of nodesByDepth) {
+      const groupKey = `${node.parentKey}\u0000${node.rawName.toLocaleLowerCase()}`;
+      if (!incomingByParentName.has(groupKey)) incomingByParentName.set(groupKey, []);
+      incomingByParentName.get(groupKey).push(node);
+    }
+    for (const node of nodesByDepth) {
+      const uuid = await adapter.stableImportUUID("folder", node.key);
+      const recordName = state.nativeSchema ? "CD_NoteFolder_" + uuid : "Folder-" + uuid;
+      const existingFolder = state.folders.find(folder => folder.uuid === uuid);
+      const parentPath = node.parentKey.startsWith("destination:") ? node.parentKey.slice("destination:".length) : (pathsByKey.get(node.parentKey) || "");
+      let name = existingFolder?.path.split("/").pop() || cleanFolderName(node.rawName) || "Imported";
+      const siblings = incomingByParentName.get(`${node.parentKey}\u0000${node.rawName.toLocaleLowerCase()}`) || [];
+      let path = existingFolder?.path || (parentPath ? parentPath + "/" + name : name);
+      const pathIsTaken = candidate => {
+        const candidatePath = parentPath ? parentPath + "/" + candidate : candidate;
+        const normalizedPath = candidatePath.toLocaleLowerCase();
+        return state.folders.some(folder => folder.path.toLocaleLowerCase() === normalizedPath) || plannedSiblingPaths.has(normalizedPath);
+      };
+      if (!existingFolder && (siblings.length > 1 || pathIsTaken(name))) {
+        name = adapter.uniqueSafeFolderComponent(node.rawName, uuid, pathIsTaken);
+        path = parentPath ? parentPath + "/" + name : name;
+      }
+      if (!existingFolder && pathIsTaken(name)) throw new Error("Could not reserve a unique safe folder name. The import stopped before creating this folder.");
+      pathsByKey.set(node.key, path);
+      folderIDsByKey.set(node.key, uuid);
+      plannedSiblingPaths.add(path.toLocaleLowerCase());
+      allPlans.push({
+        key: node.key, parentKey: node.parentKey, uuid, recordName, name: path.split("/").pop(), path,
+        existing: Boolean(existingFolder), sourceName: node.sourceName || "",
+        normalizedName: Boolean(node.sourceName && cleanFolderName(node.sourceName) !== node.sourceName)
+      });
+    }
+    return {
+      folders: allPlans,
+      notes: notes.map(note => ({ ...note, folderPath: pathsByKey.get(noteFolderKeys.get(`${note.sourceAccountID}\u0000${note.sourceID}`)) || destination || "", folderUUID: folderIDsByKey.get(noteFolderKeys.get(`${note.sourceAccountID}\u0000${note.sourceID}`)) || "" }))
+    };
+  }
+
+  function notesExporterFolderRecord(plan, parentUUID) {
+    const now = new Date();
+    if (state.nativeSchema) {
+      const record = {
+        recordChangeTag: null,
+        recordName: plan.recordName,
+        recordType: "CD_NoteFolder",
+        fields: { CD_entityName: field("NoteFolder"), CD_id: field(plan.uuid), CD_name: field(plan.name), CD_createdAt: field(now) }
+      };
+      if (parentUUID) record.fields.CD_parentID = field(parentUUID);
+      return record;
+    }
+    return {
+      recordChangeTag: null,
+      recordName: plan.recordName,
+      recordType: "ArborFolder",
+      fields: {
+        folderUUID: field(plan.uuid), relativePath: field(plan.path), createdAt: field(now), modifiedAt: field(now),
+        lastModifiedDeviceID: field(state.deviceID), lastModifiedDeviceName: field("Arbor Web"), schemaEpoch: field(1)
+      }
+    };
+  }
+
+  function manifestImportDestinationCurrent(target) {
+    if (!target || !accountSessionCurrent(target.session) || state.showingArchive || state.selectedFolder !== target.folder) return false;
+    return !target.folder || state.folders.some(folder => folder.path === target.folder);
+  }
+
+  async function importNotesExporterFolder(files, target) {
+    if (!files.length || !target) return { status: "empty", newlyCreated: [] };
+    if (!manifestImportDestinationCurrent(target)) {
+      if (accountSessionCurrent(target.session)) showToast("The selected import destination changed or no longer exists. Choose it again; nothing was imported.", true);
+      return { status: "stale", newlyCreated: [] };
+    }
+    const button = $("import-notes-exporter");
+    if (button.disabled) return { status: "busy", newlyCreated: [] };
+    button.disabled = true;
+    let createdFolders = 0;
+    let imported = 0;
+    const newlyCreated = [];
+    try {
+      const manifestFile = files.find(file => (file.webkitRelativePath || file.name).split("/").pop() === "manifest.json");
+      if (!manifestFile) throw new Error("Choose an export folder containing manifest.json at its root.");
+      const manifestRelative = manifestFile.webkitRelativePath || manifestFile.name;
+      const manifestSegments = manifestRelative.split("/");
+      if (manifestSegments.length > 2 || manifestSegments.at(-1) !== "manifest.json") {
+        throw new Error("Choose an export folder containing manifest.json at its root.");
+      }
+      const rootPrefix = manifestSegments.length === 2 ? manifestSegments[0] + "/" : "";
+      const manifestBytes = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(await manifestFile.arrayBuffer());
+      let manifest;
+      try { manifest = JSON.parse(manifestBytes); }
+      catch { throw new Error("manifest.json is not valid JSON."); }
+      const markdownPaths = new Set(Array.isArray(manifest?.notes)
+        ? manifest.notes.map(note => note?.outputs?.md?.path).filter(path => typeof path === "string")
+        : []);
+      const entries = files
+        .filter(file => file !== manifestFile)
+        .map(file => {
+          const filePath = file.webkitRelativePath || file.name;
+          const relativePath = filePath.startsWith(rootPrefix) ? filePath.slice(rootPrefix.length) : "";
+          return { path: relativePath, bytes: markdownPaths.has(relativePath) ? file.arrayBuffer() : null };
+        });
+      const materialized = await Promise.all(entries.map(async entry => ({ path: entry.path, bytes: entry.bytes ? await entry.bytes : null })));
+      const adapter = await import("./notes-exporter-manifest.mjs?v=arb-20-manifest-filters-date-20261127-a");
+      const prepared = await adapter.prepareNotesExporterImport(manifest, materialized);
+      if (!prepared.notes.length) throw new Error("No current Markdown outputs passed manifest validation. " + prepared.skipped.map(item => item.reason).slice(0, 3).join("; "));
+      if (!manifestImportDestinationCurrent(target)) throw new Error("The selected import destination changed or no longer exists. Choose it again; nothing was imported.");
+
+      const recordsByID = new Map(state.records);
+      const pendingNotes = [];
+      let alreadyImported = 0;
+      for (const note of prepared.notes) {
+        const importID = await adapter.stableImportUUID("note", note.sourceAccountID + "\u0000" + note.sourceID);
+        const recordName = state.nativeSchema ? "CD_CapturedNote_" + importID : "Note-" + importID;
+        if (recordsByID.has(recordName)) { alreadyImported++; continue; }
+        pendingNotes.push({ ...note, importID, recordName });
+      }
+      const folderPlan = await manifestImportFolderPlan(pendingNotes, target.folder, adapter);
+      if (!manifestImportDestinationCurrent(target)) throw new Error("The selected import destination changed or no longer exists. Choose it again; nothing was imported.");
+      const metadataWarnings = prepared.notes.reduce((count, note) => count + note.unsupportedMetadata.length, 0);
+      const invalidDateFields = prepared.notes.reduce((count, note) => count + note.dateWarnings.length, 0);
+      const collisionNames = folderPlan.folders.filter(folder => !folder.existing && / \([A-F0-9]{6}(?:-\d+)?\)$/i.test(folder.name));
+      const normalizedFolders = folderPlan.folders.filter(folder => folder.normalizedName);
+      const skippedPreview = prepared.skipped.slice(0, 12).map(item => `• ${item.id}: ${item.reason}`);
+      const metadataPreview = Array.from(new Set(prepared.notes.flatMap(note => note.unsupportedMetadata))).sort();
+      const possibleExistingMatches = pendingNotes.filter(note => state.notes.some(existing => existing.title.toLocaleLowerCase() === note.title.toLocaleLowerCase())).length;
+      const filterPreview = [
+        ...(prepared.filters.length ? [
+          "Exporter filters applied (this is a scoped snapshot, not the whole library):",
+          ...prepared.filters.map(item => `• ${item.label}: ${item.value}`)
+        ] : []),
+        ...(prepared.filtersUnrecognized ? ["Additional or unsupported exporter filter criteria are present; review the source scope before importing."] : []),
+        ...(!prepared.filters.length && !prepared.filtersUnrecognized ? ["No exporter filters are recorded in this manifest."] : [])
+      ];
+      const preview = [
+        `Manifest status: ${prepared.status}${prepared.mode ? ` (${prepared.mode})` : ""}`,
+        ...filterPreview,
+        `Verified current notes: ${prepared.notes.length}`,
+        `New Arbor notes: ${pendingNotes.length}`,
+        `Already imported source identities: ${alreadyImported}`,
+        `Skipped or stale entries: ${prepared.skipped.length}`,
+        `Folders to create: ${folderPlan.folders.filter(folder => !folder.existing).length}`,
+        `Name collisions requiring separate folders: ${collisionNames.length}`,
+        ...(collisionNames.length ? ["Separate folder paths:", ...collisionNames.slice(0, 12).map(folder => `• ${folder.path}`)] : []),
+        `Folder names requiring Arbor-safe normalization: ${normalizedFolders.length}`,
+        ...(normalizedFolders.length ? ["Normalized folder paths:", ...normalizedFolders.slice(0, 12).map(folder => `• ${folder.sourceName} → ${folder.path}`)] : []),
+        `Existing title matches (review only; title matching will not deduplicate): ${possibleExistingMatches}`,
+        `Source date fields using current-time fallback: ${invalidDateFields}`,
+        `Notes with unmapped metadata or attachments: ${metadataWarnings}`,
+        ...(metadataPreview.length ? [`Unmapped fields: ${metadataPreview.join(", ")}`] : []),
+        ...(skippedPreview.length ? ["Skipped entry details:", ...skippedPreview] : []),
+        ...prepared.warnings
+      ].join("\n");
+      if (!window.confirm("Review notes-exporter import\n\n" + preview + "\n\nArbor will not overwrite existing notes or apply manifest deletions.")) {
+        return { status: "cancelled", newlyCreated: [] };
+      }
+      if (!manifestImportDestinationCurrent(target)) throw new Error("The selected import destination changed or no longer exists. Choose it again; nothing was imported.");
+
+      for (const folder of folderPlan.folders) {
+        if (!manifestImportDestinationCurrent(target)) throw new Error(`The import destination changed. Import stopped after ${createdFolders} folder(s) and ${imported} note(s).`);
+        if (folder.existing || state.records.has(folder.recordName)) continue;
+        const destinationParent = folder.parentKey.startsWith("destination:")
+          ? state.folders.find(item => item.path === folder.parentKey.slice("destination:".length))?.uuid
+          : "";
+        const parentUUID = destinationParent || (folder.parentKey ? folderPlan.folders.find(item => item.key === folder.parentKey)?.uuid : "");
+        const record = notesExporterFolderRecord(folder, parentUUID);
+        let response;
+        try {
+          response = assertResponse(await createOnlyToDatabase(record));
+        } catch (error) {
+          if (cloudKitCode(error) === "EXISTS" && manifestImportDestinationCurrent(target)) {
+            let existing = null;
+            try { existing = await fetchCurrentRecordAfterCreateConflict(folder.recordName); }
+            catch { /* Preserve the original create conflict if confirmation fails. */ }
+            if (manifestImportDestinationCurrent(target) && sameImportedFolderIdentity(existing, folder, parentUUID)) {
+              // A previous create may have reached iCloud without an acknowledgement.
+              // Reuse the current folder identity and leave any mismatch untouched.
+              state.records.set(existing.recordName, existing);
+              syncDerivedCollections();
+              continue;
+            }
+          }
+          throw error;
+        }
+        if (!manifestImportDestinationCurrent(target)) throw new Error(`The import destination changed. Import stopped after ${createdFolders} folder(s) and ${imported} note(s).`);
+        const saved = response?.records?.find(item => item.recordName === folder.recordName);
+        if (!saved || !sameImportedFolderIdentity(saved, folder, parentUUID) || !recordFieldValuesMatch(record, saved)) {
+          throw new Error(`Arbor did not confirm folder ${folder.name}. ${imported} notes were imported before the interruption.`);
+        }
+        state.records.set(saved.recordName, saved);
+        syncDerivedCollections();
+        createdFolders++;
+      }
+      for (const note of folderPlan.notes) {
+        if (!manifestImportDestinationCurrent(target)) throw new Error(`The import destination changed. Import stopped after ${createdFolders} folder(s) and ${imported} note(s).`);
+        if (state.records.has(note.recordName)) { alreadyImported++; continue; }
+        const createdAt = note.createdAt ? new Date(note.createdAt) : null;
+        const modifiedAt = note.modifiedAt ? new Date(note.modifiedAt) : null;
+        const created = await createNote(note.markdown, false, note.title, {
+          importFolder: note.folderPath,
+          importID: note.importID,
+          importTarget: target,
+          createdAt,
+          modifiedAt,
+          sourceAccountID: note.sourceAccountID,
+          sourceID: note.sourceID,
+          importFolderUUID: note.folderUUID
+        });
+        if (!created) throw new Error(`Could not save ${note.title}. ${imported} notes were imported before the interruption.`);
+        if (created.alreadyPresent) alreadyImported++;
+        else {
+          if (created.created !== true || !created.recordName || !created.sourceAccountID || !created.sourceID) {
+            throw new Error(`Arbor could not confirm the new record identity for ${note.title}. The import stopped safely.`);
+          }
+          newlyCreated.push(created);
+          imported++;
+        }
+      }
+      if (!manifestImportDestinationCurrent(target)) throw new Error(`The import destination changed. Import stopped after ${createdFolders} folder(s) and ${imported} note(s).`);
+      syncDerivedCollections();
+      renderAll();
+      showToast(`Imported ${imported} notes from manifest v1. ${alreadyImported} were already present. ${createdFolders} folders created.`);
+      return { status: "complete", newlyCreated: newlyCreated.slice() };
+    } catch (error) {
+      if (accountSessionCurrent(target.session)) {
+        showToast(`Manifest import stopped safely after saving ${imported} note(s) and ${createdFolders} folder(s): ` + readableError(error), true);
+      }
+      return {
+        status: manifestImportDestinationCurrent(target) ? "partial" : "stale",
+        newlyCreated: manifestImportDestinationCurrent(target) ? newlyCreated.slice() : []
+      };
     } finally {
       button.disabled = false;
     }
@@ -12649,6 +13072,25 @@
       this.value = "";
       importMarkdownFiles(files, markdownImportTarget);
       markdownImportTarget = null;
+    });
+    let notesExporterImportTarget;
+    $("import-notes-exporter").addEventListener("click", function () {
+      notesExporterImportTarget = { session: state.accountSession, folder: state.showingArchive ? "" : state.selectedFolder };
+      $("import-notes-exporter-files").click();
+    });
+    $("import-notes-exporter-files").addEventListener("change", function () {
+      const files = Array.from(this.files);
+      this.value = "";
+      const target = notesExporterImportTarget;
+      notesExporterImportTarget = null;
+      importNotesExporterFolder(files, target).then(result => {
+        // The importer hands off acknowledged new identities only. A consumer can
+        // resolve recordName against the current in-memory library; retries, skips,
+        // cancellations, stale scopes, and failed creates emit no candidate.
+        if (result?.newlyCreated?.length && manifestImportDestinationCurrent(target)) {
+          document.dispatchEvent(new CustomEvent("arbor:manifest-notes-created", { detail: result.newlyCreated }));
+        }
+      });
     });
     $("export-note-markdown").addEventListener("click", function () {
       const note = state.notes.find(function (item) { return item.recordName === state.selectedRecordName; });

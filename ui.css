@@ -560,7 +560,7 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .note-card { cursor: default; }
 .note-card-title { font-size: 15px; font-weight: 700; }
 .note-card-detail { display: contents; }
-.note-card-preview { display: block; overflow: hidden; color: light-dark(#6e6e73, #a3a3a8); font-size: 12px; line-height: 1.35; white-space: nowrap; text-overflow: ellipsis; }
+.note-card-preview { display: -webkit-box; overflow: hidden; color: light-dark(#6e6e73, #a3a3a8); font-size: 12px; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; text-overflow: ellipsis; }
 .note-card-folder img { width: 20px; height: 15px; }
 .note-card-date { margin-left: auto; color: var(--secondary-label); font: 12px/1.35 var(--font-text); }
 .note-workspace { display: flex; height: 100%; min-height: 0; flex-direction: column; border-radius: 20px; background: var(--surface-sidebar-solid); }

@@ -109,11 +109,16 @@
     cacheDBPromise: null,
     bodyCache: new Map(),
     previewCache: new Map(),
+    previewCacheRevision: new Map(),
+    previewRetryBlocks: new Map(),
     previewLoadErrors: new Set(),
+    previewStaleNames: new Set(),
     previewObserver: null,
     previewQueue: [],
     previewQueuedNames: new Set(),
+    previewVisibleNames: new Set(),
     previewActiveCount: 0,
+    previewHydrationReady: false,
     cacheWriteTimer: null,
     editQueue: [],
     editsStartedHere: new Set(),
@@ -505,7 +510,10 @@
     state.bodyCache = new Map();
     resetPreviewHydration();
     state.previewCache = new Map();
+    state.previewCacheRevision = new Map();
+    state.previewRetryBlocks = new Map();
     state.previewLoadErrors = new Set();
+    state.previewStaleNames = new Set();
     state.notes = [];
     state.folders = [];
     refreshLexicalIndex();
@@ -936,6 +944,15 @@
     return session === state.accountSession && Boolean(state.database);
   }
 
+  function previewRecordRevision(record) {
+    if (!record) return "";
+    return [
+      record.recordChangeTag || "",
+      fieldValue(record, "modifiedAt") || fieldValue(record, "CD_modifiedAt") || "",
+      fieldValue(record, "contentFingerprint") || ""
+    ].join("|");
+  }
+
   function rememberRecordBody(recordName, body, session) {
     if ((session != null && session !== state.accountSession) || state.accountCacheSuspended) return;
     state.bodyCache.delete(recordName); state.bodyCache.set(recordName, body);
@@ -947,14 +964,19 @@
     }
     const preview = previewText(body);
     const current = state.notes.find(function (note) { return note.recordName === recordName; });
+    const record = state.records.get(recordName) || (current && current.record);
     if (current && isNativeModelRecord(current.record, "CapturedNote")) {
       state.previewCache.set(recordName, preview);
+      state.previewCacheRevision.set(recordName, previewRecordRevision(record));
+      state.previewStaleNames.delete(recordName);
       state.previewLoadErrors.delete(recordName);
       current.body = body; current.editorBody = body; current.preview = preview; current.previewUnavailable = false;
       if (!fieldValue(current.record, "userTitle") && !fieldValue(current.record, "generatedTitle") && (!current.title || current.title === "Untitled")) current.title = firstLineTitle(body);
     } else if (current && current.record.recordType === "ArborNote") {
       const parts = splitDocument(body);
       state.previewCache.set(recordName, previewText(parts.body));
+      state.previewCacheRevision.set(recordName, previewRecordRevision(record));
+      state.previewStaleNames.delete(recordName);
       state.previewLoadErrors.delete(recordName);
       current.body = body; current.title = parts.title; current.editorBody = parts.body;
       current.preview = previewText(parts.body); current.previewUnavailable = false;
@@ -970,6 +992,9 @@
     state.previewObserver = null;
     state.previewQueue = [];
     state.previewQueuedNames.clear();
+    state.previewVisibleNames.clear();
+    state.previewRetryBlocks.clear();
+    state.previewHydrationReady = false;
     state.previewLoadErrors.clear();
   }
 
@@ -988,36 +1013,195 @@
     preview.hidden = !text;
   }
 
+  function previewIsCurrent(recordName, record) {
+    return state.previewCache.has(recordName) &&
+      !state.previewStaleNames.has(recordName) &&
+      state.previewCacheRevision.get(recordName) === previewRecordRevision(record);
+  }
+
+  function previewJobKey(session, recordName) {
+    return String(session) + "\u001f" + recordName;
+  }
+
+  function previewWithinPrefetchRegion(card, list) {
+    if (!card || !list || typeof window === "undefined") return false;
+    const root = list.getBoundingClientRect();
+    const row = card.getBoundingClientRect();
+    const top = Math.max(root.top, 0);
+    const bottom = Math.min(root.bottom, window.innerHeight || root.bottom);
+    const left = Math.max(root.left, 0);
+    const right = Math.min(root.right, window.innerWidth || root.right);
+    return right > left && bottom > top && row.bottom >= top - 360 && row.top <= bottom + 360 && row.right >= left && row.left <= right;
+  }
+
+  function previewNeedsHydration(note, allowQueued) {
+    if (!note || !state.database || !state.previewHydrationReady || state.accountCacheSuspended) return false;
+    if (typeof navigator !== "undefined" && navigator.onLine === false) return false;
+    if ((!allowQueued && state.previewQueuedNames.has(previewJobKey(state.accountSession, note.recordName))) || state.previewLoadErrors.has(note.recordName)) return false;
+    const record = state.records.get(note.recordName) || note.record;
+    if (previewIsCurrent(note.recordName, record)) return false;
+    if (state.previewRetryBlocks.get(note.recordName) === previewRecordRevision(record)) return false;
+    if (note.bodyPromise || note.recordPromise) return false;
+    if (state.bodyCache.has(note.recordName) && !state.previewStaleNames.has(note.recordName)) return false;
+    return true;
+  }
+
+  function enqueueVisiblePreviews() {
+    if (!state.previewHydrationReady || !state.database || (typeof navigator !== "undefined" && navigator.onLine === false)) return;
+    const queuedLimit = 12;
+    for (const recordName of state.previewVisibleNames) {
+      if (state.previewQueue.length >= queuedLimit) break;
+      const note = state.notes.find(function (item) { return item.recordName === recordName; });
+      if (!previewNeedsHydration(note)) continue;
+      const session = state.accountSession;
+      const jobKey = previewJobKey(session, recordName);
+      state.previewQueuedNames.add(jobKey);
+      state.previewQueue.push({
+        key: jobKey,
+        recordName: recordName,
+        session: session,
+        nativeSchema: state.nativeSchema,
+        zoneID: state.nativeZoneID,
+        revision: previewRecordRevision(state.records.get(recordName) || note.record)
+      });
+    }
+    drainPreviewQueue();
+  }
+
+  async function loadPreviewText(note, job) {
+    const cached = state.bodyCache.get(job.recordName);
+    let record = state.records.get(job.recordName) || note.record;
+    if (state.bodyCache.has(job.recordName) && !state.previewStaleNames.has(job.recordName)) {
+      return { body: cached, record: record, requestRevision: job.revision, session: job.session };
+    }
+    const database = state.database;
+    const fields = record && record.fields || {};
+    const hasField = function (name) { return Object.prototype.hasOwnProperty.call(fields, name); };
+    const storage = fieldValue(record, "bodyStorageRaw");
+    const fullBodyAvailable = job.nativeSchema
+      ? hasField("CD_text") || hasField("CD_text_ckAsset")
+      : hasField("body") && (storage !== "asset" || hasField("bodyAsset"));
+    if (!fullBodyAvailable) {
+      const response = assertResponse(await database.fetchRecords([job.recordName], { zoneID: job.zoneID }));
+      if (!accountSessionCurrent(job.session)) return null;
+      record = (response.records || []).find(function (item) { return item.recordName === job.recordName; });
+      if (!record) throw new Error("CloudKit could not find this note.");
+    }
+    if (!accountSessionCurrent(job.session)) return null;
+    let body;
+    const asset = job.nativeSchema ? fieldValue(record, "text_ckAsset") : fieldValue(record, "bodyAsset");
+    const useAsset = job.nativeSchema
+      ? !(typeof fieldValue(record, "text") === "string" && fieldValue(record, "text").length) && Boolean(asset)
+      : fieldValue(record, "bodyStorageRaw") === "asset";
+    if (useAsset) {
+      const url = asset && (asset.downloadURL || asset.url);
+      if (!url) throw new Error("This note’s attachment could not be opened.");
+      const response = await fetch(url);
+      if (!response.ok) throw new Error("Could not download this note’s text asset.");
+      body = await (await response.blob()).text();
+    } else {
+      const value = fieldValue(record, job.nativeSchema ? "text" : "body");
+      body = typeof value === "string" ? value : "";
+    }
+    return accountSessionCurrent(job.session)
+      ? { body: body, record: record, requestRevision: job.revision, session: job.session }
+      : null;
+  }
+
   function drainPreviewQueue() {
     while (state.previewActiveCount < 2 && state.previewQueue.length) {
       const job = state.previewQueue.shift();
-      state.previewQueuedNames.delete(job.recordName);
-      if (!accountSessionCurrent(job.session)) continue;
+      if (!accountSessionCurrent(job.session) || (typeof navigator !== "undefined" && navigator.onLine === false)) {
+        state.previewQueuedNames.delete(job.key);
+        continue;
+      }
       const note = state.notes.find(function (item) { return item.recordName === job.recordName; });
-      if (!note || state.previewCache.has(job.recordName) || state.bodyCache.has(job.recordName)) continue;
+      if (!note || !state.previewVisibleNames.has(job.recordName) || !previewNeedsHydration(note, true)) {
+        state.previewQueuedNames.delete(job.key);
+        continue;
+      }
       state.previewActiveCount += 1;
-      (state.nativeSchema ? ensureNativeTextBody(note) : ensureWebTextBody(note)).then(function (body) {
-        if (!accountSessionCurrent(job.session)) return;
-        rememberRecordBody(job.recordName, body, job.session);
+      const request = loadPreviewText(note, job);
+      note.previewPromise = request;
+      request.then(function (result) {
+        if (!result || !accountSessionCurrent(job.session)) return;
+        const currentRecord = state.records.get(job.recordName);
+        const currentRevision = previewRecordRevision(currentRecord);
+        const resultRevision = previewRecordRevision(result.record);
+        if (currentRevision !== job.revision || resultRevision !== job.revision) {
+          if (currentRecord && state.notes.some(function (item) { return item.recordName === job.recordName; }) &&
+              currentRevision === job.revision && resultRevision !== job.revision) {
+            state.previewRetryBlocks.set(job.recordName, job.revision);
+          }
+          return;
+        }
+        const current = state.notes.find(function (item) { return item.recordName === job.recordName; });
+        if (!current) return;
+        const text = job.nativeSchema ? previewText(result.body) : previewText(splitDocument(result.body).body);
+        state.previewCache.set(job.recordName, text);
+        state.previewCacheRevision.set(job.recordName, job.revision);
+        state.previewStaleNames.delete(job.recordName);
+        state.previewLoadErrors.delete(job.recordName);
+        current.preview = text;
+        current.previewUnavailable = false;
         updatePreviewRow(job.recordName);
       }).catch(function () {
         if (!accountSessionCurrent(job.session)) return;
+        if (typeof navigator !== "undefined" && navigator.onLine === false) return;
+        const currentRecord = state.records.get(job.recordName);
+        if (previewRecordRevision(currentRecord) !== job.revision) return;
         state.previewLoadErrors.add(job.recordName);
         const current = state.notes.find(function (item) { return item.recordName === job.recordName; });
         if (current) current.previewUnavailable = true;
         updatePreviewRow(job.recordName);
       }).finally(function () {
+        if (note.previewPromise === request) note.previewPromise = null;
         state.previewActiveCount = Math.max(0, state.previewActiveCount - 1);
-        drainPreviewQueue();
+        state.previewQueuedNames.delete(job.key);
+        enqueueVisiblePreviews();
       });
     }
   }
 
   function queueNativePreview() {
-    // Note text is fetched when the note is opened, not while the list is scrolling.
+    if (!state.previewHydrationReady || !state.database) return;
+    const list = $("note-list");
+    if (!list) return;
+    list.querySelectorAll(".note-card").forEach(function (card) {
+      const note = state.notes.find(function (item) { return item.recordName === card.dataset.recordName; });
+      if (note) observeNativePreview(card, note);
+    });
+    enqueueVisiblePreviews();
   }
 
-  function observeNativePreview() {}
+  function observeNativePreview(card, note) {
+    if (!state.previewHydrationReady || !state.database || !window.IntersectionObserver || !card || !note) return;
+    if (!state.previewObserver) {
+      const list = $("note-list");
+      if (!list) return;
+      state.previewObserver = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          const recordName = entry.target.dataset.recordName;
+          if (!recordName) return;
+          if (entry.isIntersecting) state.previewVisibleNames.add(recordName);
+          else state.previewVisibleNames.delete(recordName);
+        });
+        enqueueVisiblePreviews();
+      }, { root: list, rootMargin: "360px 0px", threshold: 0 });
+    }
+    state.previewObserver.observe(card);
+  }
+
+  function enqueueChangedVisiblePreviews(recordNames) {
+    if (!state.previewHydrationReady || !state.database || !recordNames || !recordNames.size) return;
+    const list = $("note-list");
+    if (!list) return;
+    recordNames.forEach(function (recordName) {
+      const card = document.getElementById("note-row-" + String(recordName).replace(/[^A-Za-z0-9_-]/g, ""));
+      if (card && previewWithinPrefetchRegion(card, list)) state.previewVisibleNames.add(recordName);
+    });
+    enqueueVisiblePreviews();
+  }
 
   function getDeviceID() {
     if (demoMode) return "demo-device";
@@ -1454,7 +1638,10 @@
       const title = userTitle || generatedTitle || (body ? firstLineTitle(body) : "Untitled");
       return {
         record: record, recordName: record.recordName, uuid: noteUUID(record), title: title,
-        body: body, editorBody: body, preview: body ? previewText(body) : (state.previewCache.has(record.recordName) ? state.previewCache.get(record.recordName) : ""),
+        body: body, editorBody: body,
+        preview: previewIsCurrent(record.recordName, record)
+          ? state.previewCache.get(record.recordName)
+          : (state.previewStaleNames.has(record.recordName) ? "" : (body ? previewText(body) : "")),
         previewUnavailable: state.previewLoadErrors.has(record.recordName),
         modifiedAt: dateValue(fieldValue(record, "modifiedAt") || fieldValue(record, "createdAt")),
         createdAt: dateValue(fieldValue(record, "createdAt")), archivedAt: fieldValue(record, "archivedAt"),
@@ -1467,6 +1654,9 @@
     const body = typeof bodyValue === "string" ? bodyValue : (typeof cachedBody === "string" ? cachedBody : "");
     const parts = splitDocument(body);
     if (!body) parts.title = path.split("/").pop().replace(/\.md$/i, "") || "Untitled";
+    const preview = previewIsCurrent(record.recordName, record)
+      ? state.previewCache.get(record.recordName)
+      : (state.previewStaleNames.has(record.recordName) ? "" : previewText(parts.body));
     return {
       record: record,
       recordName: record.recordName,
@@ -1474,7 +1664,7 @@
       title: parts.title,
       body: body,
       editorBody: parts.body,
-      preview: previewText(parts.body),
+      preview: preview,
       modifiedAt: dateValue(fieldValue(record, "modifiedAt")),
       createdAt: dateValue(fieldValue(record, "createdAt")),
       archivedAt: fieldValue(record, "archivedAt"),
@@ -1738,7 +1928,7 @@
     detail.className = "note-card-detail";
     const preview = document.createElement("span");
     preview.className = "note-card-preview note-row-excerpt";
-    preview.textContent = note.preview || (note.previewUnavailable ? "Preview unavailable" : (state.nativeSchema ? "" : "No additional text"));
+    preview.textContent = note.preview || (note.previewUnavailable ? "Preview unavailable" : "");
     preview.hidden = !preview.textContent;
     detail.appendChild(preview);
     card.appendChild(detail);
@@ -1846,10 +2036,12 @@
   }
 
   function renderNoteList(list, visible, signature) {
+    const previouslyVisiblePreviews = new Set(state.previewVisibleNames);
     if (state.previewObserver) {
       state.previewObserver.disconnect();
       state.previewObserver = null;
     }
+    state.previewVisibleNames.clear();
     list.replaceChildren();
     list.dataset.motionSignature = signature;
     if (state.loadingRecords) list.setAttribute("aria-busy", "true");
@@ -1889,13 +2081,20 @@
       setListMessage(state.libraryLoadSlowMessage || "Your loaded notes remain available while Arbor checks iCloud for updates.", true, false, false);
     } else setListMessage("", false, false);
     const dateField = noteSorting.dateFieldFor(state.preferences.noteSortOrder);
+    function observeRenderedCard(card, note) {
+      observeNativePreview(card, note);
+      if (previouslyVisiblePreviews.has(note.recordName) && previewWithinPrefetchRegion(card, list)) {
+        state.previewVisibleNames.add(note.recordName);
+      }
+    }
     if (!dateField) {
       visible.forEach(function (note) {
         const card = renderNoteCard(note);
         list.appendChild(card);
-        observeNativePreview(card, note);
+        observeRenderedCard(card, note);
       });
       applyListCursor();
+      enqueueVisiblePreviews();
       return;
     }
     const groups = new Map();
@@ -1921,9 +2120,10 @@
         return { note: note, card: card };
       });
       list.appendChild(section);
-      noteRows.forEach(function (entry) { observeNativePreview(entry.card, entry.note); });
+      noteRows.forEach(function (entry) { observeRenderedCard(entry.card, entry.note); });
     });
     applyListCursor();
+    enqueueVisiblePreviews();
   }
 
   function renderNoteSkeleton(list, dateField) {
@@ -7131,6 +7331,11 @@
       const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : ensureWebTextBody(note);
       bodyPromise.then(function () {
         if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
+        if (!noteIsStillLoaded(recordName)) {
+          selectNote(null);
+          renderNotes();
+          return;
+        }
         state.selectedRecord = note.record;
         $("note-title").value = note.title === "Untitled" && !note.body ? "" : note.title;
         rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
@@ -7152,8 +7357,9 @@
       rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
       createEditor(note.editorBody);
       revealRecoveredDraft(note);
+      // Cached notes can open offline; defer this proactive fetch until an online save needs it.
       if (state.nativeSchema && state.bodyCache.has(note.recordName) &&
-          typeof fieldValue(note.record, "text") !== "string" && !fieldValue(note.record, "text_ckAsset")) {
+          typeof fieldValue(note.record, "text") !== "string" && !fieldValue(note.record, "text_ckAsset") && !browserOffline()) {
         ensureFullNativeRecord(note).catch(function (error) {
           showToast("This note is cached, but CloudKit could not prepare it for editing: " + readableError(error), true);
         });
@@ -7254,6 +7460,9 @@
 
   function cachedBodyIsStale(previous, next) {
     if (!previous) return false;
+    const previousChangeTag = String(previous.recordChangeTag || "");
+    const nextChangeTag = String(next.recordChangeTag || "");
+    if (previousChangeTag && nextChangeTag && previousChangeTag !== nextChangeTag) return true;
     const previousModified = String(fieldValue(previous, "modifiedAt") || "");
     const nextModified = String(fieldValue(next, "modifiedAt") || "");
     if (previousModified !== nextModified) return true;
@@ -7265,10 +7474,16 @@
   function applyLibraryRecord(record) {
     if (!cloudKitWebZone.isLibraryRecord(record, state.nativeSchema)) return;
     const previous = state.records.get(record.recordName);
+    const retryBlockedRevision = state.previewRetryBlocks.get(record.recordName);
+    if (retryBlockedRevision != null && retryBlockedRevision !== previewRecordRevision(record)) {
+      state.previewRetryBlocks.delete(record.recordName);
+    }
     state.records.set(record.recordName, record);
     if (cachedBodyIsStale(previous, record)) {
       state.bodyCache.delete(record.recordName);
       state.previewCache.delete(record.recordName);
+      state.previewCacheRevision.delete(record.recordName);
+      state.previewStaleNames.add(record.recordName);
       state.previewLoadErrors.delete(record.recordName);
     }
   }
@@ -7325,6 +7540,8 @@
         (changes.deletedRecords || []).forEach(function (record) {
           state.records.delete(record.recordName); state.bodyCache.delete(record.recordName);
           state.previewCache.delete(record.recordName); state.previewLoadErrors.delete(record.recordName);
+          state.previewCacheRevision.delete(record.recordName); state.previewStaleNames.delete(record.recordName);
+          state.previewRetryBlocks.delete(record.recordName);
         });
         token = changes.syncToken || token; state.syncToken = token;
         syncDerivedCollections(); renderAll();
@@ -7336,7 +7553,8 @@
       if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
       const message = String(error && (error.reason || error.message || error.description) || error);
       if (!state.syncToken || !/CHANGE.?TOKEN|SYNC.?TOKEN|TOKEN.*EXPIRED|EXPIRED.*TOKEN/i.test(message)) throw error;
-      state.records = new Map(); state.bodyCache = new Map(); state.previewCache = new Map(); resetPreviewHydration(); state.syncToken = null;
+      state.records = new Map(); state.bodyCache = new Map(); state.previewCache = new Map();
+      state.previewCacheRevision = new Map(); state.previewStaleNames = new Set(); state.previewRetryBlocks = new Map(); resetPreviewHydration(); state.syncToken = null;
       syncDerivedCollections(); renderAll(); await fetchChanges(null);
     }
     if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
@@ -7455,6 +7673,9 @@
           state.bodyCache.delete(recordName);
           state.previewCache.delete(recordName);
           state.previewLoadErrors.delete(recordName);
+          state.previewCacheRevision.delete(recordName);
+          state.previewStaleNames.delete(recordName);
+          state.previewRetryBlocks.delete(recordName);
         });
         token = changes.syncToken || token;
         state.syncToken = token;
@@ -7496,6 +7717,7 @@
           applyRemoteDocumentToActiveEditor(selectedRecord, selectedDocument);
         }
         renderAll();
+        enqueueChangedVisiblePreviews(changedNames);
         scheduleLibraryCacheWrite();
       }
       if (accountSessionCurrent(session)) setConnection("Using your Apple Account.", true);
@@ -7552,11 +7774,15 @@
     const session = state.accountSession;
     const database = state.database;
     if (!database) return Promise.resolve(note.record);
+    const requestRevision = previewRecordRevision(state.records.get(note.recordName) || note.record);
     note.recordPromise = database.fetchRecords([note.recordName], { zoneID: state.nativeZoneID }).then(function (response) {
       assertResponse(response);
       const fetched = (response.records || []).find(function (item) { return item.recordName === note.recordName; });
       if (!fetched) throw new Error("CloudKit could not find this note.");
       if (!accountSessionCurrent(session)) return note.record;
+      const current = state.records.get(note.recordName);
+      if (!current || !state.notes.some(function (item) { return item.recordName === note.recordName; })) return null;
+      if (previewRecordRevision(current) !== requestRevision) return current;
       note.record = fetched;
       state.records.set(fetched.recordName, fetched);
       if (state.selectedRecordName === note.recordName) state.selectedRecord = fetched;
@@ -7581,16 +7807,136 @@
     return body;
   }
 
+  function noteIsStillLoaded(recordName) {
+    return state.records.has(recordName) && state.notes.some(function (item) { return item.recordName === recordName; });
+  }
+
+  function previewResultCanOpen(note, result, session) {
+    if (!note || !result || typeof result.body !== "string" || result.session !== session ||
+        !accountSessionCurrent(session) || !noteIsStillLoaded(note.recordName)) return false;
+    const currentRecord = state.records.get(note.recordName);
+    return result.requestRevision === previewRecordRevision(currentRecord) &&
+      result.requestRevision === previewRecordRevision(result.record);
+  }
+
+  function setOpenedBody(note, record, body, nativeSchema) {
+    const currentNote = state.notes.find(function (item) { return item.recordName === note.recordName; });
+    if (!currentNote) return false;
+    const apply = function (target) {
+      target.record = record;
+      target.body = body;
+      target.editorBody = body;
+      if (nativeSchema) {
+        target.preview = previewText(body);
+        if (!fieldValue(record, "userTitle") && !fieldValue(record, "generatedTitle") && (!target.title || target.title === "Untitled")) {
+          target.title = firstLineTitle(body);
+        }
+      } else {
+        const parts = splitDocument(body);
+        target.title = parts.title;
+        target.editorBody = parts.body;
+        target.preview = previewText(parts.body);
+      }
+      target.previewUnavailable = false;
+    };
+    apply(currentNote);
+    if (currentNote !== note) apply(note);
+    if (state.selectedRecordName === note.recordName) state.selectedRecord = record;
+    return true;
+  }
+
+  async function loadForegroundBodyForEditor(note, nativeSchema, session, retry) {
+    const recordName = note.recordName;
+    if (!accountSessionCurrent(session) || !noteIsStillLoaded(recordName)) return "";
+    if (state.bodyCache.has(recordName)) {
+      const cached = state.bodyCache.get(recordName);
+      setOpenedBody(note, state.records.get(recordName), cached, nativeSchema);
+      return cached;
+    }
+    const baseRecord = state.records.get(recordName);
+    if (!baseRecord) return "";
+    const baseRevision = previewRecordRevision(baseRecord);
+    const database = state.database;
+    const zoneID = nativeSchema ? state.nativeZoneID : (state.nativeZoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID);
+    const response = assertResponse(await database.fetchRecords([recordName], { zoneID: zoneID }));
+    if (!accountSessionCurrent(session) || !noteIsStillLoaded(recordName)) return "";
+    const liveRecord = state.records.get(recordName);
+    if (previewRecordRevision(liveRecord) !== baseRevision) {
+      if ((retry || 0) < 1) return loadForegroundBodyForEditor(note, nativeSchema, session, (retry || 0) + 1);
+      throw new Error("This note changed while it was opening. Try again.");
+    }
+    const fetched = (response.records || []).find(function (record) { return record.recordName === recordName; });
+    if (!fetched) throw new Error("CloudKit could not find this note.");
+
+    state.records.set(recordName, fetched);
+    state.previewRetryBlocks.delete(recordName);
+    syncDerivedCollections(recordName);
+    if (!noteIsStillLoaded(recordName)) return "";
+
+    let body;
+    if (nativeSchema) {
+      const text = fieldValue(fetched, "text");
+      if (typeof text === "string") body = text;
+      else {
+        const asset = fieldValue(fetched, "text_ckAsset");
+        const url = asset && (asset.downloadURL || asset.url);
+        if (!url) body = "";
+        else {
+          const assetResponse = await fetch(url);
+          if (!assetResponse.ok) throw new Error("Could not download this note’s text asset.");
+          body = await (await assetResponse.blob()).text();
+          if (!fetched.fields) fetched.fields = {};
+          fetched.fields.CD_text = field(body);
+        }
+      }
+    } else {
+      body = fieldValue(fetched, "bodyStorageRaw") === "asset"
+        ? await loadAssetBody(fetched)
+        : String(fieldValue(fetched, "body") || "");
+    }
+
+    if (!accountSessionCurrent(session) || !noteIsStillLoaded(recordName)) return "";
+    const currentRecord = state.records.get(recordName);
+    const fetchedRevision = previewRecordRevision(fetched);
+    if (previewRecordRevision(currentRecord) !== fetchedRevision) {
+      if ((retry || 0) < 1) return loadForegroundBodyForEditor(note, nativeSchema, session, (retry || 0) + 1);
+      throw new Error("This note changed while it was opening. Try again.");
+    }
+    const currentNote = state.notes.find(function (item) { return item.recordName === recordName; });
+    if (!currentNote || !setOpenedBody(note, fetched, body, nativeSchema)) return "";
+    rememberRecordBody(recordName, body, session);
+    return body;
+  }
+
   function ensureNativeTextBody(note) {
     if (state.bodyCache.has(note.recordName)) {
       note.body = state.bodyCache.get(note.recordName); note.editorBody = note.body;
       return Promise.resolve(note.body);
     }
     if (note.bodyPromise) return note.bodyPromise;
+    if (note.previewPromise) {
+      const session = state.accountSession;
+      note.bodyPromise = Promise.resolve(note.previewPromise).then(function (result) {
+        if (previewResultCanOpen(note, result, session)) {
+          state.records.set(note.recordName, result.record);
+          if (setOpenedBody(note, result.record, result.body, true)) {
+            rememberRecordBody(note.recordName, result.body, session);
+            return result.body;
+          }
+        }
+        return loadForegroundBodyForEditor(note, true, session, 0);
+      }, function () { return loadForegroundBodyForEditor(note, true, session, 0); })
+        .finally(function () { note.bodyPromise = null; });
+      return note.bodyPromise;
+    }
     const session = state.accountSession;
     if (!state.database) return Promise.reject(new Error("This note is not connected to iCloud."));
     note.bodyPromise = loadNativeTextAsset(note, session).then(function (body) {
-      if (!accountSessionCurrent(session)) return body;
+      if (!accountSessionCurrent(session) || !noteIsStillLoaded(note.recordName)) return "";
+      const currentRecord = state.records.get(note.recordName);
+      if (currentRecord && note.record && previewRecordRevision(currentRecord) !== previewRecordRevision(note.record)) {
+        return loadForegroundBodyForEditor(note, true, session, 0);
+      }
       note.body = body; note.editorBody = body; note.preview = previewText(body);
       if (!fieldValue(note.record, "userTitle") && !fieldValue(note.record, "generatedTitle") && (!note.title || note.title === "Untitled")) note.title = firstLineTitle(body);
       rememberRecordBody(note.recordName, body, session);
@@ -7607,26 +7953,48 @@
       rememberRecordBody(note.recordName, cachedBody, state.accountSession);
       return Promise.resolve(cachedBody);
     }
+    if (note.bodyPromise) return note.bodyPromise;
     if (typeof fieldValue(note.record, "body") === "string") {
       const body = String(fieldValue(note.record, "body"));
       rememberRecordBody(note.recordName, body, state.accountSession);
       return Promise.resolve(body);
     }
-    if (note.bodyPromise) return note.bodyPromise;
+    if (note.previewPromise) {
+      const session = state.accountSession;
+      note.bodyPromise = Promise.resolve(note.previewPromise).then(function (result) {
+        if (previewResultCanOpen(note, result, session)) {
+          state.records.set(note.recordName, result.record);
+          if (setOpenedBody(note, result.record, result.body, false)) {
+            rememberRecordBody(note.recordName, result.body, session);
+            return result.body;
+          }
+        }
+        return loadForegroundBodyForEditor(note, false, session, 0);
+      }, function () { return loadForegroundBodyForEditor(note, false, session, 0); })
+        .finally(function () { note.bodyPromise = null; });
+      return note.bodyPromise;
+    }
     const session = state.accountSession;
     const zoneID = state.nativeZoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    const requestRevision = previewRecordRevision(state.records.get(note.recordName) || note.record);
     note.bodyPromise = state.database.fetchRecords([note.recordName], { zoneID: zoneID }).then(async function (response) {
       assertResponse(response);
       const fetched = (response.records || []).find(function (record) { return record.recordName === note.recordName; });
       if (!fetched) throw new Error("CloudKit could not find this note.");
-      if (!accountSessionCurrent(session)) return "";
+      if (!accountSessionCurrent(session) || !noteIsStillLoaded(note.recordName)) return "";
+      if (previewRecordRevision(state.records.get(note.recordName)) !== requestRevision) {
+        return loadForegroundBodyForEditor(note, false, session, 0);
+      }
       note.record = fetched;
       state.records.set(fetched.recordName, fetched);
       if (state.selectedRecordName === note.recordName) state.selectedRecord = fetched;
       const body = fieldValue(fetched, "bodyStorageRaw") === "asset"
         ? await loadAssetBody(fetched)
         : String(fieldValue(fetched, "body") || "");
-      if (!accountSessionCurrent(session)) return body;
+      if (!accountSessionCurrent(session) || !noteIsStillLoaded(note.recordName)) return "";
+      if (previewRecordRevision(state.records.get(note.recordName)) !== previewRecordRevision(fetched)) {
+        return loadForegroundBodyForEditor(note, false, session, 0);
+      }
       rememberRecordBody(note.recordName, body, session);
       return body;
     }).finally(function () { note.bodyPromise = null; });
@@ -7772,6 +8140,8 @@
       state.libraryLoadSlowMessage = "";
       if (!(await loadZoneRecordsWithFeedback(session))) return;
       if (session !== state.accountSession) return;
+      state.previewHydrationReady = true;
+      queueNativePreview();
       flushPendingEdits();
       startRealtimeSync(session);
       configureRealtimeNotifications(session);
@@ -8058,6 +8428,9 @@
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
           syncKeyboardShortcutPreferences(state.accountSession);
+          state.previewLoadErrors.clear();
+          state.previewRetryBlocks.clear();
+          queueNativePreview();
         }
       });
       document.addEventListener("visibilitychange", function () {

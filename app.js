@@ -10,6 +10,12 @@
   const proofreadingDictionarySync = window.ArborProofreadingDictionarySync;
   const displayNameTools = window.ArborDisplayName;
   const noteRevisionStore = window.ArborNoteRevisions;
+  const noteMetadata = window.ArborNoteMetadata;
+  const noteSelection = window.ArborNoteSelection.createNoteSelection();
+  const captureNoteSelectionBatch = window.ArborNoteSelection.captureNoteSelectionBatch;
+  const noteSelectionBatchIsCurrent = window.ArborNoteSelection.noteSelectionBatchIsCurrent;
+  const runSnapshotBatch = window.ArborNoteSelection.runSnapshotBatch;
+  let noteSelectionOperation = null;
   const keyboardShortcutPreferences = window.ArborKeyboardShortcutPreferences;
   const keyboardShortcutSync = window.ArborKeyboardShortcutSync;
   const { lexicalSearchNotes: searchLexically, semanticOnlySuggestions, createLexicalIndex } = window.ArborSearchLogic;
@@ -18,7 +24,8 @@
   const config = window.ARBOR_CLOUDKIT_CONFIG || { demoMode: false };
   const previewMode = new URLSearchParams(window.location.search).get("preview");
   const largeDemoMode = previewMode === "large";
-  const demoMode = Boolean(config.demoMode) || previewMode === "sample" || largeDemoMode;
+  const metadataFixtureMode = previewMode === "metadata-test";
+  const demoMode = Boolean(config.demoMode) || previewMode === "sample" || largeDemoMode || metadataFixtureMode;
   const $ = function (id) { return document.getElementById(id); };
   const savedNoteTabs = loadPreference("arbor.web.open-tabs.v1", { recordNames: [], activeRecordName: "" });
   const frame = $("app-frame");
@@ -36,6 +43,7 @@
     user: null,
     demo: false,
     largeDemo: false,
+    metadataFixture: null,
     loadingRecords: false,
     libraryLoadSlow: false,
     libraryLoadSlowMessage: "",
@@ -53,6 +61,10 @@
     actionMenuInvoker: null,
     listCursor: null,
     selectedRecordName: null,
+    noteSelectionSelectedIDs: new Set(),
+    noteSelectionBusy: false,
+    noteSelectionNavigationRevision: 0,
+    noteSelectionResult: "",
     selectedRecord: null,
     openNoteTabs: Array.isArray(savedNoteTabs.recordNames) ? savedNoteTabs.recordNames.filter(function (name) { return typeof name === "string" && name.length <= 256; }).slice(0, 100) : [],
     activeNoteTabName: typeof savedNoteTabs.activeRecordName === "string" ? savedNoteTabs.activeRecordName : "",
@@ -1848,6 +1860,7 @@
       row.appendChild(countElement);
 
       row.addEventListener("click", function () {
+        state.noteSelectionNavigationRevision += 1;
         flushSave().finally(function () {
           state.showingArchive = false;
           state.selectedFolder = folder.path;
@@ -1892,12 +1905,12 @@
     const cursor = note.recordName === state.listCursor;
     card.type = "button";
     card.id = "note-row-" + String(note.recordName).replace(/[^A-Za-z0-9_-]/g, "");
-    card.className = "note-card note-row" + (note.recordName === state.selectedRecordName ? " is-selected" : "") + (cursor ? " is-cursor" : "");
+    card.className = "note-card note-row" + (note.recordName === state.selectedRecordName ? " is-selected" : "") + (cursor ? " is-cursor" : "") + (state.noteSelectionSelectedIDs.has(note.recordName) ? " is-batch-selected" : "");
     card.draggable = true;
     card.dataset.recordName = note.recordName;
     card.tabIndex = cursor ? 0 : -1;
     card.setAttribute("role", "option");
-    card.setAttribute("aria-selected", cursor ? "true" : "false");
+    card.setAttribute("aria-selected", state.noteSelectionSelectedIDs.has(note.recordName) ? "true" : (cursor ? "true" : "false"));
     card.setAttribute("aria-haspopup", "menu");
     card.setAttribute("aria-controls", "note-context-menu");
     card.addEventListener("dragstart", function (event) {
@@ -1906,7 +1919,16 @@
       event.dataTransfer.effectAllowed = "move";
     });
     card.addEventListener("dragend", function () { card.classList.remove("is-dragging"); });
-    card.addEventListener("click", function () { state.listCursor = note.recordName; openNote(note.recordName); });
+    card.addEventListener("click", function (event) {
+      state.listCursor = note.recordName;
+      if (noteSelection.snapshot().active) {
+        noteSelection.toggle(note.recordName, event.shiftKey);
+        renderNoteSelectionControls(orderedVisibleNotes());
+        applyListCursor();
+        return;
+      }
+      openNote(note.recordName);
+    });
     card.addEventListener("contextmenu", function (event) {
       event.preventDefault();
       state.listCursor = note.recordName;
@@ -1962,6 +1984,83 @@
     return noteSorting.sortNotes(state.notes.filter(noteVisible), state.preferences.noteSortOrder);
   }
 
+  function currentNoteSelectionScope(visible) {
+    const archive = Boolean(state.showingArchive);
+    const folder = archive ? "" : state.selectedFolder;
+    const owner = state.demo ? "sample-preview" : String(state.connectionUserID || "signed-out");
+    const label = archive ? "Archive" : (folder ? "folder " + folder : "All Notes");
+    return {
+      key: owner + "\u001f" + String(state.accountSession) + "\u001f" + (state.searchPage ? "search" : "library") + "\u001f" + (archive ? "archive" : "notes") + "\u001f" + folder,
+      label: label,
+      ids: (visible || orderedVisibleNotes()).map(function (note) { return note.recordName; })
+    };
+  }
+
+  function renderNoteSelectionControls(visible) {
+    const scope = currentNoteSelectionScope(visible);
+    const before = noteSelection.snapshot();
+    const scopeChanged = before.active && before.scopeKey !== scope.key;
+    if (!state.noteSelectionBusy || scopeChanged) noteSelection.reconcile(scope);
+    const selection = noteSelection.snapshot();
+    state.noteSelectionSelectedIDs = new Set(selection.selectedIds);
+    const enter = $("note-selection-enter");
+    const toolbar = $("note-selection-toolbar");
+    const destination = $("note-selection-destination");
+    const selectedCount = selection.selectedIds.length;
+    const archived = state.showingArchive;
+    enter.hidden = Boolean(state.searchPage);
+    enter.disabled = Boolean(state.searchPage || !scope.ids.length || state.noteSelectionBusy);
+    enter.setAttribute("aria-pressed", String(selection.active));
+    enter.textContent = selection.active ? "Selecting" : "Select";
+    toolbar.hidden = !selection.active;
+    if (!selection.active) {
+      state.noteSelectionResult = "";
+      $("note-selection-result").hidden = true;
+      $("note-list").removeAttribute("aria-multiselectable");
+      return;
+    }
+
+    $("note-list").setAttribute("aria-multiselectable", "true");
+    $("note-selection-summary").textContent = selectedCount
+      ? selectedCount + " selected · " + scope.ids.length + " notes in " + scope.label
+      : scope.ids.length + " notes in " + scope.label;
+    const selectAll = $("note-selection-select-all");
+    selectAll.textContent = "Select all (" + scope.ids.length + ")";
+    selectAll.setAttribute("aria-label", "Select all " + scope.ids.length + " notes in " + scope.label);
+    selectAll.disabled = !scope.ids.length || selectedCount === scope.ids.length || state.noteSelectionBusy;
+    $("note-selection-clear").disabled = !selectedCount || state.noteSelectionBusy;
+    $("note-selection-done").disabled = state.noteSelectionBusy;
+
+    const previousDestination = destination.value;
+    destination.replaceChildren();
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Choose destination";
+    destination.appendChild(placeholder);
+    const root = document.createElement("option");
+    root.value = "__all__";
+    root.textContent = "All Notes";
+    destination.appendChild(root);
+    state.folders.forEach(function (folder) {
+      const option = document.createElement("option");
+      option.value = folder.path;
+      option.textContent = folder.path;
+      destination.appendChild(option);
+    });
+    if (Array.from(destination.options).some(function (option) { return option.value === previousDestination; })) destination.value = previousDestination;
+    destination.hidden = archived;
+    destination.disabled = archived || !selectedCount || state.noteSelectionBusy || !state.database;
+    $("note-selection-move").hidden = archived;
+    $("note-selection-move").disabled = archived || !selectedCount || !destination.value || state.noteSelectionBusy || !state.database;
+    $("note-selection-new-folder").hidden = archived;
+    $("note-selection-new-folder").disabled = archived || !selectedCount || state.noteSelectionBusy || !state.database;
+    $("note-selection-delete").hidden = archived;
+    $("note-selection-delete").disabled = archived || !selectedCount || state.noteSelectionBusy || !state.database;
+    const result = $("note-selection-result");
+    result.textContent = state.noteSelectionResult;
+    result.hidden = !state.noteSelectionResult;
+  }
+
   function syncListCursor(visible) {
     const notes = visible || orderedVisibleNotes();
     const valid = notes.some(function (note) { return note.recordName === state.listCursor; });
@@ -1976,9 +2075,13 @@
     let active = null;
     list.querySelectorAll(".note-card").forEach(function (card) {
       const on = card.dataset.recordName === state.listCursor;
+      const batchSelected = state.noteSelectionSelectedIDs.has(card.dataset.recordName);
       card.tabIndex = on ? 0 : -1;
       card.classList.toggle("is-cursor", on);
-      card.setAttribute("aria-selected", on ? "true" : "false");
+      card.classList.toggle("is-batch-selected", batchSelected);
+      card.setAttribute("aria-selected", noteSelection.snapshot().active
+        ? (batchSelected ? "true" : "false")
+        : (on ? "true" : "false"));
       if (on) active = card;
     });
     if (active) list.setAttribute("aria-activedescendant", active.id);
@@ -2047,6 +2150,7 @@
     if (state.loadingRecords) list.setAttribute("aria-busy", "true");
     else list.removeAttribute("aria-busy");
     syncListCursor(visible);
+    renderNoteSelectionControls(visible);
     const count = $("note-count");
     if (state.loadingRecords && state.notes.length === 0) {
       count.textContent = "…";
@@ -3822,6 +3926,7 @@
 
   function openExpandedSearch(query) {
     const text = String(query || "").trim();
+    state.noteSelectionNavigationRevision += 1;
     state.showingArchive = false;
     state.selectedFolder = "";
     state.searchPage = true; state.searchQuery = text; state.searchActiveIndex = text ? 0 : -1; state.searchItems = [];
@@ -3832,6 +3937,7 @@
   }
 
   function closeExpandedSearch() {
+    state.noteSelectionNavigationRevision += 1;
     state.searchPage = false; frame.classList.remove("is-search-expanded"); renderAll();
     window.requestAnimationFrame(function () { $("search-nav-button").focus({ preventScroll: true }); });
   }
@@ -7791,6 +7897,19 @@
     return note.recordPromise;
   }
 
+  async function ensureFullNativeRecordForBatch(note, batch) {
+    if (typeof fieldValue(note.record, "text") === "string" || fieldValue(note.record, "text_ckAsset")) return note.record;
+    if (!noteSelectionBatchContextCurrent(batch)) return null;
+    const response = assertResponse(await batch.database.fetchRecords([note.recordName], { zoneID: batch.nativeZoneID }));
+    if (!noteSelectionBatchContextCurrent(batch)) return null;
+    const fetched = (response.records || []).find(function (item) { return item.recordName === note.recordName; });
+    if (!fetched) throw new Error("CloudKit could not find this note.");
+    note.record = fetched;
+    state.records.set(fetched.recordName, fetched);
+    if (state.selectedRecordName === note.recordName) state.selectedRecord = fetched;
+    return fetched;
+  }
+
   async function loadNativeTextAsset(note, session) {
     const record = await ensureFullNativeRecord(note);
     if (session != null && !accountSessionCurrent(session)) return "";
@@ -8494,6 +8613,7 @@
     return {
       recordName: "Demo-Note-" + id,
       recordType: "ArborNote",
+      recordChangeTag: "demo-revision-1",
       fields: {
         noteUUID: field("DEMO-NOTE-" + id),
         relativePath: field((folderPath ? folderPath + "/" : "") + filename),
@@ -8513,6 +8633,86 @@
         schemaEpoch: field(1)
       }
     };
+  }
+
+  function seedMetadataFixtureRecords() {
+    const fixture = state.metadataFixture;
+    const now = Date.UTC(2026, 10, 27, 12, 0, 0);
+    function addFolder(id, name, path, parentID) {
+      const record = state.nativeSchema ? {
+        recordName: "CD_NoteFolder_" + id,
+        recordType: "CD_NoteFolder",
+        recordChangeTag: "folder-revision-1",
+        fields: {
+          CD_entityName: field("NoteFolder"), CD_id: field(id), CD_name: field(name),
+          CD_parentID: field(parentID || null), CD_createdAt: field(now)
+        }
+      } : {
+        recordName: "Fixture-Folder-" + id,
+        recordType: "ArborFolder",
+        recordChangeTag: "folder-revision-1",
+        fields: { folderUUID: field(id), relativePath: field(path), createdAt: field(now), modifiedAt: field(now) }
+      };
+      fixture.serverRecords.set(record.recordName, cloneRecord(record));
+      state.records.set(record.recordName, cloneRecord(record));
+    }
+    addFolder("folder-home", "Home", "Home", null);
+    addFolder("folder-projects", "Projects", "Home/Projects", "folder-home");
+
+    const sources = [
+      { id: "inline", title: "Inline Note", body: "# Inline Note\n\nExact inline text must remain untouched during a location update.", storage: "inline" },
+      { id: "asset", title: "Asset Note", body: "# Asset Note\n\nAsset-backed text must remain untouched during a location update.", storage: "asset" },
+      { id: "unloaded", title: "Unloaded Note", body: "# Unloaded Note\n\nUnopened server text must remain untouched during a location update.", storage: "inline" }
+    ];
+    for (const source of sources) {
+      let record;
+      let projection;
+      if (state.nativeSchema) {
+        record = {
+          recordName: "CD_CapturedNote_" + source.id,
+          recordType: "CD_CapturedNote",
+          recordChangeTag: "note-revision-1",
+          fields: {
+            CD_entityName: field("CapturedNote"),
+            CD_id: field("note-" + source.id),
+            CD_noteUUID: field("note-" + source.id),
+            CD_userTitle: field(source.title),
+            CD_generatedTitle: field("Generated " + source.title),
+            CD_createdAt: field(now), CD_modifiedAt: field(now), CD_archivedAt: field(null),
+            CD_folderID: field("folder-projects")
+          }
+        };
+        if (source.storage === "asset") {
+          record.fields.CD_text = field(null);
+          record.fields.CD_text_ckAsset = field({ downloadURL: "https://fixture.invalid/native-" + source.id + ".md", fileChecksum: "asset-checksum-" + source.id });
+        } else {
+          record.fields.CD_text = field(source.body);
+        }
+        projection = cloneRecord(record);
+        delete projection.fields.CD_text;
+        delete projection.fields.CD_text_ckAsset;
+      } else {
+        const path = "Home/Projects/" + cleanFilenameStem(source.title) + ".md";
+        record = {
+          recordName: "Fixture-Note-" + source.id,
+          recordType: "ArborNote",
+          recordChangeTag: "note-revision-1",
+          fields: {
+            noteUUID: field("note-" + source.id), relativePath: field(path),
+            bodyStorageRaw: field(source.storage), body: field(source.storage === "asset" ? null : source.body),
+            bodyAsset: field(source.storage === "asset" ? { downloadURL: "https://fixture.invalid/web-" + source.id + ".md", fileChecksum: "asset-checksum-" + source.id } : null),
+            contentFingerprint: field("fingerprint-" + source.id), previousContentFingerprint: field("previous-" + source.id),
+            contentVersion: field(7), previousContentVersion: field(6), createdAt: field(now), modifiedAt: field(now),
+            archivedAt: field(null), lastModifiedDeviceID: field("synthetic-device"), lastModifiedDeviceName: field("Synthetic fixture"), schemaEpoch: field(1)
+          }
+        };
+        projection = cloneRecord(record);
+        delete projection.fields.body;
+        delete projection.fields.bodyAsset;
+      }
+      fixture.serverRecords.set(record.recordName, cloneRecord(record));
+      state.records.set(record.recordName, projection);
+    }
   }
 
   const LARGE_DEMO_NOTE_COUNT = 600;
@@ -8587,6 +8787,11 @@
   function initializeDemo() {
     state.demo = true;
     state.largeDemo = largeDemoMode;
+    state.nativeSchema = metadataFixtureMode && new URLSearchParams(window.location.search).get("schema") === "native";
+    state.nativeZoneID = state.nativeSchema
+      ? { zoneName: "com.apple.coredata.cloudkit.zone", ownerName: "_defaultOwner" }
+      : null;
+    state.nativeZoneExists = state.nativeSchema;
     state.dictionaryEntries = [];
     state.dictionaryPending = [];
     state.dictionarySyncStatus = "Preview only; dictionary changes are not synced.";
@@ -8595,18 +8800,114 @@
     state.user = { nameComponents: { givenName: "Noah" } };
     openUndoHistoryForAccount("sample-preview", true).catch(function () {});
     state.records = new Map();
+    state.metadataFixture = metadataFixtureMode ? {
+      serverRecords: new Map(),
+      operations: [],
+      nextRevision: 1,
+      failNextMetadataUpdate: false,
+      failMetadataUpdateAfter: null,
+      holdMetadataUpdate: null,
+      metadataUpdateStarted: false,
+      holdSave: null,
+      saveStarted: false
+    } : null;
+    if (state.metadataFixture) {
+      window.__arborMetadataFixture = {
+        serverRecords: state.metadataFixture.serverRecords,
+        operations: state.metadataFixture.operations,
+        getLocalRecord: function (recordName) { return state.records.get(recordName) || null; },
+        holdMetadataUpdate: null,
+        metadataUpdateStarted: false,
+        failNextMetadataUpdate: false,
+        failMetadataUpdateAfter: null,
+        holdSave: null,
+        saveStarted: false
+      };
+    }
     state.database = {
       saveRecords: async function (records) {
         if (typeof navigator !== "undefined" && navigator.onLine === false) {
           throw new Error("You are offline. This edit is still on this browser.");
         }
         const list = Array.isArray(records) ? records : [records];
-        const saved = list.map(function (record) {
+        const saved = [];
+        for (const record of list) {
           const copy = cloneRecord(record);
+          if (state.metadataFixture) {
+            const existing = state.metadataFixture.serverRecords.get(copy.recordName);
+            if (existing && copy.recordChangeTag && copy.recordChangeTag !== existing.recordChangeTag) {
+              const conflict = new Error("Synthetic stale record revision.");
+              conflict.code = "SERVER_RECORD_CHANGED";
+              throw conflict;
+            }
+            if (state.metadataFixture.holdSave || window.__arborMetadataFixture.holdSave) {
+              state.metadataFixture.saveStarted = true;
+              window.__arborMetadataFixture.saveStarted = true;
+              await (window.__arborMetadataFixture.holdSave || state.metadataFixture.holdSave);
+            }
+            copy.recordChangeTag = "save-revision-" + (++state.metadataFixture.nextRevision);
+            state.metadataFixture.serverRecords.set(copy.recordName, cloneRecord(copy));
+          }
           state.records.set(copy.recordName, copy);
-          return copy;
-        });
+          saved.push(copy);
+        }
         return { records: saved };
+      },
+      fetchRecords: async function (recordNames) {
+        const names = Array.isArray(recordNames) ? recordNames : [recordNames];
+        const source = state.metadataFixture ? state.metadataFixture.serverRecords : state.records;
+        return { records: names.map(function (name) { return source.get(String(name)) || null; }).filter(Boolean).map(cloneRecord) };
+      },
+      updateMetadataRecord: async function (operation) {
+        if (typeof navigator !== "undefined" && navigator.onLine === false) {
+          throw new Error("You are offline. This edit is still on this browser.");
+        }
+        const fixture = state.metadataFixture;
+        if (fixture) {
+          fixture.operations.push(structuredClone(operation));
+          const hold = window.__arborMetadataFixture.holdMetadataUpdate || fixture.holdMetadataUpdate;
+          if (hold) {
+            fixture.metadataUpdateStarted = true;
+            window.__arborMetadataFixture.metadataUpdateStarted = true;
+            await hold;
+          }
+          if (window.__arborMetadataFixture.failNextMetadataUpdate || fixture.failNextMetadataUpdate) {
+            window.__arborMetadataFixture.failNextMetadataUpdate = false;
+            fixture.failNextMetadataUpdate = false;
+            const failure = new Error("Synthetic metadata update failure.");
+            failure.code = "SERVER_RECORD_CHANGED";
+            throw failure;
+          }
+          if (Number.isInteger(window.__arborMetadataFixture.failMetadataUpdateAfter)) {
+            if (window.__arborMetadataFixture.failMetadataUpdateAfter === 0) {
+              window.__arborMetadataFixture.failMetadataUpdateAfter = null;
+              const failure = new Error("Synthetic metadata update failure after a prior update.");
+              failure.code = "SERVER_RECORD_CHANGED";
+              throw failure;
+            }
+            window.__arborMetadataFixture.failMetadataUpdateAfter -= 1;
+          }
+        }
+        const input = operation.record;
+        const current = fixture ? fixture.serverRecords.get(input.recordName) : state.records.get(input.recordName);
+        if (!current || current.recordType !== input.recordType || current.recordChangeTag !== input.recordChangeTag) {
+          const conflict = new Error("Synthetic stale record revision.");
+          conflict.code = "SERVER_RECORD_CHANGED";
+          throw conflict;
+        }
+        const next = cloneRecord(current);
+        next.fields = Object.assign({}, current.fields, input.fields);
+        next.recordChangeTag = fixture
+          ? "metadata-revision-" + (++fixture.nextRevision)
+          : "demo-revision-" + Date.now();
+        if (fixture) fixture.serverRecords.set(next.recordName, next);
+        else state.records.set(next.recordName, next);
+        return {
+          recordName: next.recordName,
+          recordType: next.recordType,
+          recordChangeTag: next.recordChangeTag,
+          fields: structuredClone(input.fields)
+        };
       },
       deleteRecords: async function (recordNames) {
         (Array.isArray(recordNames) ? recordNames : [recordNames]).forEach(function (record) { state.records.delete(String(record && record.recordName || record)); });
@@ -8614,12 +8915,16 @@
       }
     };
 
-    ["Work", "Personal", "Home", "Home/Projects"].forEach(function (path, index) {
-      const record = demoFolderRecord(path, index + 1);
-      state.records.set(record.recordName, record);
-    });
+    if (metadataFixtureMode) {
+      seedMetadataFixtureRecords();
+    } else {
+      ["Work", "Personal", "Home", "Home/Projects"].forEach(function (path, index) {
+        const record = demoFolderRecord(path, index + 1);
+        state.records.set(record.recordName, record);
+      });
+    }
 
-    const sampleNotes = [
+    const sampleNotes = metadataFixtureMode ? [] : [
       demoNoteRecord(1, "Demo Website — Product Knowledge", "A sample project note showing how a longer document reads in Arbor.\n\n## Purpose\nGive visitors the details they need in a calm, easy-to-scan place.\n\n## Sections\n- Welcome and overview\n- Schedule and location\n- Questions and useful links\n\n## Next step\nReview the mobile layout and trim anything that does not help a visitor.", "Home/Projects", 0, 20),
       demoNoteRecord(2, "Project Runway — Project Knowledge", "A fictional product brief for the preview library.\n\n## Goal\nMake the first version useful in a few quiet, dependable steps.\n\n## Notes\n- Keep the main action obvious.\n- Let people edit immediately.\n- Prefer clear defaults over setup work.", "Home/Projects", 4, 14),
       demoNoteRecord(3, "An Analysis on Ed Sheeran’s Composition", "A sample research note with a short observation and a few supporting points.\n\n## Observation\nSmall changes in rhythm and repetition can make a chorus feel familiar before the listener notices why.\n\n## Listen for\n- Repeated melodic shapes\n- Contrast between verse and chorus\n- How the arrangement builds over time", "Home/Projects", 6, 11),
@@ -8645,16 +8950,17 @@
     const badge = $("demo-badge");
     if (badge) {
       badge.hidden = false;
-      badge.textContent = largeDemoMode ? LARGE_DEMO_NOTE_COUNT + " fictional notes · resets on reload" : "Sample data · resets on reload";
+      badge.textContent = metadataFixtureMode ? "Synthetic metadata fixture · resets on reload" : (largeDemoMode ? LARGE_DEMO_NOTE_COUNT + " fictional notes · resets on reload" : "Sample data · resets on reload");
     }
-    setConnection(largeDemoMode ? LARGE_DEMO_NOTE_COUNT + " fictional notes · resets on reload" : "Sample data · resets on reload", false);
+    setConnection(metadataFixtureMode ? "Synthetic metadata fixture · resets on reload" : (largeDemoMode ? LARGE_DEMO_NOTE_COUNT + " fictional notes · resets on reload" : "Sample data · resets on reload"), false);
     renderAll();
     const first = noteSorting.sortNotes(state.notes.filter(function (note) { return !isArchived(note.record); }), state.preferences.noteSortOrder)[0];
     const restoredState = restoreOpenTabsForLoadedNotes();
-    if (state.preferences.tabsEnabled && restoredState.note) selectNote(restoredState.note);
+    if (metadataFixtureMode) selectNote(null);
+    else if (state.preferences.tabsEnabled && restoredState.note) selectNote(restoredState.note);
     else if (restoredState.hidden) selectNote(null);
     else if (currentNoteFromHistory()) selectNote(currentNoteFromHistory());
-    else if (first) selectNote(first);
+    else if (first && !metadataFixtureMode) selectNote(first);
     reconcileDisplayNameDictionary();
   }
 
@@ -8740,21 +9046,30 @@
     return current;
   }
 
-  async function retryConflictedNoteSave(record, body, options, historyContext, attempt, originalError) {
+  async function retryConflictedNoteSave(record, body, options, historyContext, attempt, originalError, operationContext) {
     if (attempt >= 2 || !isCloudKitRecordConflict(originalError)) throw originalError;
-    const session = historyContext ? historyContext.session : state.accountSession;
-    const current = await fetchCurrentNoteRecord(record, historyContext);
+    const context = historyContext || operationContext;
+    const session = context ? context.session : state.accountSession;
+    const isCurrent = function () {
+      return historyContext ? historyContextCurrent(historyContext)
+        : operationContext ? noteSelectionBatchContextCurrent(operationContext)
+          : accountSessionCurrent(session);
+    };
+    if (!isCurrent()) return record;
+    const current = await fetchCurrentNoteRecord(record, context);
+    if (!isCurrent()) return current;
     const currentDocument = await documentFromCloudKitRecord(current, session,
-      historyContext ? historyContext.database : state.database,
-      historyContext ? historyContext.nativeZoneID : state.nativeZoneID);
-    if (historyContext ? !historyContextCurrent(historyContext) : !accountSessionCurrent(session)) return current;
+      context ? context.database : state.database,
+      context ? context.nativeZoneID : state.nativeZoneID);
+    if (!isCurrent()) return current;
     const baseline = state.syncBaselines.get(record.recordName) || await documentFromCloudKitRecord(record, session,
-      historyContext ? historyContext.database : state.database,
-      historyContext ? historyContext.nativeZoneID : state.nativeZoneID);
+      context ? context.database : state.database,
+      context ? context.nativeZoneID : state.nativeZoneID);
+    if (!isCurrent()) return current;
     const localDocument = documentForSaveBody(body, record);
     const merged = noteSync.mergeDocument(baseline, localDocument, currentDocument);
     if (merged.conflict && noteSync.remoteEditsContained(baseline, localDocument, currentDocument)) {
-      return saveRecord(current, saveBodyForDocument(localDocument, current), options, historyContext, attempt + 1);
+      return saveRecord(current, saveBodyForDocument(localDocument, current), options, historyContext, attempt + 1, operationContext);
     }
     if (merged.conflict) {
       state.pendingRemoteRecords.set(record.recordName, current);
@@ -8763,7 +9078,7 @@
       throw error;
     }
     if (merged.merged.title === currentDocument.title && merged.merged.body === currentDocument.body) {
-      if (!historyContext && accountSessionCurrent(session)) {
+      if (!historyContext && (operationContext ? noteSelectionBatchContextCurrent(operationContext) : accountSessionCurrent(session))) {
         state.records.set(record.recordName, current);
         if (state.saveFlightCount === 0) state.pendingRemoteRecords.delete(record.recordName);
         rememberSyncBaseline(record.recordName, currentDocument);
@@ -8771,7 +9086,7 @@
       }
       return current;
     }
-    return saveRecord(current, saveBodyForDocument(merged.merged, current), options, historyContext, attempt + 1);
+    return saveRecord(current, saveBodyForDocument(merged.merged, current), options, historyContext, attempt + 1, operationContext);
   }
 
   function draftAccountKey() {
@@ -9353,11 +9668,25 @@
     record.fields[key] = field(value === undefined ? null : value);
   }
 
-  function saveToDatabase(records, historyContext) {
-    const nativeSchema = historyContext ? historyContext.nativeSchema : state.nativeSchema;
-    const database = historyContext ? historyContext.database : state.database;
-    const zoneID = nativeSchema ? (historyContext ? historyContext.nativeZoneID : state.nativeZoneID) : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+  function saveToDatabase(records, historyContext, operationContext) {
+    const context = historyContext || operationContext;
+    const nativeSchema = context ? context.nativeSchema : state.nativeSchema;
+    const database = context ? context.database : state.database;
+    const zoneID = nativeSchema ? (context ? context.nativeZoneID : state.nativeZoneID) : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
     return database.saveRecords(records, { zoneID: zoneID });
+  }
+
+  function isNoteMetadataRecord(record) {
+    return Boolean(record && (record.recordType === "CD_CapturedNote" || record.recordType === "ArborNote"));
+  }
+
+  function metadataChangesForRecordPatch(record, names) {
+    const changes = {};
+    names.forEach(function (name) {
+      const key = String(record.recordType || "").startsWith("CD_") ? "CD_" + name : name;
+      if (record.fields && Object.prototype.hasOwnProperty.call(record.fields, key)) changes[name] = record.fields[key];
+    });
+    return changes;
   }
 
   function fingerprint(body) {
@@ -9419,10 +9748,10 @@
     return stem + "-" + Date.now() + ".md";
   }
 
-  async function submitNoteVersion(record, historyContext, options, isCurrent) {
+  async function submitNoteVersion(record, historyContext, options, isCurrent, operationContext) {
     if (!isCurrent()) throw new Error("The account changed before this edit could save.");
     if (options.checkRecovery) options.checkRecovery();
-    const response = assertResponse(await saveToDatabase(record, historyContext));
+    const response = assertResponse(await saveToDatabase(record, historyContext, operationContext));
     if (options.checkRecovery) {
       options.checkRecovery();
       const ack = response.records && response.records[0];
@@ -9433,11 +9762,17 @@
     return response;
   }
 
-  async function saveRecord(record, body, options, historyContext, mergeAttempt) {
+  async function saveRecord(record, body, options, historyContext, mergeAttempt, operationContext) {
     const opts = options || {};
     const attempt = Number(mergeAttempt) || 0;
-    const session = historyContext ? historyContext.session : state.accountSession;
-    const isCurrent = function () { return historyContext ? historyContextCurrent(historyContext) : accountSessionCurrent(session); };
+    const context = historyContext || operationContext;
+    const session = context ? context.session : state.accountSession;
+    const isCurrent = function () {
+      return historyContext ? historyContextCurrent(historyContext)
+        : operationContext ? noteSelectionBatchContextCurrent(operationContext)
+          : accountSessionCurrent(session);
+    };
+    if (!isCurrent()) throw new Error("The account or source collection changed before the note could be saved.");
     const next = cloneRecord(record);
     if (isNativeModelRecord(record, "CapturedNote")) {
       const now = new Date();
@@ -9451,11 +9786,12 @@
       setField(next, "modifiedAt", now);
       if (Object.prototype.hasOwnProperty.call(opts, "folderID")) setNullableField(next, "folderID", opts.folderID);
       if (historyContext) assertHistoryContext(historyContext);
+      else if (operationContext && !isCurrent()) throw new Error("The account or source collection changed before the note could be saved.");
       let response;
-      try { response = await submitNoteVersion(next, historyContext, opts, isCurrent); }
+      try { response = await submitNoteVersion(next, historyContext, opts, isCurrent, operationContext); }
       catch (error) {
         if (opts.checkRecovery || !isCurrent()) throw error;
-        return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error);
+        return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error, operationContext);
       }
       const saved = response.records && response.records[0] ? response.records[0] : next;
       if (!isCurrent()) return saved;
@@ -9497,11 +9833,12 @@
     }
 
     if (historyContext) assertHistoryContext(historyContext);
+    else if (operationContext && !isCurrent()) throw new Error("The account or source collection changed before the note could be saved.");
     let response;
-    try { response = await submitNoteVersion(next, historyContext, opts, isCurrent); }
+    try { response = await submitNoteVersion(next, historyContext, opts, isCurrent, operationContext); }
     catch (error) {
       if (opts.checkRecovery || !isCurrent()) throw error;
-      return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error);
+      return retryConflictedNoteSave(record, body, opts, historyContext, attempt, error, operationContext);
     }
     const saved = response.records && response.records[0] ? response.records[0] : next;
     if (!isCurrent()) return saved;
@@ -9575,9 +9912,10 @@
     }
   }
 
-  async function flushSave() {
+  async function flushSave(operationContext) {
     window.clearTimeout(state.saveTimer);
     if (state.recoveredEditNames.has(state.selectedRecordName)) return;
+    if (operationContext && !noteSelectionBatchContextCurrent(operationContext)) return state.savePromise.catch(function () {});
     if (browserOffline()) {
       if (state.dirty && state.selectedRecordName) rememberPendingEdit(state.selectedRecordName, currentMarkdown());
       if (state.dirty || state.editQueue.length) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, state.selectedRecordName);
@@ -9597,14 +9935,22 @@
     const session = state.accountSession;
     const parts = editorDraftParts();
     const generation = state.saveGeneration;
-    const superseded = function () { return generation !== state.saveGeneration || !accountSessionCurrent(session); };
+    const superseded = function () {
+      return generation !== state.saveGeneration || (operationContext
+        ? !noteSelectionBatchContextCurrent(operationContext)
+        : !accountSessionCurrent(session));
+    };
     state.dirty = false;
     state.saveFlightCount += 1;
     state.savePromise = state.savePromise.catch(function () {}).then(async function () {
       try {
         if (generation !== state.saveGeneration) return;
         const selectedNote = state.notes.find(function (note) { return note.recordName === recordName; });
-        if (state.nativeSchema && selectedNote) await ensureFullNativeRecord(selectedNote);
+        const nativeSchema = operationContext ? operationContext.nativeSchema : state.nativeSchema;
+        if (nativeSchema && selectedNote) {
+          if (operationContext) await ensureFullNativeRecordForBatch(selectedNote, operationContext);
+          else await ensureFullNativeRecord(selectedNote);
+        }
         if (superseded()) return;
         const pendingNow = pendingEditFor(recordName);
         const liveRecord = state.records.get(recordName) || recordSnapshot;
@@ -9617,7 +9963,7 @@
           : (liveRecord || basedRecord);
         rememberPendingEditBaseline(pendingNow);
         const submittedDocument = documentForSaveBody(body, latest);
-        const saved = await saveRecord(latest, body);
+        const saved = await saveRecord(latest, body, undefined, null, undefined, operationContext);
         if (superseded()) return;
         const savedDocument = state.syncBaselines.get(recordName) || submittedDocument;
         adoptSavedPendingBase(recordName, saved, savedDocument);
@@ -9987,23 +10333,46 @@
     return candidate;
   }
 
-  async function createFolder(parentOverride) {
-    if (!state.database) { showToast("Sign in with Apple before creating folders.", true); return; }
-    if (!state.demo && !state.nativeZoneExists) { showToast("Arbor is still connecting to iCloud. Try again when the library has finished loading.", true); return; }
-    const session = state.accountSession;
+  async function createFolder(parentOverride, options) {
+    const settings = options || {};
+    const operationContext = settings.operationContext || null;
+    const database = operationContext ? operationContext.database : state.database;
+    const nativeSchema = operationContext ? operationContext.nativeSchema : state.nativeSchema;
+    const session = operationContext ? operationContext.session : state.accountSession;
+    const isCurrent = function () {
+      return operationContext ? noteSelectionBatchContextCurrent(operationContext) : accountSessionCurrent(session);
+    };
+    function result(path, error, canceled) {
+      return settings.details ? { path: path || null, error: error || "", canceled: Boolean(canceled) } : (path || null);
+    }
+    if (!database || operationContext && !isCurrent()) {
+      const error = "Sign in with Apple before creating folders.";
+      if (!settings.silent) showToast(error, true);
+      return result(null, error);
+    }
+    if (!state.demo && !state.nativeZoneExists) {
+      const error = "Arbor is still connecting to iCloud. Try again when the library has finished loading.";
+      if (!settings.silent) showToast(error, true);
+      return result(null, error);
+    }
     const navigationBefore = navigationSnapshot();
     const parent = typeof parentOverride === "string" ? parentOverride : state.selectedFolder;
     const response = window.prompt(parent ? "Name this folder inside " + parent : "Name this folder");
-    if (response === null) return;
+    if (response === null) return result(null, "", true);
+    if (!isCurrent()) return result(null, "The account or source collection changed before the folder could be saved.");
     const label = cleanFolderName(response);
-    if (!label) { showToast("Enter a folder name.", true); return; }
+    if (!label) {
+      const error = "Enter a folder name.";
+      if (!settings.silent) showToast(error, true);
+      return result(null, error);
+    }
     const taken = new Set(state.folders.filter(function (folder) { return parentPath(folder.path) === parent; }).map(function (folder) { return folder.path.split("/").pop().toLocaleLowerCase(); }));
     const name = uniqueFolderName(label, taken);
     const path = parent ? parent + "/" + name : name;
     const uuid = crypto.randomUUID().toUpperCase();
     const now = new Date();
     const parentFolder = state.folders.find(function (folder) { return folder.path === parent; });
-    const record = state.nativeSchema ? {
+    const record = nativeSchema ? {
       recordName: "CD_NoteFolder_" + uuid,
       recordType: "CD_NoteFolder",
       fields: {
@@ -10025,14 +10394,15 @@
         schemaEpoch: field(1)
       }
     };
-    if (state.nativeSchema && parentFolder) record.fields.CD_parentID = field(parentFolder.uuid);
+    if (nativeSchema && parentFolder) record.fields.CD_parentID = field(parentFolder.uuid);
     try {
-      const savedResponse = assertResponse(await saveToDatabase(record));
-      if (!accountSessionCurrent(session)) return;
+      if (!isCurrent()) return result(null, "The account or source collection changed before the folder could be saved.");
+      const savedResponse = assertResponse(await saveToDatabase(record, null, operationContext));
+      if (!isCurrent()) return result(null, "The account or source collection changed before the folder could be saved.");
       const saved = savedResponse.records && savedResponse.records[0] ? savedResponse.records[0] : record;
       state.records.set(saved.recordName, saved);
       syncDerivedCollections();
-      state.selectedFolder = path;
+      if (!settings.preserveSelection) state.selectedFolder = path;
       renderAll();
       recordUndoAction({
         kind: "created-record", target: saved.recordName, label: "Create folder",
@@ -10042,9 +10412,12 @@
         navigationAfter: navigationSnapshot(),
         updatedAt: Date.now()
       });
-      showToast("Folder created.");
+      if (!settings.silent) showToast("Folder created.");
+      return result(path);
     } catch (error) {
-      showToast(readableError(error), true);
+      const message = readableError(error);
+      if (!settings.silent && isCurrent()) showToast(message, true);
+      return result(null, message);
     }
   }
 
@@ -10136,15 +10509,24 @@
     const session = state.accountSession;
     await flushSave();
     if (!accountSessionCurrent(session)) return false;
+    const metadataContext = captureNoteMetadataContext();
     const savedUpdates = [];
     try {
-      if (updates.length) {
-        const response = assertResponse(await saveToDatabase(updates.map(function (update) { return update.record; })));
+      const noteUpdates = updates.filter(function (update) { return isNoteMetadataRecord(update.record); });
+      const otherUpdates = updates.filter(function (update) { return !isNoteMetadataRecord(update.record); });
+      for (const update of noteUpdates) {
+        const saved = await updateNoteMetadata(update.record.recordName,
+          metadataChangesForRecordPatch(update.record, update.fields), metadataContext);
+        if (!accountSessionCurrent(session)) return false;
+        savedUpdates.push({ record: saved, beforeRecord: update.beforeRecord, fields: update.fields, metadataOnly: true });
+      }
+      if (otherUpdates.length) {
+        const response = assertResponse(await saveToDatabase(otherUpdates.map(function (update) { return update.record; })));
         if (!accountSessionCurrent(session)) return false;
         const savedByName = new Map((response.records || []).map(function (record) { return [record.recordName, record]; }));
-        updates.forEach(function (update) {
+        otherUpdates.forEach(function (update) {
           const saved = savedByName.get(update.record.recordName) || update.record;
-          savedUpdates.push({ record: saved, beforeRecord: update.beforeRecord, fields: update.fields });
+          savedUpdates.push({ record: saved, beforeRecord: update.beforeRecord, fields: update.fields, metadataOnly: false });
           state.records.set(saved.recordName, saved);
         });
       }
@@ -10170,13 +10552,19 @@
       if (!accountSessionCurrent(session)) return false;
       if (savedUpdates.length) {
         try {
-          const rollback = savedUpdates.map(function (update) {
+          for (const update of savedUpdates.filter(function (item) { return item.metadataOnly; }).reverse()) {
+            const changes = metadataChangesForRecordPatch(update.beforeRecord, update.fields);
+            await updateNoteMetadata(update.record.recordName, changes, metadataContext);
+          }
+          const rollback = savedUpdates.filter(function (item) { return !item.metadataOnly; }).map(function (update) {
             const record = cloneRecord(update.record);
             update.fields.forEach(function (name) { setNullableField(record, name, fieldValue(update.beforeRecord, name)); });
             return record;
           });
-          const response = assertResponse(await saveToDatabase(rollback));
-          (response.records || rollback).forEach(function (record) { state.records.set(record.recordName, record); });
+          if (rollback.length) {
+            const response = assertResponse(await saveToDatabase(rollback));
+            (response.records || rollback).forEach(function (record) { state.records.set(record.recordName, record); });
+          }
         } catch (_) {}
       }
       if (deletedRecords && deletedRecords.length) {
@@ -10333,26 +10721,36 @@
     if (done) showToast("Folder archived. Its notes are in Archive.");
   }
 
-  async function moveNote(recordName, folderPath) {
-    const session = state.accountSession;
-    await flushSave();
-    if (!accountSessionCurrent(session)) return;
+  async function moveNote(recordName, folderPath, options) {
+    const settings = options || {};
+    const operationContext = settings.operationContext || null;
+    const session = operationContext ? operationContext.session : state.accountSession;
+    const nativeSchema = operationContext ? operationContext.nativeSchema : state.nativeSchema;
+    const isCurrent = function () {
+      return operationContext ? noteSelectionBatchContextCurrent(operationContext) : accountSessionCurrent(session);
+    };
+    if (!isCurrent()) return { ok: false, error: "The account or source collection changed before the move started." };
+    if (!operationContext) await flushSave();
+    if (!isCurrent()) return { ok: false, error: "The account or source collection changed before the move finished." };
+    if (state.dirty) return { ok: false, error: "Your latest edit is still on this browser. Sync it before moving this note." };
     const note = state.notes.find(function (item) { return item.recordName === recordName; });
-    if (!note || note.folderPath === folderPath) return;
+    if (!note) return { ok: false, error: "The note is no longer available in this account." };
+    if (note.folderPath === folderPath) return { ok: true, skipped: true };
+    if (folderPath && !state.folders.some(function (folder) { return folder.path === folderPath; })) {
+      return { ok: false, error: "The destination folder is no longer available." };
+    }
     const navigationBefore = navigationSnapshot();
-    const fields = state.nativeSchema ? ["folderID"] : ["relativePath"];
+    const fields = nativeSchema ? ["folderID"] : ["relativePath"];
     const beforePatch = patchForRecord(note.record, fields);
     try {
-      if (state.nativeSchema) {
+      if (nativeSchema) {
         const destination = state.folders.find(function (folder) { return folder.path === folderPath; });
-        const saved = await saveRecord(note.record, { title: note.title, body: note.body }, { folderID: destination ? destination.uuid : null });
-        if (!accountSessionCurrent(session)) return;
-        state.records.set(recordName, saved);
-        syncDerivedCollections();
+        const saved = await updateNoteMetadata(recordName, { folderID: field(destination ? destination.uuid : null) }, operationContext);
+        if (!isCurrent()) return { ok: false, error: "The account or source collection changed before the move finished." };
         renderAll();
         recordPatchHistory(recordName, "Move note", fields, beforePatch, patchForRecord(saved, fields), navigationBefore, navigationSnapshot());
-        showToast("Note moved to " + (folderPath || "All Notes") + ".");
-        return;
+        if (!settings.silent) showToast("Note moved to " + (folderPath || "All Notes") + ".");
+        return { ok: true };
       }
       const filename = note.path.split("/").pop();
       const baseName = filename.replace(/\.md$/i, "");
@@ -10361,84 +10759,418 @@
       }).map(function (item) { return item.path.split("/").pop().toLocaleLowerCase(); }));
       const unique = uniqueFilename(baseName, taken);
       const path = (folderPath ? folderPath + "/" : "") + unique;
-      const saved = await saveRecord(note.record, note.body, { relativePath: path });
-      if (!accountSessionCurrent(session)) return;
-      state.records.set(recordName, saved);
-      syncDerivedCollections();
+      const saved = await updateNoteMetadata(recordName, { relativePath: field(path) }, operationContext);
+      if (!isCurrent()) return { ok: false, error: "The account or source collection changed before the move finished." };
       renderAll();
       recordPatchHistory(recordName, "Move note", fields, beforePatch, patchForRecord(saved, fields), navigationBefore, navigationSnapshot());
-      showToast("Note moved to " + (folderPath || "All Notes") + ".");
+      if (!settings.silent) showToast("Note moved to " + (folderPath || "All Notes") + ".");
+      return { ok: true };
     } catch (error) {
-      showToast(readableError(error), true);
+      const message = readableError(error);
+      if (!settings.silent && isCurrent()) showToast(message, true);
+      return { ok: false, error: message };
     }
   }
 
-  async function archiveCurrentNote(recordName) {
+  async function archiveCurrentNote(recordName, options) {
+    const settings = options || {};
+    const operationContext = settings.operationContext || null;
     const name = typeof recordName === "string" ? recordName : (state.selectedRecordName || state.listCursor);
     let note = state.notes.find(function (item) { return item.recordName === name; });
-    if (!note || !state.database) return;
-    const session = state.accountSession;
+    const session = operationContext ? operationContext.session : state.accountSession;
+    const nativeSchema = operationContext ? operationContext.nativeSchema : state.nativeSchema;
+    const isCurrent = function () {
+      return operationContext ? noteSelectionBatchContextCurrent(operationContext) : accountSessionCurrent(session);
+    };
+    if (!note || !(operationContext ? operationContext.database : state.database) || !isCurrent()) {
+      return { ok: false, error: "The note is no longer available in this account." };
+    }
     const navigationBefore = navigationSnapshot();
-    const fields = state.nativeSchema ? ["archivedAt"] : ["relativePath"];
+    const fields = nativeSchema ? ["archivedAt"] : ["relativePath"];
     const beforePatch = patchForRecord(note.record, fields);
     try {
-      await flushSave();
-      if (!accountSessionCurrent(session)) return;
+      if (!operationContext) await flushSave();
+      if (!isCurrent()) return { ok: false, error: "The account or source collection changed before archiving finished." };
+      if (state.dirty) return { ok: false, error: "Your latest edit is still on this browser. Sync it before archiving this note." };
       note = state.notes.find(function (item) { return item.recordName === name; });
-      if (!note) return;
+      if (!note) return { ok: false, error: "The note is no longer available in this account." };
       let saved;
-      if (state.nativeSchema) {
-        await ensureFullNativeRecord(note);
-        const record = cloneRecord(note.record);
-        setNullableField(record, "archivedAt", new Date());
-        const response = assertResponse(await saveToDatabase(record));
-        saved = response.records && response.records[0] ? response.records[0] : record;
+      if (nativeSchema) {
+        saved = await updateNoteMetadata(name, { archivedAt: field(new Date()) }, operationContext);
       } else {
         const path = "Archive/" + note.path.replace(/^Archive\//i, "");
-        const record = cloneRecord(note.record);
-        setField(record, "relativePath", path);
-        const response = assertResponse(await saveToDatabase(record));
-        saved = response.records && response.records[0] ? response.records[0] : record;
+        saved = await updateNoteMetadata(name, { relativePath: field(path) }, operationContext);
       }
-      if (!accountSessionCurrent(session)) return;
-      state.records.set(saved.recordName, saved); syncDerivedCollections();
+      if (!isCurrent()) return { ok: false, error: "The account or source collection changed before archiving finished." };
       closeNoteActions();
       if (state.listCursor === name) state.listCursor = null;
       if (state.selectedRecordName === name && !state.preferences.tabsEnabled) {
         state.selectedRecordName = null;
         selectNote(null);
       }
-      renderAll(); showToast("Note moved to Archive.");
+      renderAll();
       recordPatchHistory(name, "Archive note", fields, beforePatch, patchForRecord(saved, fields), navigationBefore, navigationSnapshot());
-    } catch (error) { showToast(readableError(error), true); }
+      if (!settings.silent) showToast("Note moved to Archive.");
+      return { ok: true };
+    } catch (error) {
+      const message = readableError(error);
+      if (!settings.silent && isCurrent()) showToast(message, true);
+      return { ok: false, error: message };
+    }
+  }
+
+  function enterNoteSelection() {
+    if (state.searchPage || state.noteSelectionBusy) return;
+    const visible = orderedVisibleNotes();
+    noteSelection.enter(currentNoteSelectionScope(visible));
+    state.noteSelectionResult = "";
+    state.noteSelectionSelectedIDs = new Set();
+    renderNoteSelectionControls(visible);
+    applyListCursor();
+  }
+
+  function exitNoteSelection() {
+    if (state.noteSelectionBusy) return;
+    noteSelection.exit();
+    state.noteSelectionResult = "";
+    state.noteSelectionSelectedIDs = new Set();
+    renderNoteSelectionControls(orderedVisibleNotes());
+    applyListCursor();
+  }
+
+  function captureNoteMetadataContext(batch) {
+    if (batch) return batch;
+    return {
+      session: state.accountSession,
+      database: state.database,
+      nativeSchema: state.nativeSchema,
+      nativeZoneID: state.nativeZoneID,
+      metadataTransport: state.arborCloudKitTransport
+    };
+  }
+
+  function noteMetadataContextCurrent(context) {
+    if (!context) return false;
+    return noteMetadataAccountContextCurrent(context) &&
+      (!context.selection || noteSelectionBatchContextCurrent(context));
+  }
+
+  function noteMetadataAccountContextCurrent(context) {
+    return Boolean(context && context.session === state.accountSession && context.database === state.database &&
+      context.database && !state.accountCacheSuspended &&
+      context.nativeSchema === state.nativeSchema && context.nativeZoneID === state.nativeZoneID &&
+      context.metadataTransport === state.arborCloudKitTransport);
+  }
+
+  async function updateNoteMetadata(recordName, changes, operationContext) {
+    const context = captureNoteMetadataContext(operationContext);
+    if (!noteMetadataContextCurrent(context)) throw new Error("The account or source collection changed before the note metadata could be updated.");
+    const current = state.records.get(recordName);
+    if (!current) throw new Error("The note is no longer available in this account.");
+    const operation = noteMetadata.createNoteMetadataUpdate(current, changes);
+    const zoneID = context.nativeSchema ? context.nativeZoneID : cloudKitWebZone.ARBOR_WEB_ZONE_ID;
+    let acknowledgement;
+    if (typeof context.database.updateMetadataRecord === "function") {
+      acknowledgement = await context.database.updateMetadataRecord(operation, zoneID);
+    } else {
+      const services = window.ArborCloudKitWebServices;
+      const transport = context.metadataTransport;
+      if (!services || typeof services.CloudKitEncryptedWebServices !== "function" || !transport) {
+        throw new Error("This CloudKit connection cannot safely update note location metadata.");
+      }
+      const client = new services.CloudKitEncryptedWebServices({
+        containerIdentifier: config.containerIdentifier,
+        environment: config.environment || "development",
+        apiToken: String(config.apiToken || ""),
+        authTokenStore: transport.authTokenStore,
+        fetchImpl: transport.fetch
+      });
+      acknowledgement = await client.updateMetadataRecord(operation, zoneID);
+    }
+    if (!noteMetadataAccountContextCurrent(context)) throw new Error("The account changed while the note metadata was updating.");
+    const saved = noteMetadata.mergeNoteMetadataAcknowledgement(current, operation, acknowledgement);
+    state.records.set(saved.recordName, saved);
+    if (state.selectedRecordName === recordName) state.selectedRecord = saved;
+    syncDerivedCollections(recordName);
+    if (context.selection && !noteSelectionBatchContextCurrent(context)) {
+      throw new Error("The source collection changed while the note metadata was updating.");
+    }
+    return saved;
+  }
+
+  function captureSelectedNoteBatch() {
+    const scope = currentNoteSelectionScope(orderedVisibleNotes());
+    return {
+      batch: Object.freeze(Object.assign({}, captureNoteSelectionBatch(noteSelection.snapshot(), {
+        session: state.accountSession,
+        database: state.database,
+        available: Boolean(state.database && !state.accountCacheSuspended),
+        nativeSchema: state.nativeSchema,
+        nativeZoneID: state.nativeZoneID,
+        metadataTransport: state.arborCloudKitTransport
+      }), { navigationRevision: state.noteSelectionNavigationRevision })),
+      scope: scope
+    };
+  }
+
+  function noteSelectionBatchContextCurrent(batch) {
+    const selection = noteSelection.snapshot();
+    const scope = currentNoteSelectionScope(orderedVisibleNotes());
+    return batch.navigationRevision === state.noteSelectionNavigationRevision && noteSelectionBatchIsCurrent(batch, {
+      selectionActive: selection.active && selection.scopeKey === batch.scopeKey,
+      scopeKey: scope.key,
+      session: state.accountSession,
+      database: state.database,
+      available: Boolean(state.database && !state.accountCacheSuspended),
+      nativeSchema: state.nativeSchema,
+      nativeZoneID: state.nativeZoneID,
+      metadataTransport: state.arborCloudKitTransport
+    });
+  }
+
+  function beginNoteSelectionOperation(batch, status) {
+    if (!noteSelectionBatchContextCurrent(batch) || state.noteSelectionBusy) return null;
+    const operation = {};
+    noteSelectionOperation = operation;
+    state.noteSelectionBusy = true;
+    state.noteSelectionResult = status;
+    renderNoteSelectionControls(orderedVisibleNotes());
+    return operation;
+  }
+
+  function finishNoteSelectionOperation(operation, batch, exitSelection) {
+    if (!operation || noteSelectionOperation !== operation) return false;
+    noteSelectionOperation = null;
+    state.noteSelectionBusy = false;
+    const current = noteSelectionBatchContextCurrent(batch);
+    if (!current) {
+      noteSelection.exit();
+      state.noteSelectionSelectedIDs = new Set();
+      state.noteSelectionResult = "";
+      renderNoteSelectionControls(orderedVisibleNotes());
+      return false;
+    }
+    if (exitSelection) {
+      noteSelection.exit();
+      state.noteSelectionSelectedIDs = new Set();
+      state.noteSelectionResult = "";
+      renderNoteSelectionControls(orderedVisibleNotes());
+      applyListCursor();
+    } else {
+      renderNoteSelectionControls(orderedVisibleNotes());
+    }
+    return true;
+  }
+
+  async function performSelectedNoteBatch(action, destinationLabel, snapshotOverride) {
+    const batch = snapshotOverride || captureSelectedNoteBatch().batch;
+    const captured = batch.selection;
+    const recordNames = captured.selectedIds.slice();
+    if (!recordNames.length || !batch.database || state.noteSelectionBusy || !noteSelectionBatchContextCurrent(batch)) return;
+    const originalNotes = new Map(recordNames.map(function (recordName) {
+      const note = state.notes.find(function (item) { return item.recordName === recordName; });
+      return [recordName, note ? note.title : recordName];
+    }));
+    let completed = 0;
+    const operation = beginNoteSelectionOperation(batch, action.label + " 0 of " + recordNames.length + " notes…");
+    if (!operation) return;
+    let results = [];
+    let summary = "";
+    let summaryIsError = false;
+    let exitSelection = false;
+    let operationStillCurrent = false;
+    try {
+      // Flush the active editor independently of the captured list scope. A
+      // folder/filter change should cancel the batch, but must not cancel or
+      // discard the user's already-open draft.
+      await flushSave();
+      await new Promise(function (resolve) { window.setTimeout(resolve, 0); });
+      if (!noteSelectionBatchContextCurrent(batch)) return;
+      if (state.dirty || state.saveFlightCount > 0) {
+        throw new Error("Your latest edit is still on this browser. Sync it before changing selected notes.");
+      }
+      results = await runSnapshotBatch(recordNames, async function (recordName) {
+        if (!noteSelectionBatchContextCurrent(batch)) return { ok: false, error: "The account or source collection changed." };
+        const note = state.notes.find(function (item) { return item.recordName === recordName; });
+        if (!note) return { ok: false, error: "The note is no longer available in this account." };
+        const result = await action.apply(recordName, note, batch);
+        if (!noteSelectionBatchContextCurrent(batch)) return result;
+        completed += 1;
+        state.noteSelectionResult = action.label + " " + completed + " of " + recordNames.length + " notes…";
+        renderNoteSelectionControls(orderedVisibleNotes());
+        return result;
+      }, function () {
+        return noteSelectionBatchContextCurrent(batch);
+      });
+
+      if (!noteSelectionBatchContextCurrent(batch)) {
+        const attempted = results.some(function (result) { return result.status !== "not-attempted"; });
+        if (attempted && state.accountSession === batch.session && state.database === batch.database) {
+          showToast("The source collection changed while a note update was in progress. No later selected notes were processed.", true);
+        }
+        return;
+      }
+      const successful = results.filter(function (result) { return result.status === "succeeded"; });
+      const unchanged = results.filter(function (result) { return result.status === "unchanged"; });
+      const failed = results.filter(function (result) { return result.status === "failed"; });
+      const skipped = results.filter(function (result) { return result.status === "not-attempted"; });
+      renderAll();
+      noteSelection.replace(failed.map(function (result) { return result.recordName; }));
+      state.noteSelectionResult = "";
+      renderNoteSelectionControls(orderedVisibleNotes());
+      if (!failed.length) exitSelection = true;
+      else {
+        state.noteSelectionResult = failed.length + " notes failed and remain selected. " + failed.slice(0, 3).map(function (result) {
+          return originalNotes.get(result.recordName) + ": " + result.error;
+        }).join(" ");
+        if (failed.length > 3) state.noteSelectionResult += " " + (failed.length - 3) + " more failed.";
+        renderNoteSelectionControls(orderedVisibleNotes());
+        applyListCursor();
+      }
+
+      const target = destinationLabel ? " to " + destinationLabel : " to Archive";
+      summary = action.successLabel + " " + successful.length + " of " + recordNames.length + " selected notes" + target + ".";
+      if (unchanged.length) summary += " " + unchanged.length + " were already there.";
+      if (failed.length) summary += " " + failed.length + " failed and remain available.";
+      if (skipped.length) summary += " " + skipped.length + " were not attempted after the account or folder scope changed.";
+      summaryIsError = Boolean(failed.length || skipped.length);
+    } catch (error) {
+      if (noteSelectionBatchContextCurrent(batch)) {
+        summary = action.successLabel + " failed: " + readableError(error);
+        summaryIsError = true;
+      }
+    } finally {
+      operationStillCurrent = finishNoteSelectionOperation(operation, batch, exitSelection);
+    }
+    if (operationStillCurrent && summary) showToast(summary, summaryIsError);
+  }
+
+  async function confirmMoveSelectedNotes() {
+    const capturedContext = captureSelectedNoteBatch();
+    const batch = capturedContext.batch;
+    const captured = batch.selection;
+    if (!captured.selectedIds.length || state.noteSelectionBusy || !batch.available) return;
+    let folderPath = $("note-selection-destination").value;
+    if (!folderPath) return;
+    const destinationPath = folderPath;
+    const destination = destinationPath === "__all__" ? "All Notes" : destinationPath;
+    const dialog = $("note-selection-move-confirm");
+    $("note-selection-move-copy").textContent = "Move " + captured.selectedIds.length + " selected notes from " + capturedContext.scope.label + " to " + destination + "?";
+    dialog.returnValue = "";
+    dialog.showModal();
+    await new Promise(function (resolve) { dialog.addEventListener("close", resolve, { once: true }); });
+    if (dialog.returnValue !== "move") return;
+    if (!noteSelectionBatchContextCurrent(batch)) {
+      if (state.accountSession === batch.session && state.database === batch.database) {
+        showToast("The source collection changed. No selected notes were moved.", true);
+      }
+      return;
+    }
+    if (folderPath === "__all__") folderPath = "";
+    await performSelectedNoteBatch({
+      label: "Moving",
+      successLabel: "Moved",
+      apply: function (recordName, note, operationContext) {
+        if (note.folderPath === folderPath) return Promise.resolve({ ok: true, skipped: true });
+        return moveNote(recordName, folderPath, { silent: true, operationContext: operationContext });
+      }
+    }, destination, batch);
+  }
+
+  async function createFolderWithSelectedNotes() {
+    const capturedContext = captureSelectedNoteBatch();
+    const batch = capturedContext.batch;
+    const captured = batch.selection;
+    if (!captured.selectedIds.length || !batch.available || state.noteSelectionBusy) return;
+    const parent = state.selectedFolder;
+    const operation = beginNoteSelectionOperation(batch, "Creating a folder for " + captured.selectedIds.length + " selected notes…");
+    if (!operation) return;
+    let folderResult;
+    let operationStillCurrent = false;
+    try {
+      // Keep an active editor save attached to the account even if the visible
+      // folder/filter changes while the save is in flight. The batch context
+      // is checked again before creating a folder or moving any selected note.
+      await flushSave();
+      await new Promise(function (resolve) { window.setTimeout(resolve, 0); });
+      if (!noteSelectionBatchContextCurrent(batch)) return;
+      if (state.dirty || state.saveFlightCount > 0) {
+        throw new Error("Your latest edit is still on this browser. Sync it before creating a folder for selected notes.");
+      }
+      folderResult = await createFolder(parent, {
+        preserveSelection: true,
+        silent: true,
+        details: true,
+        operationContext: batch
+      });
+    } catch (error) {
+      folderResult = { path: null, error: readableError(error), canceled: false };
+    } finally {
+      operationStillCurrent = finishNoteSelectionOperation(operation, batch, false);
+    }
+    if (!operationStillCurrent) return;
+    if (!folderResult.path) {
+      state.noteSelectionResult = folderResult.canceled
+        ? "Folder creation was canceled. The selected notes were not moved."
+        : "Folder creation failed: " + folderResult.error + " The selected notes were not moved.";
+      renderNoteSelectionControls(orderedVisibleNotes());
+      return;
+    }
+    const folderPath = folderResult.path;
+    await performSelectedNoteBatch({
+      label: "Moving to the new folder",
+      successLabel: "Moved",
+      apply: function (recordName, note, operationContext) {
+        if (note.folderPath === folderPath) return Promise.resolve({ ok: true, skipped: true });
+        return moveNote(recordName, folderPath, { silent: true, operationContext: operationContext });
+      }
+    }, "new folder " + folderPath, batch);
+  }
+
+  async function confirmDeleteSelectedNotes() {
+    const capturedContext = captureSelectedNoteBatch();
+    const batch = capturedContext.batch;
+    const captured = batch.selection;
+    if (!captured.selectedIds.length || state.showingArchive || state.noteSelectionBusy || !batch.available) return;
+    const dialog = $("note-selection-delete-confirm");
+    $("note-selection-delete-copy").textContent = "Delete " + captured.selectedIds.length + " selected notes from " + capturedContext.scope.label + "? They will move to Archive, where you can restore them. Permanent deletion is not available here.";
+    dialog.returnValue = "";
+    dialog.showModal();
+    await new Promise(function (resolve) { dialog.addEventListener("close", resolve, { once: true }); });
+    if (dialog.returnValue !== "archive") return;
+    if (!noteSelectionBatchContextCurrent(batch)) {
+      if (state.accountSession === batch.session && state.database === batch.database) {
+        showToast("The source collection changed. No selected notes were archived.", true);
+      }
+      return;
+    }
+    await performSelectedNoteBatch({
+      label: "Archiving",
+      successLabel: "Archived",
+      apply: function (recordName, note, operationContext) {
+        return archiveCurrentNote(recordName, { silent: true, operationContext: operationContext });
+      }
+    }, "Archive", batch);
   }
 
   async function restoreArchivedNote(recordName) {
     const name = typeof recordName === "string" ? recordName : state.actionMenuRecordName;
     let note = state.notes.find(function (item) { return item.recordName === name; });
     if (!note || !isArchived(note.record) || !state.database) return;
-    const session = state.accountSession;
+    const context = captureNoteMetadataContext();
     const navigationBefore = navigationSnapshot();
-    const fields = state.nativeSchema ? ["archivedAt"] : ["relativePath"];
+    const fields = context.nativeSchema ? ["archivedAt"] : ["relativePath"];
     const beforePatch = patchForRecord(note.record, fields);
     try {
       await flushSave();
-      if (!accountSessionCurrent(session)) return;
+      if (!noteMetadataContextCurrent(context)) return;
+      if (state.dirty) throw new Error("Your latest edit is still on this browser. Sync it before restoring this note.");
       note = state.notes.find(function (item) { return item.recordName === name; });
       if (!note || !isArchived(note.record)) return;
-      let record = cloneRecord(note.record);
-      if (state.nativeSchema) {
-        await ensureFullNativeRecord(note);
-        record = cloneRecord(note.record);
-        setNullableField(record, "archivedAt", null);
-      } else {
-        setField(record, "relativePath", note.path.replace(/^Archive\//i, ""));
-      }
-      const response = assertResponse(await saveToDatabase(record));
-      if (!accountSessionCurrent(session)) return;
-      const saved = response.records && response.records[0] ? response.records[0] : record;
-      state.records.set(saved.recordName, saved);
-      syncDerivedCollections();
+      const saved = context.nativeSchema
+        ? await updateNoteMetadata(name, { archivedAt: field(null) }, context)
+        : await updateNoteMetadata(name, { relativePath: field(note.path.replace(/^Archive\//i, "")) }, context);
+      if (!noteMetadataContextCurrent(context)) return;
       closeNoteActions();
       if (state.listCursor === name) state.listCursor = null;
       if (state.selectedRecordName === name && !state.preferences.tabsEnabled) {
@@ -11740,6 +12472,7 @@
       return;
     }
     if (id === "dismiss") {
+      if (noteSelection.snapshot().active) { exitNoteSelection(); event.preventDefault(); return; }
       if (dismissTopSurface()) event.preventDefault();
       return;
     }
@@ -11844,6 +12577,7 @@
       button.addEventListener("click", function () { applyRichFormat(button.dataset.richFormat); });
     });
     $("all-notes-button").addEventListener("click", function () {
+      state.noteSelectionNavigationRevision += 1;
       flushSave().finally(function () {
         state.showingArchive = false;
         state.selectedFolder = "";
@@ -11855,6 +12589,7 @@
       });
     });
     $("archive-notes-button").addEventListener("click", function () {
+      state.noteSelectionNavigationRevision += 1;
       flushSave().finally(function () {
         state.showingArchive = true;
         state.selectedFolder = "";
@@ -11866,6 +12601,39 @@
       });
     });
     $("new-folder-button").addEventListener("click", createFolder);
+    $("note-selection-enter").addEventListener("click", enterNoteSelection);
+    $("note-selection-select-all").addEventListener("click", function () {
+      if (state.noteSelectionBusy) return;
+      noteSelection.selectAll();
+      renderNoteSelectionControls(orderedVisibleNotes());
+      applyListCursor();
+    });
+    $("note-selection-clear").addEventListener("click", function () {
+      if (state.noteSelectionBusy) return;
+      noteSelection.clear();
+      state.noteSelectionResult = "";
+      renderNoteSelectionControls(orderedVisibleNotes());
+      applyListCursor();
+    });
+    $("note-selection-done").addEventListener("click", exitNoteSelection);
+    $("note-selection-destination").addEventListener("change", function () {
+      renderNoteSelectionControls(orderedVisibleNotes());
+    });
+    $("note-selection-move").addEventListener("click", function () {
+      confirmMoveSelectedNotes();
+    });
+    $("note-selection-new-folder").addEventListener("click", createFolderWithSelectedNotes);
+    $("note-selection-delete").addEventListener("click", confirmDeleteSelectedNotes);
+    $("note-list").addEventListener("keydown", function (event) {
+      if (!noteSelection.snapshot().active || !event.shiftKey || isTypingTarget(event.target)) return;
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      event.stopPropagation();
+      moveListCursor(event.key === "ArrowDown" ? 1 : -1);
+      noteSelection.extendTo(state.listCursor);
+      renderNoteSelectionControls(orderedVisibleNotes());
+      applyListCursor();
+    });
     $("folder-tree").addEventListener("contextmenu", function (event) {
       if (event.target.closest(".folder-row")) return;
       event.preventDefault();

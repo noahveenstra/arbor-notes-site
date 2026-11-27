@@ -70,6 +70,27 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .list-header { position: relative; flex: 0 0 auto; padding: 25px 22px 8px; }
 .list-heading-row { display: flex; align-items: center; gap: 10px; }
 .list-heading-row h1 { flex: 1; min-width: 0; margin: 0; overflow: hidden; color: var(--label); font: 700 27px/1.35 var(--font-sans); letter-spacing: -0.035em; text-overflow: ellipsis; white-space: nowrap; }
+.note-selection-enter { min-height: 34px; padding: 0 10px; border: 1px solid var(--separator); border-radius: 7px; color: var(--label); background: var(--surface-control); font: 600 12px/1 var(--font-sans); cursor: pointer; }
+.note-selection-enter:hover { background: var(--fill-selection); }
+.note-selection-enter:focus-visible, .note-selection-actions button:focus-visible, .note-selection-actions select:focus-visible, .note-selection-select-all:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+.note-selection-toolbar { display: grid; gap: 9px; padding: 9px 18px 12px; border-bottom: 1px solid var(--separator); }
+.note-selection-summary-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.note-selection-summary { flex: 1; min-width: 0; margin: 0; color: var(--label); font-size: 12px; font-weight: 650; }
+.note-selection-select-all, .note-selection-actions button, .note-selection-actions select { min-height: 40px; padding: 0 10px; border: 1px solid var(--separator); border-radius: 7px; color: var(--label); background: var(--surface-control); font: 550 12px/1.25 var(--font-sans); cursor: pointer; }
+.note-selection-select-all { min-height: 36px; white-space: nowrap; }
+.note-selection-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.note-selection-actions select { min-width: 0; max-width: 100%; flex: 1 1 150px; }
+.note-selection-actions button:disabled, .note-selection-actions select:disabled, .note-selection-select-all:disabled { opacity: .48; cursor: default; }
+.note-selection-actions [hidden] { display: none; }
+.note-selection-actions #note-selection-new-folder { white-space: nowrap; }
+.note-selection-actions #note-selection-delete { color: var(--system-red, #ff6b63); }
+.note-selection-result { margin: 0; color: var(--secondary-label); font-size: 12px; line-height: 1.4; }
+.note-selection-confirm form { display: grid; gap: 14px; padding: 26px; }
+.note-selection-confirm h2 { margin: 0; font: 700 20px/1.3 var(--font-sans); }
+.note-selection-confirm p { margin: 0; color: var(--secondary-label); font-size: 13px; line-height: 1.5; }
+.note-selection-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.note-selection-confirm-actions button { min-height: 40px; padding: 0 12px; border-radius: 6px; }
+.note-selection-confirm-actions .dialog-submit { width: auto; }
 .list-total { color: var(--secondary-label); font: 400 15px/1 var(--font-mono); font-variant-numeric: tabular-nums; }
 .sidebar-toggle-icon { display: block; width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
 .list-create-note-button { display: grid; width: 28px; height: 28px; flex: 0 0 auto; align-self: center; place-items: center; padding: 0; border: 0; border-radius: 6px; color: var(--secondary-label); background: transparent; cursor: pointer; }
@@ -79,6 +100,8 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .mobile-menu-button { display: none; }
 .note-list { min-height: 0; flex: 1; overflow: auto; padding: 0 8px 18px; scrollbar-color: var(--separator) transparent; scrollbar-width: thin; }
 #note-list { view-transition-name: arbor-note-list; }
+#note-list .note-card.is-batch-selected { position: relative; border-color: var(--focus-ring); background: var(--surface-control); }
+#note-list .note-card.is-batch-selected::after { position: absolute; top: 7px; right: 8px; display: grid; width: 19px; height: 19px; place-items: center; border-radius: 50%; color: var(--surface-canvas); background: var(--focus-ring); content: "✓"; font: 700 12px/1 var(--font-sans); }
 .note-group-title { margin: 15px 0 0; padding: 4px 10px 5px; color: var(--label); font: 650 19px/1.35 var(--font-sans); letter-spacing: -0.035em; }
 .note-row { display: block; width: 100%; min-width: 0; min-height: 0; padding: 11px 22px 13px; border: 0; color: var(--label); background: transparent; text-align: left; cursor: default; transition: background var(--motion-fade-duration) ease, box-shadow var(--motion-fade-duration) ease; }
 #note-list .note-row,

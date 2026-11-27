@@ -34,7 +34,7 @@
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-62-transparency-20261126-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-110-preview-two-line-20261127-a">
+  <link rel="stylesheet" href="./ui.css?v=arb-221-post370-20261127-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-62-transparency-20261126-a">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b" data-required-global="ARBOR_CLOUDKIT_CONFIG"></script>
@@ -55,7 +55,7 @@
   <script src="./search-logic.js?v=arb-related-margin-20261125-a" data-required-global="ArborSearchLogic" defer></script>
   <script src="./note-sync.js?v=arb-214-remote-deletions-20261126-a" data-required-global="ArborNoteSync" defer></script>
   <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" data-required-global="ArborLaunchLibrary" defer></script>
-  <script src="./app-bootstrap.js?v=arb-20-markdown-main-20261127-a" defer></script>
+  <script src="./app-bootstrap.js?v=arb-221-post370-20261127-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -146,11 +146,30 @@ Try replacing this example with something you want to remember.</textarea>
           <h1 id="list-heading">All Notes</h1>
           <span class="demo-badge" id="demo-badge" hidden>Sample data · resets on reload</span>
           <span class="note-count list-total" id="note-count">0</span>
+          <button class="note-selection-enter" id="note-selection-enter" type="button" aria-pressed="false">Select</button>
           <button class="list-create-note-button" id="new-note-button" type="button" aria-label="New note" title="New note">
             <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v14M3 10h14"></path></svg>
           </button>
         </div>
       </header>
+      <section class="note-selection-toolbar" id="note-selection-toolbar" aria-label="Selected notes" hidden>
+        <div class="note-selection-summary-row">
+          <p class="note-selection-summary" id="note-selection-summary" role="status" aria-live="polite"></p>
+          <button class="note-selection-select-all" id="note-selection-select-all" type="button">Select all</button>
+        </div>
+        <div class="note-selection-actions">
+          <label class="sr-only" for="note-selection-destination">Move selected notes to</label>
+          <select id="note-selection-destination" aria-label="Move selected notes to">
+            <option value="" selected>Choose destination</option>
+          </select>
+          <button id="note-selection-move" type="button" disabled>Move</button>
+          <button id="note-selection-new-folder" type="button">New Folder with Selection</button>
+          <button id="note-selection-delete" class="note-selection-delete" type="button">Delete selected</button>
+          <button id="note-selection-clear" type="button">Clear</button>
+          <button id="note-selection-done" type="button">Done</button>
+        </div>
+        <p class="note-selection-result" id="note-selection-result" role="status" aria-live="polite" hidden></p>
+      </section>
       <div class="note-list" id="note-list" role="listbox" aria-label="Notes"></div>
       <div class="list-message list-empty" id="list-message" role="status" aria-live="polite" hidden><span id="list-message-text"></span><button class="list-message-retry" id="list-message-retry" type="button" hidden>Try again</button></div>
     </section>
@@ -326,6 +345,26 @@ Try replacing this example with something you want to remember.</textarea>
       <div class="folder-archive-actions">
         <button class="folder-dialog-cancel" id="folder-archive-cancel" type="button">Cancel</button>
         <button class="dialog-submit" id="folder-archive-confirm" type="submit">Archive Folder</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="folder-dialog note-selection-confirm" id="note-selection-delete-confirm" aria-labelledby="note-selection-delete-title" aria-describedby="note-selection-delete-copy">
+    <form method="dialog">
+      <h2 id="note-selection-delete-title">Delete selected notes?</h2>
+      <p id="note-selection-delete-copy"></p>
+      <div class="note-selection-confirm-actions">
+        <button class="folder-dialog-cancel" type="submit" value="cancel">Cancel</button>
+        <button class="dialog-submit" id="note-selection-delete-accept" type="submit" value="archive">Move to Archive</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog class="folder-dialog note-selection-confirm" id="note-selection-move-confirm" aria-labelledby="note-selection-move-title" aria-describedby="note-selection-move-copy">
+    <form method="dialog">
+      <h2 id="note-selection-move-title">Move selected notes?</h2>
+      <p id="note-selection-move-copy"></p>
+      <div class="note-selection-confirm-actions">
+        <button class="folder-dialog-cancel" type="submit" value="cancel">Cancel</button>
+        <button class="dialog-submit" id="note-selection-move-accept" type="submit" value="move">Move notes</button>
       </div>
     </form>
   </dialog>

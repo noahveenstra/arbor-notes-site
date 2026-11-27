@@ -411,6 +411,23 @@ export class CloudKitEncryptedWebServices {
     });
   }
 
+  updateMetadataRecord(operation, zoneID) {
+    if (!operation || operation.operationType !== "update" || !operation.record ||
+        typeof operation.record.recordType !== "string" || typeof operation.record.recordName !== "string" ||
+        typeof operation.record.recordChangeTag !== "string" || !operation.record.recordChangeTag ||
+        !operation.record.fields || typeof operation.record.fields !== "object" ||
+        !Object.keys(operation.record.fields).length) {
+      throw new TypeError("A revision-checked metadata update is required.");
+    }
+    return this.modifyRecords([operation], zoneID, true).then((payload) => {
+      const result = payload.records && payload.records[0];
+      if (!result || result.serverErrorCode) {
+        throw cloudKitError("CloudKit note metadata update failed", result || payload, { operation: "records/modify" });
+      }
+      return result;
+    });
+  }
+
   requestAssetUploads(tokens, zoneID) {
     if (!Array.isArray(tokens) || !tokens.length) throw new TypeError("Asset upload fields are required.");
     if (tokens.length > 200) throw new RangeError("CloudKit accepts at most 200 asset upload fields per request.");

@@ -18,7 +18,7 @@ const RUST_SEARCH_URL = "./rust-search.js?v=arb-125-integrity-20261126-a";
 const NOTE_SORT_URL = "./note-sort.js?v=arb-138-note-sort-20261123-a";
 const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=arb-17-native-field-contract-20261126-a";
 const CLOUDKIT_WEB_SERVICES_URL = "./cloudkit-encrypted-web-services.mjs?v=arb-190-instant-launch-20261125-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-14-recovered-edit-revision-20261127-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-214-save-cache-and-revision-20261127-a";
 const PROOFREADING_SCHEDULE_URL = "./proofreading-schedule.mjs?v=arb-always-on-proofreading-20261125-a";
 let startupStatusTimer = null;
 

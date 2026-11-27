@@ -9213,9 +9213,8 @@
         if (superseded()) return;
         const savedDocument = state.syncBaselines.get(recordName) || submittedDocument;
         adoptSavedPendingBase(recordName, saved, savedDocument);
-        if (body && typeof body === "object") {
-          rememberRecordBody(recordName, state.nativeSchema ? savedDocument.body : savedDocument.title + "\n\n" + savedDocument.body, session);
-        }
+        const savedMarkdown = state.nativeSchema ? savedDocument.body : savedDocument.title + "\n\n" + savedDocument.body;
+        rememberRecordBody(recordName, savedMarkdown, session);
         let newerEdit = state.selectedRecordName === recordName && state.dirty;
         if (state.selectedRecordName === recordName && !newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
           replaceActiveEditorDocument(recordName, savedDocument);

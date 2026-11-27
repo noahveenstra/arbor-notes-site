@@ -1,7 +1,7 @@
 (function () {
   "use strict";
 
-  const { parseMarkdownListItem, markdownHTML, serializeMarkdownList } = window.ArborMarkdown;
+  const { parseMarkdownListItem, markdownHTML, serializeMarkdownList, safeMarkdownHref } = window.ArborMarkdown;
   const { field } = window.ArborCloudKitFields;
   const noteSorting = window.ArborNoteSorting;
   const noteSync = window.ArborNoteSync;
@@ -3746,11 +3746,39 @@
     if (node.tagName === "BR") return "\n";
     const value = Array.from(node.childNodes).map(inlineMarkdown).join("");
     if (!value.replace(/[\s\u00a0]/g, "")) return value;
+    if (node.tagName === "A") {
+      const href = safeMarkdownHref(node.getAttribute("href"));
+      if (!href) return value;
+      const destination = node.getAttribute("data-markdown-destination") || href;
+      const title = node.getAttribute("data-markdown-title-source");
+      return "[" + value + "](" + destination + (title ? " " + title : "") + ")";
+    }
     if (node.tagName === "STRONG" || node.tagName === "B") return "**" + value + "**";
     if (node.tagName === "EM" || node.tagName === "I") return "*" + value + "*";
     if (node.tagName === "CODE") return "`" + value + "`";
     if (["S", "DEL", "STRIKE"].includes(node.tagName)) return "~~" + value + "~~";
     return value;
+  }
+
+  function syncDuplicateTitleHeading(body, title) {
+    if (!body) return;
+    body.querySelectorAll("[data-arbor-duplicate-title-heading]").forEach(function (heading) {
+      heading.removeAttribute("data-arbor-duplicate-title-heading");
+      heading.removeAttribute("aria-hidden");
+    });
+    const firstContentBlock = Array.from(body.childNodes).find(function (node) {
+      if (node.nodeType === Node.TEXT_NODE) return Boolean(String(node.nodeValue || "").trim());
+      if (node.nodeType !== Node.ELEMENT_NODE) return false;
+      if (node.tagName === "P" && !String(node.textContent || "").trim()) return false;
+      return true;
+    });
+    if (!firstContentBlock || firstContentBlock.nodeType !== Node.ELEMENT_NODE || firstContentBlock.tagName !== "H1") return;
+    const headingText = String(firstContentBlock.textContent || "").replace(/\s+/g, " ").trim();
+    const titleText = firstLineTitle(title).replace(/\s+/g, " ").trim();
+    if (headingText && headingText === titleText) {
+      firstContentBlock.setAttribute("data-arbor-duplicate-title-heading", "true");
+      firstContentBlock.setAttribute("aria-hidden", "true");
+    }
   }
 
   function markdownForEditorBlock(block) {
@@ -3837,7 +3865,11 @@
         markdown += "\n";
         return;
       }
-      const marker = node.tagName === "STRONG" || node.tagName === "B" ? ["**", "**"]
+      const linkHref = node.tagName === "A" ? safeMarkdownHref(node.getAttribute("href")) : null;
+      const linkDestination = linkHref ? (node.getAttribute("data-markdown-destination") || linkHref) : "";
+      const linkTitle = linkHref ? node.getAttribute("data-markdown-title-source") : "";
+      const marker = linkHref ? ["[", "](" + linkDestination + (linkTitle ? " " + linkTitle : "") + ")"]
+        : node.tagName === "STRONG" || node.tagName === "B" ? ["**", "**"]
         : node.tagName === "EM" || node.tagName === "I" ? ["*", "*"]
           : node.tagName === "CODE" ? ["`", "`"]
             : ["S", "DEL", "STRIKE"].includes(node.tagName) ? ["~~", "~~"]
@@ -4573,6 +4605,7 @@
     body.id = "note-body"; body.className = "note-body"; body.contentEditable = "true";
     body.setAttribute("role", "textbox"); body.setAttribute("aria-label", "Note body"); body.setAttribute("aria-multiline", "true"); body.spellcheck = false;
     body.innerHTML = markdownHTML(value || "");
+    syncDuplicateTitleHeading(body, $("note-title") && $("note-title").value);
     const listTyping = trackListMarkerTyping(body);
     const onInput = function (event) {
       const listHistory = listTyping.observe(event);
@@ -4651,6 +4684,7 @@
         const wasFocused = document.activeElement === body || body.contains(document.activeElement);
         const scrollTop = body.scrollTop;
         body.innerHTML = markdownHTML(markdown || "");
+        syncDuplicateTitleHeading(body, $("note-title") && $("note-title").value);
         if (wasFocused) body.focus({ preventScroll: true });
         if (selection) restoreEditorTextSelection(body, selection);
         body.scrollTop = scrollTop;
@@ -6803,6 +6837,7 @@
     const body = $("note-body");
     if (!body || body !== pending.body || !state.editor || state.editor.getMarkdown() !== pending.noteText) return false;
     body.innerHTML = markdownHTML(nextNoteText);
+    syncDuplicateTitleHeading(body, $("note-title") && $("note-title").value);
     state.selectionReviewApplying = true;
     body.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: replacement || null }));
     state.selectionReviewApplying = false;
@@ -10256,15 +10291,17 @@
     if (!literal || typeof literal.text !== "string" || !Number.isSafeInteger(literal.start) ||
         text.slice(literal.start, literal.start + literal.text.length) !== literal.text) {
       body.innerHTML = markdownHTML(text);
+      syncDuplicateTitleHeading(body, $("note-title") && $("note-title").value);
       return null;
     }
     let token = "ArborListMarkerHistory";
     while (text.includes(token)) token += "X";
     body.innerHTML = markdownHTML(text.slice(0, literal.start) + token + text.slice(literal.start + literal.text.length));
     const paragraph = Array.from(body.querySelectorAll("p")).find(function (p) { return p.textContent === token; });
-    if (!paragraph) { body.innerHTML = markdownHTML(text); return null; }
+    if (!paragraph) { body.innerHTML = markdownHTML(text); syncDuplicateTitleHeading(body, $("note-title") && $("note-title").value); return null; }
     paragraph.textContent = literal.text;
     paragraph.dataset.listLiteral = literal.text;
+    syncDuplicateTitleHeading(body, $("note-title") && $("note-title").value);
     return paragraph;
   }
 
@@ -11689,7 +11726,7 @@
       closeNoteActions();
       if (recordName) openNote(recordName);
     });
-    $("note-title").addEventListener("input", function () { fitTitle(); scheduleSave(false); });
+    $("note-title").addEventListener("input", function () { fitTitle(); syncDuplicateTitleHeading($("note-body"), this.value); scheduleSave(false); });
     $("draft-review").addEventListener("click", function () {
       openSettings();
       $("settings-tab-account").click();

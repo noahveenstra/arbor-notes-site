@@ -7,11 +7,132 @@
     return String(value).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
-  function inlineHTML(raw) {
-    return escapeHTML(raw).replace(/`([^`]+)`/g, "<code>$1</code>")
-      .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+  function safeMarkdownHref(value) {
+    const href = String(value || "").trim();
+    if (!href || /[\\\u0000-\u0020\u007f]/.test(href) || href.startsWith("//")) return null;
+    if (/^(?:https?:|mailto:|tel:)/i.test(href)) return href;
+    if (/^[a-z][a-z\d+.-]*:/i.test(href)) return null;
+    return href;
+  }
+
+  function escapedAt(source, index) {
+    let backslashes = 0;
+    for (let cursor = index - 1; cursor >= 0 && source[cursor] === "\\"; cursor--) backslashes++;
+    return backslashes % 2 === 1;
+  }
+
+  function parseMarkdownLinkAt(source, start) {
+    let labelDepth = 0;
+    let labelEnd = -1;
+    for (let cursor = start + 1; cursor < source.length; cursor++) {
+      if (source[cursor] === "\\") { cursor++; continue; }
+      if (source[cursor] === "\n") return null;
+      if (source[cursor] === "[") labelDepth++;
+      else if (source[cursor] === "]") {
+        if (labelDepth === 0) { labelEnd = cursor; break; }
+        labelDepth--;
+      }
+    }
+    if (labelEnd < 0 || source[labelEnd + 1] !== "(") return null;
+
+    let destinationDepth = 0;
+    let destinationEnd = -1;
+    for (let cursor = labelEnd + 2; cursor < source.length; cursor++) {
+      if (source[cursor] === "\\") { cursor++; continue; }
+      if (source[cursor] === "\n") return null;
+      if (source[cursor] === "(") destinationDepth++;
+      else if (source[cursor] === ")") {
+        if (destinationDepth === 0) { destinationEnd = cursor; break; }
+        destinationDepth--;
+      }
+    }
+    if (destinationEnd < 0) return null;
+
+    const inside = source.slice(labelEnd + 2, destinationEnd).trim();
+    let destinationSource = inside;
+    let titleSource = "";
+    let href = inside;
+    if (inside.startsWith("<")) {
+      const angle = inside.match(/^(<[^<>]*>)(?:\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\)))?$/);
+      if (!angle) return null;
+      destinationSource = angle[1];
+      titleSource = inside.slice(destinationSource.length).trim();
+      href = destinationSource.slice(1, -1);
+    } else {
+      const title = inside.match(/^(\S+)\s+(?:"[^"\n]*"|'[^'\n]*'|\([^()\n]*\))$/);
+      if (title) {
+        destinationSource = title[1];
+        titleSource = inside.slice(destinationSource.length).trim();
+        href = destinationSource;
+      } else if (/\s/.test(inside)) return null;
+    }
+    href = href.replace(/\\([\\()[\]{}<>])/g, "$1");
+    return {
+      end: destinationEnd + 1,
+      label: source.slice(start + 1, labelEnd),
+      href: href,
+      destinationSource: destinationSource,
+      titleSource: titleSource,
+      raw: source.slice(start, destinationEnd + 1)
+    };
+  }
+
+  function inlineHTML(raw, allowLinks = true, context = null) {
+    const root = !context;
+    if (!context) {
+      const source = String(raw || "");
+      let prefix = "\u0000ARBOR_MARKDOWN_" + Math.random().toString(36).slice(2) + "_";
+      while (source.includes(prefix)) prefix += "X";
+      context = { prefix: prefix, tokens: [] };
+    }
+    const hold = function (html) {
+      const token = context.prefix + context.tokens.length + "\u0000";
+      context.tokens.push(html);
+      return token;
+    };
+    let source = String(raw || "").replace(/`([^`]+)`/g, function (_, value) {
+      return hold("<code>" + escapeHTML(value) + "</code>");
+    });
+    if (allowLinks) {
+      let rendered = "";
+      for (let index = 0; index < source.length;) {
+        if (source[index] === "\\" && index + 1 < source.length) {
+          rendered += source.slice(index, index + 2);
+          index += 2;
+          continue;
+        }
+        const imageMarker = index > 0 && source[index - 1] === "!" && !escapedAt(source, index - 1);
+        if (source[index] === "[" && !imageMarker && !escapedAt(source, index)) {
+          const link = parseMarkdownLinkAt(source, index);
+          if (link) {
+            const href = safeMarkdownHref(link.href);
+            if (href) {
+              const titleValue = link.titleSource ? link.titleSource.replace(/^(?:"([\s\S]*)"|'([\s\S]*)'|\(([\s\S]*)\))$/, "$1$2$3") : "";
+              const titleAttribute = link.titleSource ? ' title="' + escapeHTML(titleValue) + '" data-markdown-title-source="' + escapeHTML(link.titleSource) + '"' : "";
+              const anchor = '<a href="' + escapeHTML(href) + '" target="_blank" rel="noopener noreferrer" contenteditable="false" data-markdown-destination="' + escapeHTML(link.destinationSource) + '"' + titleAttribute + '>' + inlineHTML(link.label, false, context) + "</a>";
+              rendered += hold(anchor);
+            } else rendered += hold(escapeHTML(link.raw));
+            index = link.end;
+            continue;
+          }
+        }
+        rendered += source[index++];
+      }
+      source = rendered;
+    }
+    let html = escapeHTML(source).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
       .replace(/~~([^~]+)~~/g, "<s>$1</s>")
       .replace(/(^|[^*])\*([^*]+)\*/g, "$1<em>$2</em>");
+    if (!root) return html;
+    function restore(value, depth = 0) {
+      if (depth > context.tokens.length) return value;
+      const pattern = new RegExp(context.prefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(\\d+)\\u0000", "g");
+      return value.replace(pattern, function (_, index) {
+        const replacement = context.tokens[Number(index)];
+        return replacement == null ? "" : restore(replacement, depth + 1);
+      });
+    }
+    return restore(html);
   }
 
   function parseMarkdownListItem(line) {
@@ -84,11 +205,11 @@
       if (/^>\s?/.test(lines[index])) {
         const quoted = [];
         while (index < lines.length && /^>\s?/.test(lines[index])) quoted.push(lines[index++].replace(/^>\s?/, ""));
-        blocks.push("<blockquote><p>" + quoted.map(inlineHTML).join("<br>") + "</p></blockquote>"); continue;
+        blocks.push("<blockquote><p>" + quoted.map(line => inlineHTML(line)).join("<br>") + "</p></blockquote>"); continue;
       }
       const paragraph = [];
       while (index < lines.length && lines[index].trim() && !/^(?:#{1,3}\s+|>\s?)/.test(lines[index]) && !parseMarkdownListItem(lines[index])) paragraph.push(lines[index++]);
-      blocks.push("<p>" + paragraph.map(inlineHTML).join("<br>") + "</p>");
+      blocks.push("<p>" + paragraph.map(line => inlineHTML(line)).join("<br>") + "</p>");
     }
     return blocks.join("");
   }
@@ -115,5 +236,5 @@
     }).join("\n");
   }
 
-  return Object.freeze({ parseMarkdownListItem, splitMarkdownDocument, markdownHTML, serializeMarkdownList });
+  return Object.freeze({ parseMarkdownListItem, splitMarkdownDocument, markdownHTML, serializeMarkdownList, safeMarkdownHref });
 });

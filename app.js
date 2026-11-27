@@ -8401,7 +8401,7 @@
     return { title: title, body: String(body || "") };
   }
 
-  function writeDraft(recordName, parts) {
+  function writeDraft(recordName, parts, updatedAt) {
     const account = draftAccountKey();
     if (!account || !recordName || !parts) return;
     const store = readDraftStore();
@@ -8410,7 +8410,7 @@
       recordName: recordName,
       title: normalizedTitle(parts.title),
       body: String(parts.body || ""),
-      updatedAt: Date.now()
+      updatedAt: Number(updatedAt) || Date.now()
     };
     store[account] = bucket;
     writeDraftStore(store);
@@ -8423,13 +8423,16 @@
     if (state.recoveredEditNames.has(state.selectedRecordName) && previous) {
       if (!browserLibraryOwner()) return;
       if (sameSyncDocument(parts, previous)) return;
-      if (!sameSyncDocument(draftFor(state.selectedRecordName), previous)) {
+      if (!sameSyncDocument(recoveredDraftFor(state.selectedRecordName), previous)) {
         showSaveProblem("The recovered copy changed in another tab. Keep this tab open to copy your latest words.", state.selectedRecordName);
         return;
       }
+      const saved = persistRecoveredPendingEdit(state.selectedRecordName, parts, previous);
+      if (saved) state.draftBaseline.recovered = parts;
+      if (!$("settings-modal").hidden) renderRecoveredEdits();
+      return;
     }
     writeDraft(state.selectedRecordName, parts);
-    if (previous && sameSyncDocument(draftFor(state.selectedRecordName), parts)) state.draftBaseline.recovered = parts;
   }
 
   function persistDraftSnapshot(recordName, parts) {
@@ -8479,9 +8482,52 @@
 
   function recoveredEditDocument(edit) {
     if (!edit) return null;
-    if (typeof edit.body !== "string") return edit.body;
+    if (typeof edit.body !== "string") return Object.assign({}, edit.body, { updatedAt: edit.updatedAt });
     const separator = edit.body.indexOf("\n\n");
-    return separator < 0 ? null : { title: edit.body.slice(0, separator), body: edit.body.slice(separator + 2) };
+    return separator < 0 ? null : {
+      title: edit.body.slice(0, separator), body: edit.body.slice(separator + 2), updatedAt: edit.updatedAt
+    };
+  }
+
+  function recoveredDraftFor(recordName, edit) {
+    const draft = draftFor(recordName);
+    const queued = recoveredEditDocument(edit || pendingEditFor(recordName));
+    if (!draft) return queued;
+    if (!queued || sameSyncDocument(draft, queued)) return draft;
+    return Number(queued.updatedAt) > Number(draft.updatedAt) ? queued : draft;
+  }
+
+  function persistRecoveredPendingEdit(recordName, parts, previous) {
+    const queue = readEditQueue();
+    const pending = queue.find(edit => edit.recordName === recordName);
+    const latest = recoveredDraftFor(recordName, pending);
+    if (!latest || !sameSyncDocument(latest, previous)) return false;
+
+    const latestUpdatedAt = Number(latest.updatedAt) || 0;
+    const pendingUpdatedAt = Number(pending && pending.updatedAt) || 0;
+    const updatedAt = Math.max(Date.now(), latestUpdatedAt + 1, pendingUpdatedAt + 1);
+    const base = pending && pending.base;
+    if (pending && base && base.recordChangeTag && typeof base.title === "string" && typeof base.body === "string") {
+      const body = typeof pending.body === "string"
+        ? normalizedTitle(parts.title) + "\n\n" + String(parts.body || "")
+        : { title: normalizedTitle(parts.title), body: String(parts.body || "") };
+      const revised = Object.assign({}, pending, {
+        title: normalizedTitle(parts.title), body: body, updatedAt: updatedAt
+      });
+      state.editQueue = launchLibrary.normalizeEditQueue(queue.map(edit =>
+        edit.recordName === recordName ? revised : edit));
+      storeEditQueue(recordName);
+      const stored = readEditQueue().find(edit => edit.recordName === recordName);
+      if (stored && stored.updatedAt === updatedAt &&
+          JSON.stringify(stored.base) === JSON.stringify(base) &&
+          sameSyncDocument(recoveredEditDocument(stored), parts)) {
+        writeDraft(recordName, parts, updatedAt);
+        return sameSyncDocument(recoveredDraftFor(recordName, stored), parts);
+      }
+    }
+
+    writeDraft(recordName, parts, updatedAt);
+    return sameSyncDocument(recoveredDraftFor(recordName), parts);
   }
 
   function renderRecoveredEdits() {
@@ -8494,7 +8540,7 @@
       for (const name of state.recoveredEditNames) {
         const edit = queue.find(item => item.recordName === name);
         const queued = recoveredEditDocument(edit);
-        const draft = draftFor(name) || queued;
+        const draft = recoveredDraftFor(name, edit) || queued;
         if (!draft) continue;
         const row = document.createElement("div");
         row.className = "settings-setting-row";
@@ -8544,7 +8590,7 @@
           JSON.stringify(pending.base) !== JSON.stringify(edit.base) ||
           (state.selectedRecordName === name && state.dirty && !sameSyncDocument(editorDraftParts(), draft)) ||
           !sameSyncDocument(recoveredEditDocument(pending), draft) ||
-          !sameSyncDocument(draftFor(name) || recoveredEditDocument(pending), draft)) {
+          !sameSyncDocument(recoveredDraftFor(name, pending), draft)) {
         throw new Error("This edit changed. Review the current copy before syncing.");
       }
     }
@@ -8745,7 +8791,7 @@
 
   function revealRecoveredDraft(note) {
     hideDraftBanner();
-    const draft = draftFor(note.recordName);
+    const draft = recoveredDraftFor(note.recordName);
     if (!draft) return false;
     if (!draftDiffers(draft, note) && !state.recoveredEditNames.has(note.recordName)) {
       clearDraft(note.recordName);

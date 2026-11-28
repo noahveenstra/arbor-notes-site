@@ -2127,15 +2127,19 @@
     });
     card.addEventListener("dragend", function () { card.classList.remove("is-dragging"); });
     card.addEventListener("click", function (event) {
-      state.listCursor = note.recordName;
       if (noteSelection.snapshot().active) {
         if (state.noteSelectionBusy) return;
+        state.listCursor = note.recordName;
         noteSelection.toggle(note.recordName, event.shiftKey);
         renderNoteSelectionControls(orderedVisibleNotes());
         applyListCursor();
-        return;
+      } else if (event.shiftKey) {
+        enterNoteSelection(state.listCursor, note.recordName);
+      } else if (event.metaKey || (event.ctrlKey && !shortcutPlatformIsApple())) {
+        enterNoteSelection(note.recordName);
+      } else {
+        openNote(note.recordName);
       }
-      openNote(note.recordName);
     });
     bindNoteCardMenu(card, note.recordName);
 
@@ -8370,7 +8374,7 @@
     }));
   }
 
-  const FIRST_READY_NOTES = 100;
+  const FIRST_READY_NOTES = 1000;
   const LIBRARY_LOOKUP_BATCH = 25;
   const LIBRARY_ASSET_CONCURRENCY = 4;
   const LIBRARY_BATCH_TIMEOUT_MS = 20_000;
@@ -8426,7 +8430,7 @@
     const context = libraryTextContext(session);
     const names = notes.map(function (note) { return note.recordName; });
     for (let index = 0; index < names.length; index += LIBRARY_LOOKUP_BATCH) {
-      if (!context.current() || browserOffline() || (!progress && document.visibilityState === "hidden")) break;
+      if (!context.current() || browserOffline()) break;
       const jobs = [];
       let reusedInline = false;
       for (const name of names.slice(index, index + LIBRARY_LOOKUP_BATCH)) {
@@ -8488,8 +8492,7 @@
 
   function queueLibraryTextFill(session) {
     if (!accountSessionCurrent(session) || state.prepareInitialNotes || !state.previewHydrationReady ||
-        state.loadingRecords || state.libraryTextFill || state.libraryTextRetryTimer || browserOffline() ||
-        document.visibilityState === "hidden") return;
+        state.loadingRecords || state.libraryTextFill || state.libraryTextRetryTimer || browserOffline()) return;
     const missing = orderedLibraryNotes().filter(function (note) {
       return !state.bodyCache.has(note.recordName) && !state.pendingNewNoteRecords.has(note.recordName);
     });
@@ -8706,8 +8709,8 @@
       scheduleLibraryCacheWrite(0);
     }
     state.previewHydrationReady = true;
-    queueNativePreview();
     queueLibraryTextFill(session);
+    queueNativePreview();
     flushPendingEdits();
     startRealtimeSync(session);
     configureRealtimeNotifications(session);
@@ -8960,6 +8963,8 @@
       });
       window.addEventListener("online", function () {
         if (state.database && !state.accountCacheSuspended && !state.prepareInitialNotes) {
+          window.clearTimeout(state.libraryTextRetryTimer);
+          state.libraryTextRetryTimer = null;
           queueLibraryTextFill(state.accountSession);
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
@@ -11664,12 +11669,17 @@
     }
   }
 
-  function enterNoteSelection(recordName) {
+  function enterNoteSelection(recordName, rangeEnd) {
     if (state.searchPage || state.noteSelectionBusy) return;
     const visible = orderedVisibleNotes();
-    noteSelection.enter(currentNoteSelectionScope(visible));
-    noteSelection.toggle(recordName, false);
-    state.listCursor = recordName;
+    const scope = currentNoteSelectionScope(visible);
+    const target = rangeEnd || recordName;
+    if (!scope.ids.includes(target)) return;
+    const anchor = scope.ids.includes(recordName) ? recordName : target;
+    noteSelection.enter(scope);
+    noteSelection.toggle(anchor, false);
+    if (target !== anchor) noteSelection.extendTo(target);
+    state.listCursor = target;
     state.noteSelectionResult = "";
     state.noteSelectionSelectedIDs = new Set();
     renderNoteSelectionControls(visible);

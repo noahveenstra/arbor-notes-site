@@ -449,8 +449,8 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 #note-list .note-row-title { grid-column: 1 / -1; margin-bottom: 2px; font-size: 14px; font-weight: 650; line-height: 1.35; }
 #note-list .note-card-detail, #note-list .note-row-footer { display: contents; }
 #note-list .note-row-date { grid-column: 1; grid-row: 2; margin: 0; color: var(--label); font: 560 12px/1.35 var(--font-sans); }
-#note-list .note-card-preview { grid-column: 2; grid-row: 2; }
-#note-list .note-row-folder { grid-column: 1 / -1; grid-row: 3; margin-top: 6px; color: var(--secondary-label); font: 11px/1.25 var(--font-sans); }
+#note-list .note-card-preview { grid-column: 1 / -1; grid-row: 3; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
+#note-list .note-row-folder { grid-column: 2; grid-row: 2; justify-self: end; max-width: 100%; margin: 0; overflow: hidden; color: var(--secondary-label); font: 11px/1.25 var(--font-sans); text-overflow: ellipsis; white-space: nowrap; }
 #note-list .note-row-folder img { width: 12px; height: 10px; }
 #sidebar .settings-link { height: 32px; padding-left: 12px; background: transparent; }
 @media (max-width: 760px) {

@@ -122,6 +122,7 @@
     bodyCache: new Map(),
     previewCache: new Map(),
     previewCacheRevision: new Map(),
+    warmPreviewBodies: new Map(),
     previewRetryBlocks: new Map(),
     previewLoadErrors: new Set(),
     previewStaleNames: new Set(),
@@ -260,6 +261,10 @@
   const disclosureAnimations = new WeakMap();
   const textSwapAnimations = new WeakMap();
   let libraryWriteChain = Promise.resolve();
+  const MAX_SAVED_PREVIEWS = 1000;
+  const MAX_PREVIEW_LENGTH = 140;
+  const MAX_WARM_PREVIEW_BODIES = 12;
+  const MAX_WARM_BODY_LENGTH = 128 * 1024;
   let accountPersistenceChain = Promise.resolve();
   let accountCacheModulePromise = null;
 
@@ -620,19 +625,32 @@
   }
 
   async function restoreLibraryCache() {
-    if (!state.cacheKey || state.accountCacheSuspended) return false;
+    const key = state.cacheKey;
+    const session = state.accountSession;
+    if (!key || state.accountCacheSuspended) return false;
+    const current = function () {
+      return !state.accountCacheSuspended && state.cacheKey === key && state.accountSession === session;
+    };
     const db = await openLibraryCacheDB();
-    if (!db) return false;
+    if (!db || !current()) return false;
     return await new Promise(function (resolve) {
       try {
-        const request = db.transaction("libraries", "readonly").objectStore("libraries").get(state.cacheKey);
+        const request = db.transaction("libraries", "readonly").objectStore("libraries").get(key);
         request.onsuccess = function () {
-          if (state.accountCacheSuspended || !state.cacheKey) { resolve(false); return; }
+          if (!current()) { resolve(false); return; }
           const cached = request.result;
           if (!cached || !Array.isArray(cached.records)) { resolve(false); return; }
           state.records = new Map(cached.records.map(function (record) { return [record.recordName, record]; }));
           state.syncToken = cached.syncToken || null; state.nativeZoneID = cached.nativeZoneID || null;
           state.bodyCache = new Map(Array.isArray(cached.bodies) ? cached.bodies : []);
+          for (const entry of Array.isArray(cached.previews) ? cached.previews.slice(-MAX_SAVED_PREVIEWS) : []) {
+            if (!Array.isArray(entry)) continue;
+            const [name, revision, text] = entry;
+            const record = state.records.get(name);
+            if (record && typeof text === "string" && revision === previewRecordRevision(record)) {
+              rememberPreview(name, text, revision);
+            }
+          }
           if (proofreadingDictionary) {
             state.dictionaryPending = proofreadingDictionary.normalizeSnapshotEntries(cached.dictionaryPending);
             state.dictionaryEntries = proofreadingDictionary.mergeSnapshotEntries(cached.dictionaryEntries, state.dictionaryPending);
@@ -678,12 +696,19 @@
       })
       .map(cacheableRecord);
     const bodies = Array.from(state.bodyCache.entries());
+    const previews = [];
+    for (const [name, text] of state.previewCache) {
+      const record = state.records.get(name);
+      if (record && previewIsCurrent(name, record) && !state.pendingNewNoteRecords.has(name)) {
+        previews.push([name, state.previewCacheRevision.get(name), text]);
+      }
+    }
     await new Promise(function (resolve) {
       try {
         const tx = db.transaction("libraries", "readwrite");
         tx.objectStore("libraries").put({
           key: state.cacheKey, nativeZoneID: state.nativeZoneID, nativeSchema: state.nativeSchema, syncToken: state.syncToken,
-          records: records, bodies: bodies, dictionaryEntries: state.dictionaryEntries,
+          records: records, bodies: bodies, previews: previews, dictionaryEntries: state.dictionaryEntries,
           dictionaryPending: state.dictionaryPending, updatedAt: Date.now()
         });
         tx.oncomplete = function () { resolve(); }; tx.onerror = function () { resolve(); }; tx.onabort = function () { resolve(); };
@@ -691,13 +716,25 @@
     });
   }
 
-  function scheduleLibraryCacheWrite() {
+  function scheduleLibraryCacheWrite(delay = 250) {
     if (state.accountCacheSuspended || !state.cacheKey) return;
     window.clearTimeout(state.cacheWriteTimer);
     state.cacheWriteTimer = window.setTimeout(function () {
+      state.cacheWriteTimer = null;
       const write = libraryWriteChain.then(function () { return writeLibraryCache(); }, function () { return writeLibraryCache(); });
       libraryWriteChain = write.then(function () {}, function () {});
-    }, 250);
+    }, delay);
+  }
+
+  function rememberPreview(recordName, text, revision) {
+    state.previewCache.delete(recordName);
+    state.previewCache.set(recordName, text.slice(0, MAX_PREVIEW_LENGTH));
+    state.previewCacheRevision.set(recordName, revision);
+    if (state.previewCache.size > MAX_SAVED_PREVIEWS) {
+      const oldest = state.previewCache.keys().next().value;
+      state.previewCache.delete(oldest);
+      state.previewCacheRevision.delete(oldest);
+    }
   }
 
   function renderPersonalDictionarySettings() {
@@ -978,16 +1015,14 @@
     const current = state.notes.find(function (note) { return note.recordName === recordName; });
     const record = state.records.get(recordName) || (current && current.record);
     if (current && isNativeModelRecord(current.record, "CapturedNote")) {
-      state.previewCache.set(recordName, preview);
-      state.previewCacheRevision.set(recordName, previewRecordRevision(record));
+      rememberPreview(recordName, preview, previewRecordRevision(record));
       state.previewStaleNames.delete(recordName);
       state.previewLoadErrors.delete(recordName);
       current.body = body; current.editorBody = body; current.preview = preview; current.previewUnavailable = false;
       if (!fieldValue(current.record, "userTitle") && !fieldValue(current.record, "generatedTitle") && (!current.title || current.title === "Untitled")) current.title = firstLineTitle(body);
     } else if (current && current.record.recordType === "ArborNote") {
       const parts = splitDocument(body);
-      state.previewCache.set(recordName, previewText(parts.body));
-      state.previewCacheRevision.set(recordName, previewRecordRevision(record));
+      rememberPreview(recordName, previewText(parts.body), previewRecordRevision(record));
       state.previewStaleNames.delete(recordName);
       state.previewLoadErrors.delete(recordName);
       current.body = body; current.title = parts.title; current.editorBody = parts.body;
@@ -1005,6 +1040,7 @@
     state.previewQueue = [];
     state.previewQueuedNames.clear();
     state.previewVisibleNames.clear();
+    state.warmPreviewBodies.clear();
     state.previewRetryBlocks.clear();
     state.previewHydrationReady = false;
     state.previewLoadErrors.clear();
@@ -1149,9 +1185,17 @@
         const current = state.notes.find(function (item) { return item.recordName === job.recordName; });
         if (!current) return;
         const text = job.nativeSchema ? previewText(result.body) : previewText(splitDocument(result.body).body);
-        state.previewCache.set(job.recordName, text);
-        state.previewCacheRevision.set(job.recordName, job.revision);
+        rememberPreview(job.recordName, text, job.revision);
+        // A click can reuse this body in this tab. IndexedDB only gets the excerpt.
+        if (result.body.length <= MAX_WARM_BODY_LENGTH) {
+          state.warmPreviewBodies.delete(job.recordName);
+          state.warmPreviewBodies.set(job.recordName, result);
+          if (state.warmPreviewBodies.size > MAX_WARM_PREVIEW_BODIES) {
+            state.warmPreviewBodies.delete(state.warmPreviewBodies.keys().next().value);
+          }
+        }
         state.previewStaleNames.delete(job.recordName);
+        if (state.cacheWriteTimer === null) scheduleLibraryCacheWrite(750);
         state.previewLoadErrors.delete(job.recordName);
         current.preview = text;
         current.previewUnavailable = false;
@@ -1646,7 +1690,7 @@
     if (isNativeModelRecord(record, "CapturedNote")) {
       const bodyValue = fieldValue(record, "text");
       const cachedBody = state.bodyCache.get(record.recordName);
-      const body = typeof bodyValue === "string" ? bodyValue : (cachedBody || "");
+      const body = typeof cachedBody === "string" ? cachedBody : (typeof bodyValue === "string" ? bodyValue : "");
       const userTitle = String(fieldValue(record, "userTitle") || "").trim();
       const generatedTitle = String(fieldValue(record, "generatedTitle") || "").trim();
       const title = userTitle || generatedTitle || (body ? firstLineTitle(body) : "Untitled");
@@ -1665,7 +1709,7 @@
     const path = recordPath(record);
     const bodyValue = fieldValue(record, "body");
     const cachedBody = state.bodyCache.get(record.recordName);
-    const body = typeof bodyValue === "string" ? bodyValue : (typeof cachedBody === "string" ? cachedBody : "");
+    const body = typeof cachedBody === "string" ? cachedBody : (typeof bodyValue === "string" ? bodyValue : "");
     const parts = splitDocument(body);
     if (!body) parts.title = path.split("/").pop().replace(/\.md$/i, "") || "Untitled";
     const preview = previewIsCurrent(record.recordName, record)
@@ -1703,7 +1747,7 @@
       .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
       .replace(/\s+/g, " ")
       .trim()
-      .slice(0, 140);
+      .slice(0, MAX_PREVIEW_LENGTH);
   }
 
   function relativeFolder(path) {
@@ -1959,7 +2003,10 @@
 
     const footer = document.createElement("span");
     footer.className = "note-row-footer" + (note.folderPath ? "" : " is-unfiled");
-
+    const date = document.createElement("span");
+    date.className = "note-card-date note-row-date";
+    date.textContent = formatDate(note[noteSorting.displayDateFieldFor(state.preferences.noteSortOrder)]);
+    footer.appendChild(date);
     if (note.folderPath) {
       const folder = document.createElement("span");
       folder.className = "note-card-folder note-row-folder";
@@ -1967,10 +2014,6 @@
       folder.appendChild(document.createTextNode(note.folderPath.split("/").pop()));
       footer.appendChild(folder);
     }
-    const date = document.createElement("span");
-    date.className = "note-card-date note-row-date";
-    date.textContent = formatDate(note[noteSorting.displayDateFieldFor(state.preferences.noteSortOrder)]);
-    footer.appendChild(date);
     card.appendChild(footer);
     if (note.starred) {
       const star = document.createElement("span");
@@ -3174,8 +3217,11 @@
   function noteBodyLoaded(note) {
     if (!note) return false;
     if (state.bodyCache.has(note.recordName)) return true;
-    if (state.nativeSchema && typeof fieldValue(note.record, "text") === "string") return true;
-    return !state.nativeSchema && typeof fieldValue(note.record, "body") === "string";
+    if (state.nativeSchema) {
+      const text = fieldValue(note.record, "text");
+      return typeof text === "string" && (text.length > 0 || !fieldValue(note.record, "text_ckAsset"));
+    }
+    return fieldValue(note.record, "bodyStorageRaw") !== "asset" && typeof fieldValue(note.record, "body") === "string";
   }
 
   function searchableDocument(note) {
@@ -7447,6 +7493,7 @@
       renderAccountGreeting();
       return;
     }
+    useWarmPreviewBody(note);
     state.selectedRecord = note.record;
     state.selectedRecordName = note.recordName;
     applyNoteFontStyle(note);
@@ -7476,9 +7523,9 @@
     $("rich-editor").classList.remove("toolbar-open");
 
     const nativeNeedsBody = state.nativeSchema && isNativeModelRecord(note.record, "CapturedNote") &&
-      !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "text") !== "string";
+      !noteBodyLoaded(note);
     const legacyNeedsBody = !state.nativeSchema && note.record.recordType === "ArborNote" &&
-      !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "body") !== "string";
+      !noteBodyLoaded(note);
     const needsBody = nativeNeedsBody || legacyNeedsBody;
     $("note-title").readOnly = needsBody;
     if (needsBody && (!state.database || browserOffline())) {
@@ -7487,7 +7534,17 @@
       const recordName = note.recordName;
       const session = state.accountSession;
       const loading = document.createElement("div");
-      loading.className = "editor-load-state"; loading.textContent = "Opening note…";
+      loading.className = "editor-load-state";
+      const status = document.createElement("span");
+      status.setAttribute("role", "status");
+      status.textContent = "Opening note…";
+      if (note.preview && !note.previewUnavailable) {
+        const excerpt = document.createElement("p");
+        excerpt.className = "editor-loading-excerpt";
+        excerpt.textContent = note.preview;
+        loading.append(excerpt);
+      }
+      loading.append(status);
       $("rich-editor").replaceChildren(loading);
       const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : ensureWebTextBody(note);
       bodyPromise.then(function () {
@@ -7637,6 +7694,8 @@
       state.previewRetryBlocks.delete(record.recordName);
     }
     state.records.set(record.recordName, record);
+    const warm = state.warmPreviewBodies.get(record.recordName);
+    if (warm && warm.requestRevision !== previewRecordRevision(record)) state.warmPreviewBodies.delete(record.recordName);
     if (cachedBodyIsStale(previous, record)) {
       state.bodyCache.delete(record.recordName);
       state.previewCache.delete(record.recordName);
@@ -7698,11 +7757,15 @@
         (changes.deletedRecords || []).forEach(function (record) {
           state.records.delete(record.recordName); state.bodyCache.delete(record.recordName);
           state.previewCache.delete(record.recordName); state.previewLoadErrors.delete(record.recordName);
+          state.warmPreviewBodies.delete(record.recordName);
           state.previewCacheRevision.delete(record.recordName); state.previewStaleNames.delete(record.recordName);
           state.previewRetryBlocks.delete(record.recordName);
         });
         token = changes.syncToken || token; state.syncToken = token;
-        syncDerivedCollections(); renderAll();
+        syncDerivedCollections();
+        // Visible notes can fill in while later pages of metadata arrive.
+        if (state.notes.length) state.previewHydrationReady = true;
+        renderAll();
         more = Boolean(changes.moreComing); safety += 1;
       }
     };
@@ -7830,6 +7893,7 @@
           state.records.delete(recordName);
           state.bodyCache.delete(recordName);
           state.previewCache.delete(recordName);
+          state.warmPreviewBodies.delete(recordName);
           state.previewLoadErrors.delete(recordName);
           state.previewCacheRevision.delete(recordName);
           state.previewStaleNames.delete(recordName);
@@ -7993,6 +8057,19 @@
       result.requestRevision === previewRecordRevision(result.record);
   }
 
+  function useWarmPreviewBody(note) {
+    if (noteBodyLoaded(note)) return;
+    const result = state.warmPreviewBodies.get(note.recordName);
+    if (!result) return;
+    state.warmPreviewBodies.delete(note.recordName);
+    const session = state.accountSession;
+    if (!previewResultCanOpen(note, result, session)) return;
+    state.records.set(note.recordName, result.record);
+    if (setOpenedBody(note, result.record, result.body, state.nativeSchema)) {
+      rememberRecordBody(note.recordName, result.body, session);
+    }
+  }
+
   function setOpenedBody(note, record, body, nativeSchema) {
     const currentNote = state.notes.find(function (item) { return item.recordName === note.recordName; });
     if (!currentNote) return false;
@@ -8112,7 +8189,7 @@
       return Promise.resolve(cachedBody);
     }
     if (note.bodyPromise) return note.bodyPromise;
-    if (typeof fieldValue(note.record, "body") === "string") {
+    if (noteBodyLoaded(note)) {
       const body = String(fieldValue(note.record, "body"));
       rememberRecordBody(note.recordName, body, state.accountSession);
       return Promise.resolve(body);

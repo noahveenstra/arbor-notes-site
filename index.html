@@ -34,7 +34,7 @@
   <link rel="preload" href="./vendor/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="./fonts.css?v=arb-21-109-geist-fonts-20261120-a">
   <link rel="stylesheet" href="./styles.css?v=arb-62-transparency-20261126-a">
-  <link rel="stylesheet" href="./ui.css?v=arb-218-popover-contained-20261128-a">
+  <link rel="stylesheet" href="./ui.css?v=arb-110-preview-footer-20261128-a">
   <link rel="stylesheet" href="./pwa.css?v=arb-94-update-action-20261119-a">
   <link rel="stylesheet" href="./shortcuts.css?v=arb-62-transparency-20261126-a">
   <script src="./cloudkit-config.js?v=cloudkit-20261124-production-b" data-required-global="ARBOR_CLOUDKIT_CONFIG"></script>
@@ -55,7 +55,7 @@
   <script src="./search-logic.js?v=arb-related-margin-20261125-a" data-required-global="ArborSearchLogic" defer></script>
   <script src="./note-sync.js?v=arb-214-remote-deletions-20261126-a" data-required-global="ArborNoteSync" defer></script>
   <script src="./launch-library.js?v=arb-214-save-conflict-20261126-a" data-required-global="ArborLaunchLibrary" defer></script>
-  <script src="./app-bootstrap.js?v=arb-190-native-body-fallback-20261128" defer></script>
+  <script src="./app-bootstrap.js?v=arb-190-reuse-previews-20261128-a" defer></script>
 </head>
 <body>
   <div class="shell-boot-error" id="shell-boot-error" role="alert" hidden>
@@ -77,7 +77,7 @@
         <p class="welcome-description" id="welcome-auth-description">Sign in to let this browser read and write notes in your iCloud private database.</p>
         <div class="welcome-auth" id="welcome-auth" hidden>
           <div id="apple-sign-in-button"></div>
-          <p class="welcome-privacy" id="welcome-privacy">Your notes sync to your private iCloud database. Apple can read note text stored in Arbor’s standard iCloud fields, even with Advanced Data Protection turned on. Recently opened notes are cached unencrypted in this browser. Unfinished Quick Captures are stored here unencrypted too. Signing out deletes that cache and any unfinished captures, and keeps your iCloud notes.</p>
+          <p class="welcome-privacy" id="welcome-privacy">Your notes sync to your private iCloud database. Apple can read note text stored in Arbor’s standard iCloud fields, even with Advanced Data Protection turned on. Short note previews and recently opened notes are cached unencrypted in this browser. Unfinished Quick Captures are stored here unencrypted too. Signing out deletes that cache and any unfinished captures, and keeps your iCloud notes.</p>
         </div>
         <p class="welcome-connected" id="welcome-connected" hidden>You’re connected with your Apple Account.</p>
         <button class="welcome-action" id="welcome-auth-continue" type="button" hidden>Continue</button>
@@ -605,7 +605,7 @@ Try replacing this example with something you want to remember.</textarea>
               <p>Advanced Data Protection adds end-to-end encryption to eligible CloudKit fields. Arbor’s standard note fields keep their usual protection when you turn it on. Larger notes can be saved as files in iCloud. Arbor has not verified their end-to-end protection. You manage this setting in your Apple Account. <a href="https://support.apple.com/en-us/108756" target="_blank" rel="noopener noreferrer">Read Apple’s guide to Advanced Data Protection</a>.</p>
               <p>Arbor reads and writes notes, proofreading dictionary entries, and keyboard shortcut preferences in the Apple account you sign in with. Shortcut preferences contain Arbor command names and key combinations, not note content. Signing out of this browser removes notes, metadata, dictionary entries, shortcut preferences, and search data cached here. The app shell and Arbor’s public search model stay on this device. They do not include your notes. Notes and dictionary entries stored in iCloud stay in iCloud.</p>
               <p>The name in Settings stays in this browser. It is not written to iCloud. Each word of that name is added to the proofreading dictionary, and those dictionary entries sync with the Apple Account you sign in with. A note’s revision history on this browser keeps the name you were using when that revision was saved.</p>
-              <p>Recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. Unfinished Quick Captures and a few edits that have not reached iCloud are stored unencrypted here until they save or you sign out. Clearing site data or running low on storage can erase an edit before it reaches iCloud. Safari can also clear a site's data after seven days of Safari use without interaction with the site.</p>
+              <p>Short note previews and recently opened notes are cached unencrypted in this browser. Signing out deletes that cache. It does not delete your iCloud notes. Unfinished Quick Captures and a few edits that have not reached iCloud are stored unencrypted here until they save or you sign out. Clearing site data or running low on storage can erase an edit before it reaches iCloud. Safari can also clear a site's data after seven days of Safari use without interaction with the site.</p>
               <p>Ignoring a proofreading suggestion stores the marked text and a short excerpt on either side in this browser. Ignored words and counts of accepted or dismissed suggestions also stay on this device, in the IndexedDB database <code>arbor-web-proofreading-learning</code>. Signing out deletes the database.</p>
               <p>To connect to iCloud, this page loads Apple’s CloudKit JS library from <code>cdn.apple-cloudkit.com</code>. It runs in this page alongside the note editor. Apple serves and controls that library; Arbor does not host or pin its contents. Sign-in and note requests go directly from this browser to Apple’s CloudKit service.</p>
             </details>

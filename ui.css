@@ -442,6 +442,7 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 #note-page { width: 100%; margin: 0 auto; }
 #note-title { width: min(var(--note-body-width), 100%); margin: 0 auto 28px; }
 #rich-editor { position: relative; min-height: 300px; }
+#rich-editor .editor-loading-excerpt { margin: 0; color: var(--label); font-size: 15px; overflow-wrap: anywhere; }
 #rich-editor .note-body { width: min(var(--note-body-width), 100%); margin: 0 auto; }
 #empty-state { min-height: 0; border: 0; border-radius: 0; background: transparent; }
 #note-list .note-row { display: grid; grid-template-columns: auto minmax(0, 1fr); column-gap: 8px; row-gap: 2px; align-items: baseline; margin: 3px 0; padding: 11px 10px 10px; border: 1px solid transparent; border-radius: 11px; }
@@ -449,9 +450,9 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 #note-list .note-row.is-selected, #note-list .note-row.is-selected:hover { border-color: transparent; background: var(--surface-editor); box-shadow: none; }
 #note-list .note-row-title { grid-column: 1 / -1; margin-bottom: 2px; font-size: 14px; font-weight: 650; line-height: 1.35; }
 #note-list .note-card-detail, #note-list .note-row-footer { display: contents; }
-#note-list .note-row-date { grid-column: 1; grid-row: 2; margin: 0; color: var(--label); font: 560 12px/1.35 var(--font-sans); }
-#note-list .note-card-preview { grid-column: 1 / -1; grid-row: 3; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
-#note-list .note-row-folder { grid-column: 2; grid-row: 2; justify-self: end; max-width: 100%; margin: 0; overflow: hidden; color: var(--secondary-label); font: 11px/1.25 var(--font-sans); text-overflow: ellipsis; white-space: nowrap; }
+#note-list .note-row-date { grid-column: 1; grid-row: 3; margin: 0; color: var(--label); font: 560 12px/1.35 var(--font-sans); }
+#note-list .note-card-preview { grid-column: 1 / -1; grid-row: 2; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; }
+#note-list .note-row-folder { grid-column: 2; grid-row: 3; justify-self: end; max-width: 100%; margin: 0; overflow: hidden; color: var(--secondary-label); font: 11px/1.25 var(--font-sans); text-overflow: ellipsis; white-space: nowrap; }
 #note-list .note-row-folder img { width: 12px; height: 10px; }
 #sidebar .settings-link { height: 32px; padding-left: 12px; background: transparent; }
 @media (max-width: 760px) {

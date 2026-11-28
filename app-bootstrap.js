@@ -20,7 +20,7 @@ const CLOUDKIT_WEB_ZONE_URL = "./cloudkit-web-zone.mjs?v=arb-17-native-field-con
 const CLOUDKIT_WEB_SERVICES_URL = "./cloudkit-encrypted-web-services.mjs?v=arb-235-batched-archive-20261128-a";
 const NOTE_SELECTION_URL = "./note-selection.mjs?v=arb-221-post370-20261127-a";
 const NOTE_METADATA_URL = "./note-metadata.mjs?v=arb-235-batched-archive-20261128-a";
-const APP_SCRIPT_URL = "./app.js?v=arb-235-batched-archive-20261128-a";
+const APP_SCRIPT_URL = "./app.js?v=arb-236-responsive-notes-20261128-a";
 const PROOFREADING_SCHEDULE_URL = "./proofreading-schedule.mjs?v=arb-always-on-proofreading-20261125-a";
 let startupStatusTimer = null;
 

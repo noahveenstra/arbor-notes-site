@@ -83,6 +83,7 @@
     savePromise: Promise.resolve(),
     noteStyleSavePromise: Promise.resolve(),
     saveFlightCount: 0,
+    noteSaveFlights: new Map(),
     saveGeneration: 0,
     draftBaseline: null,
     connectionUserID: null,
@@ -262,6 +263,7 @@
   let shortcutCloseTimer = 0;
   let themeTransitionGeneration = 0;
   let noteListTransitionGeneration = 0;
+  let activeNoteListTransition = null;
   let folderActionPath = "";
   let folderActionInvoker = null;
   let folderArchivePendingPath = "";
@@ -527,6 +529,7 @@
     state.libraryLoadSlowMessage = "";
     state.loadRecordsErrorMessage = "";
     state.records = new Map();
+    state.noteSaveFlights = new Map();
     state.pendingNewNoteRecords.clear();
     state.pendingNewNoteNavigation.clear();
     state.restoreHiddenNoteName = "";
@@ -709,7 +712,8 @@
           for (const row of bodies.result) {
             state.savedBodyRows.set(row.name, row);
             const record = state.records.get(row.name);
-            if (record && row.revision === previewRecordRevision(record) && typeof row.body === "string") {
+            if (record && (row.revision === libraryBodyCacheRevision(record) || row.revision === previewRecordRevision(record)) &&
+                typeof row.body === "string") {
               state.bodyCache.set(row.name, row.body);
             }
           }
@@ -773,7 +777,7 @@
     for (const [name, body] of state.bodyCache) {
       const record = state.records.get(name);
       if (!record || state.pendingNewNoteRecords.has(name)) continue;
-      const revision = previewRecordRevision(record);
+      const revision = libraryBodyCacheRevision(record);
       const existing = saved.get(name);
       bodies.set(name, existing && existing.body === body && existing.revision === revision
         ? existing : { key: key, name: name, revision: revision, body: body });
@@ -1951,14 +1955,20 @@
     refreshLexicalIndex(changedNoteID);
   }
 
+  const noteListDateFormats = {
+    time: new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }),
+    weekday: new Intl.DateTimeFormat(undefined, { weekday: "long" }),
+    date: new Intl.DateTimeFormat(undefined, { month: "numeric", day: "numeric", year: "2-digit" })
+  };
+
   function formatDate(date) {
     const now = new Date();
     const startToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const startDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
     const days = Math.round((startToday.getTime() - startDate.getTime()) / 86400000);
-    if (days === 0) return new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(date).replace(/\s/g, "");
-    if (days > 0 && days < 7) return new Intl.DateTimeFormat(undefined, { weekday: "long" }).format(date);
-    return new Intl.DateTimeFormat(undefined, { month: "numeric", day: "numeric", year: "2-digit" }).format(date);
+    if (days === 0) return noteListDateFormats.time.format(date).replace(/\s/g, "");
+    if (days > 0 && days < 7) return noteListDateFormats.weekday.format(date);
+    return noteListDateFormats.date.format(date);
   }
 
   function editorDate(date) {
@@ -2152,38 +2162,51 @@
 
     const title = document.createElement("span");
     title.className = "note-card-title note-row-title";
-    title.textContent = note.title;
-    card.appendChild(title);
     const detail = document.createElement("span");
     detail.className = "note-card-detail";
     const preview = document.createElement("span");
     preview.className = "note-card-preview note-row-excerpt";
-    renderNotePreview(preview, note);
     detail.appendChild(preview);
-    card.appendChild(detail);
 
     const footer = document.createElement("span");
-    footer.className = "note-row-footer" + (note.folderPath ? "" : " is-unfiled");
+    footer.className = "note-row-footer";
     const date = document.createElement("span");
     date.className = "note-card-date note-row-date";
-    date.textContent = formatDate(note[noteSorting.displayDateFieldFor(state.preferences.noteSortOrder)]);
     footer.appendChild(date);
-    if (note.folderPath) {
-      const folder = document.createElement("span");
-      folder.className = "note-card-folder note-row-folder";
-      folder.appendChild(folderIcon(false));
-      folder.appendChild(document.createTextNode(note.folderPath.split("/").pop()));
-      footer.appendChild(folder);
-    }
-    card.appendChild(footer);
-    if (note.starred) {
-      const star = document.createElement("span");
-      star.className = "card-star";
-      star.textContent = "★";
-      star.setAttribute("aria-label", "Starred");
-      card.appendChild(star);
-    }
+    card.append(title, detail, footer);
     return card;
+  }
+
+  function updateNoteCard(card, note, dateField) {
+    const title = card.querySelector(".note-row-title");
+    if (title.textContent !== note.title) title.textContent = note.title;
+    renderNotePreview(card.querySelector(".note-row-excerpt"), note);
+    const date = card.querySelector(".note-row-date");
+    const dateText = formatDate(note[dateField]);
+    if (date.textContent !== dateText) date.textContent = dateText;
+
+    if (card.dataset.folderPath !== note.folderPath) {
+      card.dataset.folderPath = note.folderPath;
+      const footer = card.querySelector(".note-row-footer");
+      footer.querySelector(".note-row-folder")?.remove();
+      footer.classList.toggle("is-unfiled", !note.folderPath);
+      if (note.folderPath) {
+        const folder = document.createElement("span");
+        folder.className = "note-card-folder note-row-folder";
+        folder.append(folderIcon(false), document.createTextNode(note.folderPath.split("/").pop()));
+        footer.appendChild(folder);
+      }
+    }
+
+    const star = card.querySelector(".card-star");
+    if (!note.starred) star?.remove();
+    else if (!star) {
+      const indicator = document.createElement("span");
+      indicator.className = "card-star";
+      indicator.textContent = "★";
+      indicator.setAttribute("aria-label", "Starred");
+      card.appendChild(indicator);
+    }
   }
 
   function orderedVisibleNotes() {
@@ -2249,6 +2272,7 @@
       const batchSelected = state.noteSelectionSelectedIDs.has(card.dataset.recordName);
       card.tabIndex = on ? 0 : -1;
       card.classList.toggle("is-cursor", on);
+      card.classList.toggle("is-selected", card.dataset.recordName === state.selectedRecordName);
       card.classList.toggle("is-batch-selected", batchSelected);
       card.setAttribute("aria-selected", selecting
         ? (batchSelected ? "true" : "false")
@@ -2286,14 +2310,18 @@
     const previousSignature = list.dataset.motionSignature;
     const skipTransition = state.skipNextListTransition;
     state.skipNextListTransition = false;
-    const render = function () { renderNoteList(list, visible, signature); };
+    const generation = ++noteListTransitionGeneration;
+    const root = document.documentElement;
+    const render = function () {
+      if (generation === noteListTransitionGeneration) renderNoteList(list, visible, signature);
+    };
     if (previousSignature === undefined || previousSignature === signature || skipTransition || typeof document.startViewTransition !== "function") {
+      activeNoteListTransition?.skipTransition();
+      root.classList.remove("is-note-list-transitioning");
       render();
       return;
     }
 
-    const generation = ++noteListTransitionGeneration;
-    const root = document.documentElement;
     root.classList.add("is-note-list-transitioning");
     let transition;
     try {
@@ -2303,20 +2331,24 @@
       render();
       return;
     }
+    activeNoteListTransition = transition;
+    transition.ready.catch(function () {});
     const finish = function () {
+      if (activeNoteListTransition === transition) activeNoteListTransition = null;
       if (generation === noteListTransitionGeneration) root.classList.remove("is-note-list-transitioning");
     };
     transition.finished.then(finish, finish);
   }
 
   function renderNoteList(list, visible, signature) {
-    const previouslyVisiblePreviews = new Set(state.previewVisibleNames);
-    if (state.previewObserver) {
-      state.previewObserver.disconnect();
-      state.previewObserver = null;
+    const existingCards = new Map(Array.from(list.querySelectorAll(".note-card"), card => [card.dataset.recordName, card]));
+    const visibleNames = new Set(visible.map(note => note.recordName));
+    for (const [name, card] of existingCards) {
+      if (!visibleNames.has(name)) {
+        state.previewObserver?.unobserve(card);
+        state.previewVisibleNames.delete(name);
+      }
     }
-    state.previewVisibleNames.clear();
-    list.replaceChildren();
     list.dataset.motionSignature = signature;
     if (state.loadingRecords) list.setAttribute("aria-busy", "true");
     else list.removeAttribute("aria-busy");
@@ -2332,6 +2364,7 @@
     }
     $("list-heading").textContent = state.showingArchive ? "Archive" : (state.selectedFolder ? state.selectedFolder.split("/").pop() : "All Notes");
     if (!visible.length) {
+      list.replaceChildren();
       list.removeAttribute("aria-activedescendant");
       if (noteSelectionOperation?.optimisticArchive) {
         setListMessage("", false, false);
@@ -2360,50 +2393,60 @@
       setListMessage(state.libraryLoadSlowMessage || "Your loaded notes remain available while Arbor checks iCloud for updates.", true, false, false);
     } else setListMessage("", false, false);
     const dateField = noteSorting.dateFieldFor(state.preferences.noteSortOrder);
-    function observeRenderedCard(card, note) {
-      observeNativePreview(card, note);
-      if (previouslyVisiblePreviews.has(note.recordName) && previewWithinPrefetchRegion(card, list)) {
-        state.previewVisibleNames.add(note.recordName);
-        renderNotePreview(card.querySelector(".note-row-excerpt"), note);
-      }
-    }
-    if (!dateField) {
-      visible.forEach(function (note) {
-        const card = renderNoteCard(note);
-        list.appendChild(card);
-        observeRenderedCard(card, note);
-      });
-      applyListCursor();
-      enqueueVisiblePreviews();
-      return;
-    }
+    const displayDateField = noteSorting.displayDateFieldFor(state.preferences.noteSortOrder);
+    const newCards = [];
     const groups = new Map();
-    visible.forEach(function (note) {
-      const label = dateGroup(note[dateField]);
+    for (const note of visible) {
+      let card = existingCards.get(note.recordName);
+      if (!card) {
+        card = renderNoteCard(note);
+        newCards.push({ card, note });
+      }
+      updateNoteCard(card, note, displayDateField);
+      const label = dateField ? dateGroup(note[dateField]) : "";
       if (!groups.has(label)) groups.set(label, []);
-      groups.get(label).push(note);
-    });
-    groups.forEach(function (notes, label) {
-      const section = document.createElement("section");
-      section.className = "date-group";
-      section.setAttribute("role", "group");
-      const heading = document.createElement("h2");
-      heading.className = "date-group-title note-group-title";
-      heading.id = "note-group-" + label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
-      heading.textContent = label;
-      heading.setAttribute("aria-hidden", "true");
-      section.setAttribute("aria-labelledby", heading.id);
-      section.appendChild(heading);
-      const noteRows = notes.map(function (note) {
-        const card = renderNoteCard(note);
-        section.appendChild(card);
-        return { note: note, card: card };
-      });
-      list.appendChild(section);
-      noteRows.forEach(function (entry) { observeRenderedCard(entry.card, entry.note); });
-    });
+      groups.get(label).push(card);
+    }
+
+    if (!dateField) reconcileNoteChildren(list, groups.get(""));
+    else {
+      const existingGroups = new Map(Array.from(list.children, section => [section.dataset.dateGroup, section]));
+      const sections = [];
+      for (const [label, cards] of groups) {
+        let section = existingGroups.get(label);
+        if (!section) {
+          section = document.createElement("section");
+          section.className = "date-group";
+          section.dataset.dateGroup = label;
+          section.setAttribute("role", "group");
+          const heading = document.createElement("h2");
+          heading.className = "date-group-title note-group-title";
+          heading.id = "note-group-" + label.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+          heading.textContent = label;
+          heading.setAttribute("aria-hidden", "true");
+          section.setAttribute("aria-labelledby", heading.id);
+          section.appendChild(heading);
+        }
+        reconcileNoteChildren(section, [section.firstElementChild, ...cards]);
+        sections.push(section);
+      }
+      reconcileNoteChildren(list, sections);
+    }
+    for (const { card, note } of newCards) observeNativePreview(card, note);
     applyListCursor();
     enqueueVisiblePreviews();
+  }
+
+  function reconcileNoteChildren(parent, children) {
+    const keep = new Set(children);
+    for (const child of Array.from(parent.children)) {
+      if (!keep.has(child)) child.remove();
+    }
+    let cursor = parent.firstElementChild;
+    for (const child of children) {
+      if (child === cursor) cursor = cursor.nextElementSibling;
+      else parent.insertBefore(child, cursor);
+    }
   }
 
   function renderNoteSkeleton(list, dateField) {
@@ -7708,13 +7751,35 @@
         renderUnavailableNoteBody(recordName);
       });
     } else {
-      rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
+      if (!state.noteSaveFlights.has(note.recordName)) {
+        rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
+      }
       createEditor(note.editorBody);
       revealRecoveredDraft(note);
     }
     if (window.matchMedia("(max-width: 760px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
     renderNotes();
     renderAccountGreeting();
+  }
+
+  async function prepareEditorNavigation(useBackgroundSave) {
+    const recordName = state.selectedRecordName;
+    const saves = state.noteSaveFlights.get(recordName) || [];
+    if (useBackgroundSave && !state.pendingEditFlush && saves.length <= 1) {
+      if (!state.dirty) {
+        if (!saves.length || sameSyncDocument(draftFor(recordName), saves[0])) return true;
+      } else if (!saves.length) {
+        persistCurrentDraft();
+        if (sameSyncDocument(draftFor(recordName), editorDraftParts())) {
+          flushSave().catch(function () {});
+          return true;
+        }
+      }
+    }
+    await flushSave();
+    if (!state.dirty || sameSyncDocument(draftFor(state.selectedRecordName), editorDraftParts())) return true;
+    showSaveProblem("This browser couldn’t store your latest edit. Keep this note open until it saves to iCloud.", state.selectedRecordName);
+    return false;
   }
 
   async function openNote(recordName, options) {
@@ -7730,19 +7795,15 @@
     }
     try {
       await state.noteStyleSavePromise.catch(function () {});
-      await flushSave();
+      const target = state.notes.find(function (item) { return item.recordName === recordName; });
+      if (!(await prepareEditorNavigation(noteBodyLoaded(target)))) return false;
       const hasSavedLibrary = state.paintedFromCache && state.cacheKey;
       if (session !== state.accountSession || state.accountCacheSuspended || (!state.database && !hasSavedLibrary)) return false;
-      if (state.dirty && !sameSyncDocument(draftFor(state.selectedRecordName), editorDraftParts())) {
-        showSaveProblem("This browser couldn’t store your latest edit. Keep this note open until it saves to iCloud.", state.selectedRecordName);
-        return false;
-      }
       const note = state.notes.find(function (item) { return item.recordName === recordName; });
       if (!note) return false;
       prepareNoteTabOpen(recordName, tabIntent);
       if (!options || !options.skipHistory) recordNoteHistory(recordName);
-      state.selectedRecordName = recordName;
-      renderAll(); selectNote(note);
+      selectNote(note);
       return true;
     } catch (error) { showToast(readableError(error), true); }
     return false;
@@ -7808,8 +7869,23 @@
     return ensured.zoneID || cloudKitWebZone.ARBOR_WEB_ZONE_ID;
   }
 
+  function webBodyFingerprint(record) {
+    return record?.recordType === "ArborNote" ? String(fieldValue(record, "contentFingerprint") || "") : "";
+  }
+
+  function sameWebBody(previous, next) {
+    const fingerprint = webBodyFingerprint(previous);
+    return fingerprint && fingerprint === webBodyFingerprint(next) &&
+      fieldValue(previous, "bodyStorageRaw") === fieldValue(next, "bodyStorageRaw");
+  }
+
+  function libraryBodyCacheRevision(record) {
+    const fingerprint = webBodyFingerprint(record);
+    return fingerprint ? "body:" + fingerprint + ":" + String(fieldValue(record, "bodyStorageRaw") || "") : previewRecordRevision(record);
+  }
+
   function cachedBodyIsStale(previous, next) {
-    if (!previous) return false;
+    if (!previous || sameWebBody(previous, next)) return false;
     const previousChangeTag = String(previous.recordChangeTag || "");
     const nextChangeTag = String(next.recordChangeTag || "");
     if (previousChangeTag && nextChangeTag && previousChangeTag !== nextChangeTag) return true;
@@ -7837,6 +7913,8 @@
       state.previewCacheRevision.delete(record.recordName);
       state.previewStaleNames.add(record.recordName);
       state.previewLoadErrors.delete(record.recordName);
+    } else if (previous && previewIsCurrent(record.recordName, previous)) {
+      state.previewCacheRevision.set(record.recordName, previewRecordRevision(record));
     }
   }
 
@@ -7988,6 +8066,7 @@
       let more = true;
       let safety = 0;
       const changedNames = new Set();
+      const cachedMetadataChanges = new Set();
       const deletedNames = new Set();
       while (more && safety < 1000) {
         if (!accountSessionCurrent(session) || database !== state.database || zoneID !== state.nativeZoneID) return;
@@ -8015,16 +8094,22 @@
         (changes.records || []).forEach(function (record) {
           if (!cloudKitWebZone.isLibraryRecord(record, nativeSchema)) return;
           deletedNames.delete(record.recordName);
+          const previous = state.records.get(record.recordName);
+          if (previous?.recordChangeTag && previous.recordChangeTag === record.recordChangeTag) return;
           changedNames.add(record.recordName);
           if (record.recordName === state.selectedRecordName && (state.dirty || state.saveFlightCount > 0)) {
             state.pendingRemoteRecords.set(record.recordName, record);
             return;
           }
+          if (sameWebBody(previous, record) && state.bodyCache.has(record.recordName)) {
+            cachedMetadataChanges.add(record.recordName);
+          } else cachedMetadataChanges.delete(record.recordName);
           applyLibraryRecord(record);
         });
         (changes.deletedRecords || []).forEach(function (record) {
           const recordName = record.recordName;
           changedNames.delete(recordName);
+          cachedMetadataChanges.delete(recordName);
           deletedNames.add(recordName);
           if (recordName === state.selectedRecordName && noteEditInProgress(recordName)) {
             state.pendingRemoteRecords.set(recordName, null);
@@ -8051,7 +8136,9 @@
         !state.dirty && state.saveFlightCount === 0;
       let selectedDocument = null;
       let selectedRecord = null;
-      if (selectedChanged) {
+      if (selectedChanged && cachedMetadataChanges.has(selectedName) && !state.pendingRemoteRecords.has(selectedName)) {
+        state.selectedRecord = state.records.get(selectedName);
+      } else if (selectedChanged) {
         const fullResponse = assertResponse(await database.fetchRecords([selectedName], { zoneID: zoneID }));
         selectedRecord = (fullResponse.records || []).find(function (record) { return record.recordName === selectedName; });
         if (selectedRecord) {
@@ -8073,11 +8160,21 @@
         syncDerivedCollections();
         if (deletedNames.has(state.selectedRecordName) && !state.records.has(state.selectedRecordName)) {
           const remaining = restoreOpenTabsForLoadedNotes();
+          state.skipNextListTransition = true;
           selectRestoredNote(remaining.note);
         }
         if (selectedRecord && selectedDocument && !state.dirty && state.saveFlightCount === 0) {
           applyRemoteDocumentToActiveEditor(selectedRecord, selectedDocument);
+        } else if (selectedChanged && cachedMetadataChanges.has(selectedName) && state.selectedRecordName === selectedName) {
+          const note = state.notes.find(item => item.recordName === selectedName);
+          if (note) {
+            applyNoteFontStyle(note);
+            renderNoteDate(note);
+            renderAboutPanel();
+          }
         }
+        // Sync can finish during a click. Keep surviving rows interactive.
+        state.skipNextListTransition = true;
         renderAll();
         enqueueChangedVisiblePreviews(changedNames);
         queueLibraryTextFill(session);
@@ -9445,6 +9542,9 @@
   function currentEditorBodyMarkdown() {
     const selectedNote = state.notes.find(function (note) { return note.recordName === state.selectedRecordName; });
     if (!state.bodyDirty || !state.editor) {
+      // A library refresh can replace the list entry while its text is being saved.
+      const saves = state.noteSaveFlights.get(state.selectedRecordName);
+      if (state.editor && saves?.length) return saves[saves.length - 1].body;
       if (selectedNote && typeof selectedNote.editorBody === "string") return selectedNote.editorBody;
       const storedBody = state.nativeSchema
         ? fieldValue(state.selectedRecord, "text")
@@ -9995,10 +10095,12 @@
     const draft = recoveredDraftFor(note.recordName);
     if (!draft) return false;
     if (!draftDiffers(draft, note) && !state.recoveredEditNames.has(note.recordName)) {
-      clearDraft(note.recordName);
+      if (!state.noteSaveFlights.has(note.recordName)) clearDraft(note.recordName);
       return false;
     }
-    state.draftBaseline = {
+    const saves = state.noteSaveFlights.get(note.recordName);
+    const savingDraft = !state.recoveredEditNames.has(note.recordName) && sameSyncDocument(saves?.[saves.length - 1], draft);
+    state.draftBaseline = savingDraft ? null : {
       recordName: note.recordName,
       title: note.title,
       body: note.body,
@@ -10016,7 +10118,8 @@
     fitTitle();
     if (state.editor) { state.editor.destroy(); state.editor = null; }
     createEditor(draft.body);
-    state.dirty = true;
+    state.dirty = !savingDraft;
+    if (savingDraft) return true;
     if (browserOffline()) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, note.recordName);
     showDraftBanner();
     window.clearTimeout(state.saveTimer);
@@ -10133,7 +10236,14 @@
     if (browserOffline()) showSaveProblem(OFFLINE_UNSAVED_MESSAGE, recordName);
     window.clearTimeout(state.saveTimer);
     state.saveTimer = window.setTimeout(function () { flushSave().catch(function () {}); }, 350);
-    if (pendingCreation) renderNotes();
+    if (pendingCreation && note) {
+      const row = document.getElementById("note-row-" + recordName.replace(/[^A-Za-z0-9_-]/g, ""));
+      if (Boolean(row) !== noteVisible(note)) {
+        state.skipNextListTransition = true;
+        renderNotes();
+      } else if (row) updatePreviewRow(recordName);
+      if (bodyChanged === false) renderOpenNoteTabs();
+    }
     renderAccountGreeting();
   }
 
@@ -10408,7 +10518,7 @@
         await flushSave();
         continue;
       }
-      if (state.selectedRecordName === edit.recordName && state.saveFlightCount > 0) continue;
+      if (state.noteSaveFlights.has(edit.recordName)) continue;
       const record = state.records.get(edit.recordName);
       if (!record) continue;
       const based = recordForPendingEdit(record, edit);
@@ -10476,6 +10586,10 @@
         : !accountSessionCurrent(session));
     };
     state.dirty = false;
+    const noteSaveFlights = state.noteSaveFlights;
+    const flights = noteSaveFlights.get(recordName) || [];
+    flights.push(parts);
+    noteSaveFlights.set(recordName, flights);
     state.saveFlightCount += 1;
     state.savePromise = state.savePromise.catch(function () {}).then(async function () {
       try {
@@ -10504,8 +10618,13 @@
         adoptSavedPendingBase(recordName, saved, savedDocument);
         const savedMarkdown = state.nativeSchema ? savedDocument.body : savedDocument.title + "\n\n" + savedDocument.body;
         rememberRecordBody(recordName, savedMarkdown, session);
-        let newerEdit = state.selectedRecordName === recordName && state.dirty;
-        if (state.selectedRecordName === recordName && !newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
+        const active = state.selectedRecordName === recordName;
+        const storedDraft = draftFor(recordName);
+        const pendingDocument = recoveredEditDocument(pendingEditFor(recordName));
+        const newerDraft = (storedDraft && !sameSyncDocument(storedDraft, parts)) ||
+          (pendingDocument && !sameSyncDocument(pendingDocument, parts));
+        let newerEdit = active && state.dirty;
+        if (active && !newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
           replaceActiveEditorDocument(recordName, savedDocument);
         } else if (newerEdit && !sameSyncDocument(submittedDocument, savedDocument)) {
           const currentDocument = editorDraftParts();
@@ -10527,7 +10646,7 @@
           }
           newerEdit = true;
         }
-        if (isFirstSaveForNewNote) {
+        if (isFirstSaveForNewNote && state.pendingNewNoteRecords.has(recordName)) {
           state.pendingNewNoteRecords.delete(recordName);
           const pendingNavigation = state.pendingNewNoteNavigation.get(recordName) || {};
           state.pendingNewNoteNavigation.delete(recordName);
@@ -10559,7 +10678,7 @@
           }
           scheduleLibraryCacheWrite();
         }
-        if (!newerEdit) {
+        if (!newerEdit && !newerDraft) {
           clearDraft(recordName);
           dropPendingEdit(recordName);
         }
@@ -10581,11 +10700,14 @@
       } catch (error) {
         if (superseded()) return;
         const newerEdit = state.selectedRecordName === recordName && state.dirty;
-        if (!newerEdit) persistDraftSnapshot(recordName, parts);
+        const storedDraft = draftFor(recordName);
+        if (!newerEdit && (!storedDraft || sameSyncDocument(storedDraft, parts))) persistDraftSnapshot(recordName, parts);
         if (state.selectedRecordName === recordName) state.dirty = true;
         showSaveProblem(saveProblemMessage(error), recordName);
         throw error;
       } finally {
+        flights.shift();
+        if (!flights.length) noteSaveFlights.delete(recordName);
         state.saveFlightCount = Math.max(0, state.saveFlightCount - 1);
         if (state.saveFlightCount === 0 && state.pendingRemoteRecords.has(recordName) && accountSessionCurrent(session)) {
           window.setTimeout(function () { refreshZoneRecords(session); }, 0);
@@ -10630,7 +10752,7 @@
     const session = state.accountSession;
     const navigationBefore = navigationSnapshot();
     try {
-      await flushSave();
+      if (!(await prepareEditorNavigation(true))) return;
       if (!accountSessionCurrent(session)) return;
       const id = crypto.randomUUID().toUpperCase();
       const recordName = state.nativeSchema ? "CD_CapturedNote_" + id : "Note-" + id;
@@ -10653,9 +10775,8 @@
       state.records.set(recordName, record);
       state.pendingNewNoteRecords.add(recordName);
       state.pendingNewNoteNavigation.set(recordName, { navigationBefore: navigationBefore, historyRecorded: false });
-      syncDerivedCollections();
+      syncDerivedCollections(recordName);
       state.skipNextListTransition = true;
-      renderAll();
       const opened = await openNote(recordName, { tabIntent: "new", skipHistory: true });
       if (!opened || !accountSessionCurrent(session)) return;
       const body = $("note-body");

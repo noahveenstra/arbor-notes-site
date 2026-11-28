@@ -123,20 +123,29 @@ export async function openUndoHistory(options) {
     get undoLabel() { return undoStack.length ? undoStack[undoStack.length - 1].label : ""; },
     get redoLabel() { return redoStack.length ? redoStack[redoStack.length - 1].label : ""; },
     record: function (action) {
-      if (closed || !action || !action.kind || !action.target) return Promise.resolve(false);
-      const next = cloneValue(action);
-      const now = Number(next.updatedAt) || Date.now();
-      next.updatedAt = now;
-      next.label = String(next.label || "Change");
-      const previous = undoStack[undoStack.length - 1];
-      if (next.groupKey && previous && previous.groupKey === next.groupKey && now - previous.updatedAt <= UNDO_GROUP_WINDOW_MS) {
-        previous.after = next.after;
-        previous.afterSelection = next.afterSelection;
-        previous.updatedAt = now;
-        previous.label = next.label;
-      } else {
-        undoStack.push(next);
+      return controller.recordMany([action]);
+    },
+    recordMany: function (actions) {
+      if (closed) return Promise.resolve(false);
+      let recorded = false;
+      for (const action of actions) {
+        if (!action || !action.kind || !action.target) continue;
+        const next = cloneValue(action);
+        const now = Number(next.updatedAt) || Date.now();
+        next.updatedAt = now;
+        next.label = String(next.label || "Change");
+        const previous = undoStack[undoStack.length - 1];
+        if (next.groupKey && previous && previous.groupKey === next.groupKey && now - previous.updatedAt <= UNDO_GROUP_WINDOW_MS) {
+          previous.after = next.after;
+          previous.afterSelection = next.afterSelection;
+          previous.updatedAt = now;
+          previous.label = next.label;
+        } else {
+          undoStack.push(next);
+        }
+        recorded = true;
       }
+      if (!recorded) return Promise.resolve(false);
       redoStack = [];
       trimHistory();
       notify();

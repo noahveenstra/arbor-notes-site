@@ -61,3 +61,80 @@ export function mergeNoteMetadataAcknowledgement(original, operation, acknowledg
     fields: Object.assign({}, original.fields || {}, requested.fields || {}, acknowledgement.fields || {})
   });
 }
+
+const TEMPORARY_METADATA_ERRORS = new Set([
+  "NETWORK_ERROR", "INVALID_RESPONSE", "REQUEST_RATE_LIMITED", "SERVICE_UNAVAILABLE",
+  "TRY_AGAIN_LATER", "THROTTLED", "ZONE_BUSY", "INTERNAL_ERROR", "UNKNOWN_OUTCOME"
+]);
+const UNCERTAIN_METADATA_ERRORS = new Set(["NETWORK_ERROR", "INVALID_RESPONSE", "UNKNOWN_OUTCOME"]);
+
+function metadataResultError(value) {
+  if (value instanceof Error) return value;
+  const error = new Error(value ? "iCloud could not update this note." : "iCloud did not confirm this note’s update.");
+  error.code = value?.serverErrorCode || "UNKNOWN_OUTCOME";
+  error.retryAfter = value?.retryAfter;
+  return error;
+}
+
+async function metadataAcknowledgements(records, send) {
+  try {
+    return new Map(((await send(records)).records || []).map(record => [record.recordName, record]));
+  } catch (error) {
+    return new Map(records.map(operation => [operation.record.recordName, error]));
+  }
+}
+
+export async function writeNoteMetadataBatch(operations, { write, lookup, isCurrent, wait }) {
+  const results = new Map();
+  const uncertain = new Map();
+  let pending = operations;
+  const delays = [250, 750];
+  for (let attempt = 0; pending.length && isCurrent(); attempt++) {
+    const replies = await metadataAcknowledgements(pending, write);
+    const retry = [];
+    let delay = delays[attempt];
+    for (const operation of pending) {
+      const name = operation.record.recordName;
+      const reply = replies.get(name);
+      if (reply && !(reply instanceof Error) && !reply.serverErrorCode) {
+        results.set(name, { record: reply });
+        uncertain.delete(name);
+        continue;
+      }
+      const error = metadataResultError(reply);
+      results.set(name, { error });
+      if (UNCERTAIN_METADATA_ERRORS.has(error.code) || error.httpStatus >= 500) {
+        uncertain.set(name, operation);
+      }
+      const temporary = TEMPORARY_METADATA_ERRORS.has(error.code) || error.httpStatus === 429 || error.httpStatus >= 500;
+      // Leave requests with a longer server cooldown available for a later retry.
+      const retryAfter = (Number(error.retryAfter) || 0) * 1000;
+      if (temporary && attempt < delays.length && retryAfter <= 5000) {
+        retry.push(operation);
+        delay = Math.max(delay, retryAfter);
+      }
+    }
+    pending = retry;
+    if (pending.length && isCurrent()) await wait(delay);
+  }
+
+  // A lost response can hide an accepted write. Check the requested fields
+  // before reporting failure, without retrying a newer record revision.
+  if (uncertain.size && isCurrent()) {
+    try {
+      const names = Array.from(uncertain.keys());
+      const fields = Array.from(new Set(Array.from(uncertain.values()).flatMap(operation => Object.keys(operation.record.fields))));
+      const response = await lookup(names, fields);
+      for (const record of response.records || []) {
+        const operation = uncertain.get(record.recordName);
+        if (operation && !record.serverErrorCode && Object.entries(operation.record.fields).every(([name, field]) =>
+          record.fields?.[name]?.value === field.value)) {
+          results.set(record.recordName, { record, recovered: true });
+        }
+      }
+    } catch (_) {
+      // Keep the last failure so the note stays available for a manual retry.
+    }
+  }
+  return results;
+}

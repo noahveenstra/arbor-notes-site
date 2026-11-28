@@ -289,6 +289,7 @@ function cloudKitError(message, payload, { operation = null, httpStatus = null }
   const code = safeErrorCode(payload);
   const error = new Error(`${message} (${code}).`);
   error.code = code;
+  if (Number.isFinite(payload?.retryAfter) && payload.retryAfter >= 0) error.retryAfter = payload.retryAfter;
   if (typeof operation === "string" && /^[a-z]+(?:\/[a-z]+)+$/.test(operation)) error.operation = operation;
   if (Number.isInteger(httpStatus) && httpStatus >= 0) error.httpStatus = httpStatus;
   return error;

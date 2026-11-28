@@ -59,6 +59,7 @@
     showingArchive: false,
     actionMenuRecordName: null,
     actionMenuInvoker: null,
+    actionMenuSelection: false,
     listCursor: null,
     selectedRecordName: null,
     noteSelectionSelectedIDs: new Set(),
@@ -120,6 +121,11 @@
     pendingRemoteRecords: new Map(),
     cacheDBPromise: null,
     bodyCache: new Map(),
+    savedBodyRows: new Map(),
+    prepareInitialNotes: false,
+    retryInitialNotes: null,
+    libraryTextFill: null,
+    libraryTextRetryTimer: null,
     previewCache: new Map(),
     previewCacheRevision: new Map(),
     warmPreviewBodies: new Map(),
@@ -411,19 +417,23 @@
     const opening = loadAccountCache().then(function (cache) {
       if (!window.indexedDB || state.accountCacheSuspended) return null;
       return new Promise(function (resolve) {
-        const request = indexedDB.open(cache.LIBRARY_CACHE_DATABASE, 1);
+        const request = indexedDB.open(cache.LIBRARY_CACHE_DATABASE, 2);
+        let blocked = false;
         request.onupgradeneeded = function () {
           const db = request.result;
           if (!db.objectStoreNames.contains("libraries")) db.createObjectStore("libraries", { keyPath: "key" });
+          if (!db.objectStoreNames.contains("noteBodies")) {
+            db.createObjectStore("noteBodies", { keyPath: ["key", "name"] }).createIndex("library", "key");
+          }
         };
         request.onsuccess = function () {
           const db = request.result;
           db.onversionchange = function () { db.close(); };
-          if (state.accountCacheSuspended) { db.close(); resolve(null); return; }
+          if (blocked || state.accountCacheSuspended) { db.close(); resolve(null); return; }
           resolve(db);
         };
         request.onerror = function () { resolve(null); };
-        request.onblocked = function () { resolve(null); };
+        request.onblocked = function () { blocked = true; resolve(null); };
       });
     }).catch(function () { return null; });
     state.cacheDBPromise = opening;
@@ -524,7 +534,16 @@
     state.dictionarySyncPromise = null;
     state.dictionarySyncStatus = "Sign in to sync your dictionary.";
     state.dictionarySyncError = null;
+    noteSelection.exit();
+    state.noteSelectionSelectedIDs.clear();
+    closeNoteActions(false);
     state.bodyCache = new Map();
+    state.savedBodyRows = new Map();
+    state.prepareInitialNotes = false;
+    state.retryInitialNotes = null;
+    state.libraryTextFill = null;
+    window.clearTimeout(state.libraryTextRetryTimer);
+    state.libraryTextRetryTimer = null;
     resetPreviewHydration();
     state.previewCache = new Map();
     state.previewCacheRevision = new Map();
@@ -577,6 +596,35 @@
     const title = $("note-title");
     if (title) title.value = "";
     if ($("note-workspace") && $("empty-state") && $("rich-editor")) selectNote(null);
+  }
+
+  function resetSignedOutAccount() {
+    const session = ++state.accountSession;
+    state.accountCacheSuspended = true;
+    state.cacheKey = null;
+    state.database = null;
+    state.connectionUserID = null;
+    state.user = null;
+    state.paintedFromCache = false;
+    state.shortcutStorageKey = "";
+    state.shortcutOperations = [];
+    state.shortcutBindings = window.ArborShortcuts ? window.ArborShortcuts.resolveShortcutBindings([]) : [];
+    state.shortcutRecordingId = "";
+    state.shortcutSyncStatus = "Sign in to sync shortcuts with your Apple Account.";
+    state.shortcutSyncError = null;
+    renderSettingsShortcuts();
+    state.noteHistory = { recordNames: [], index: -1 };
+    state.noteHistoryAccountKey = "";
+    state.noteRevisions = [];
+    state.accountSettings = { name: "", nameDictionary: {} };
+    state.nativeSchema = false;
+    discardInMemoryLibrary();
+    renderAll();
+    updateUndoControls();
+    updateArborName();
+    setConnection("Not connected", false);
+    showWelcomeSignedOut();
+    return session;
   }
 
   function accountCacheEnvironment() {
@@ -635,14 +683,30 @@
     if (!db || !current()) return false;
     return await new Promise(function (resolve) {
       try {
-        const request = db.transaction("libraries", "readonly").objectStore("libraries").get(key);
-        request.onsuccess = function () {
+        const tx = db.transaction(["libraries", "noteBodies"], "readonly");
+        const request = tx.objectStore("libraries").get(key);
+        const bodies = tx.objectStore("noteBodies").index("library").getAll(key);
+        tx.oncomplete = function () {
           if (!current()) { resolve(false); return; }
           const cached = request.result;
           if (!cached || !Array.isArray(cached.records)) { resolve(false); return; }
           state.records = new Map(cached.records.map(function (record) { return [record.recordName, record]; }));
           state.syncToken = cached.syncToken || null; state.nativeZoneID = cached.nativeZoneID || null;
-          state.bodyCache = new Map(Array.isArray(cached.bodies) ? cached.bodies : []);
+          state.prepareInitialNotes = cached.prepareInitialNotes === true;
+          state.bodyCache = new Map();
+          state.savedBodyRows = new Map();
+          for (const entry of Array.isArray(cached.bodies) ? cached.bodies : []) {
+            if (Array.isArray(entry) && state.records.has(entry[0]) && typeof entry[1] === "string") {
+              state.bodyCache.set(entry[0], entry[1]);
+            }
+          }
+          for (const row of bodies.result) {
+            state.savedBodyRows.set(row.name, row);
+            const record = state.records.get(row.name);
+            if (record && row.revision === previewRecordRevision(record) && typeof row.body === "string") {
+              state.bodyCache.set(row.name, row.body);
+            }
+          }
           for (const entry of Array.isArray(cached.previews) ? cached.previews.slice(-MAX_SAVED_PREVIEWS) : []) {
             if (!Array.isArray(entry)) continue;
             const [name, revision, text] = entry;
@@ -671,7 +735,8 @@
           renderPersonalDictionarySettings();
           resolve(state.records.size > 0 || state.bodyCache.size > 0 || state.dictionaryEntries.length > 0 || state.dictionaryPending.length > 0);
         };
-        request.onerror = function () { resolve(false); };
+        tx.onerror = function () { resolve(false); };
+        tx.onabort = function () { resolve(false); };
       } catch (_) { resolve(false); }
     });
   }
@@ -687,15 +752,26 @@
   }
 
   async function writeLibraryCache() {
-    if (state.accountCacheSuspended || !state.cacheKey || !state.database) return;
+    const key = state.cacheKey;
+    const session = state.accountSession;
+    if (state.accountCacheSuspended || !key || !state.database) return;
     const db = await openLibraryCacheDB();
-    if (state.accountCacheSuspended || !state.cacheKey || !db) return;
+    if (state.accountCacheSuspended || state.cacheKey !== key || !accountSessionCurrent(session) || !db) return;
     const records = Array.from(state.records.values())
       .filter(function (record) {
         return cloudKitWebZone.isNoteOrFolderRecord(record) && !state.pendingNewNoteRecords.has(record.recordName);
       })
       .map(cacheableRecord);
-    const bodies = Array.from(state.bodyCache.entries());
+    const saved = state.savedBodyRows;
+    const bodies = new Map();
+    for (const [name, body] of state.bodyCache) {
+      const record = state.records.get(name);
+      if (!record || state.pendingNewNoteRecords.has(name)) continue;
+      const revision = previewRecordRevision(record);
+      const existing = saved.get(name);
+      bodies.set(name, existing && existing.body === body && existing.revision === revision
+        ? existing : { key: key, name: name, revision: revision, body: body });
+    }
     const previews = [];
     for (const [name, text] of state.previewCache) {
       const record = state.records.get(name);
@@ -705,13 +781,25 @@
     }
     await new Promise(function (resolve) {
       try {
-        const tx = db.transaction("libraries", "readwrite");
+        const tx = db.transaction(["libraries", "noteBodies"], "readwrite");
+        const store = tx.objectStore("noteBodies");
+        for (const [name, row] of bodies) {
+          if (saved.get(name) !== row) store.put(row);
+        }
+        for (const name of saved.keys()) {
+          if (!bodies.has(name)) store.delete([key, name]);
+        }
         tx.objectStore("libraries").put({
-          key: state.cacheKey, nativeZoneID: state.nativeZoneID, nativeSchema: state.nativeSchema, syncToken: state.syncToken,
-          records: records, bodies: bodies, previews: previews, dictionaryEntries: state.dictionaryEntries,
+          key: key, nativeZoneID: state.nativeZoneID, nativeSchema: state.nativeSchema, syncToken: state.syncToken,
+          records: records, previews: previews, dictionaryEntries: state.dictionaryEntries,
+          prepareInitialNotes: state.prepareInitialNotes,
           dictionaryPending: state.dictionaryPending, updatedAt: Date.now()
         });
-        tx.oncomplete = function () { resolve(); }; tx.onerror = function () { resolve(); }; tx.onabort = function () { resolve(); };
+        tx.oncomplete = function () {
+          if (accountSessionCurrent(session) && state.cacheKey === key) state.savedBodyRows = bodies;
+          resolve();
+        };
+        tx.onerror = function () { resolve(); }; tx.onabort = function () { resolve(); };
       } catch (_) { resolve(); }
     });
   }
@@ -1002,15 +1090,9 @@
     ].join("|");
   }
 
-  function rememberRecordBody(recordName, body, session) {
+  function rememberRecordBody(recordName, body, session, background) {
     if ((session != null && session !== state.accountSession) || state.accountCacheSuspended) return;
     state.bodyCache.delete(recordName); state.bodyCache.set(recordName, body);
-    const bodyLimit = launchLibrary && launchLibrary.OPENED_BODY_LIMIT || 30;
-    while (state.bodyCache.size > bodyLimit) {
-      const evicted = state.bodyCache.keys().next().value;
-      state.bodyCache.delete(evicted);
-      refreshLexicalNote(state.notes.find(note => note.recordName === evicted));
-    }
     const preview = previewText(body);
     const current = state.notes.find(function (note) { return note.recordName === recordName; });
     const record = state.records.get(recordName) || (current && current.record);
@@ -1029,6 +1111,7 @@
       current.preview = previewText(parts.body); current.previewUnavailable = false;
     }
     if (current) refreshLexicalNote(current);
+    if (background) return;
     if (state.searchPage || ($("search-dialog") && $("search-dialog").open)) rerenderActiveSearch();
     if (!state.cacheKey) return;
     scheduleLibraryCacheWrite();
@@ -1213,7 +1296,7 @@
         if (!current) return;
         const text = job.nativeSchema ? previewText(result.body) : previewText(splitDocument(result.body).body);
         rememberPreview(job.recordName, text, job.revision);
-        // A click can reuse this body in this tab. IndexedDB only gets the excerpt.
+        // A click can reuse this body before the library text download reaches it.
         if (result.body.length <= MAX_WARM_BODY_LENGTH) {
           state.warmPreviewBodies.delete(job.recordName);
           state.warmPreviewBodies.set(job.recordName, result);
@@ -1472,6 +1555,7 @@
     $("welcome-status").classList.remove("is-pending");
     const welcomeRetryButton = $("welcome-retry");
     welcomeRetryButton.hidden = true;
+    $("welcome-open-available").hidden = true;
     welcomeRetryButton.dataset.action = "";
     welcomeRetryButton.textContent = "Reload Arbor";
     const connected = Boolean(state.database && state.connectionUserID);
@@ -1532,6 +1616,8 @@
     $("welcome-step-label").hidden = true;
     setWelcomeStatus("Checking your Apple Account session…", true);
     $("welcome-retry").hidden = true;
+    $("welcome-retry").dataset.action = "";
+    $("welcome-open-available").hidden = true;
     frame.hidden = true;
   }
 
@@ -1973,6 +2059,54 @@
     return true;
   }
 
+  function bindNoteCardMenu(card, recordName) {
+    let touch = null;
+    let suppressTouchClick = false;
+    function cancelPress() {
+      if (touch) window.clearTimeout(touch.timer);
+      touch = null;
+    }
+    function openAt(x, y) {
+      state.listCursor = recordName;
+      applyListCursor();
+      openNoteContextMenu(recordName, x, y, card);
+    }
+    card.addEventListener("pointerdown", function (event) {
+      if (event.pointerType !== "touch" || !event.isPrimary) return;
+      cancelPress();
+      suppressTouchClick = false;
+      touch = { x: event.clientX, y: event.clientY, timer: window.setTimeout(function () {
+        if (!card.isConnected || !touch) return;
+        suppressTouchClick = true;
+        openAt(touch.x, touch.y);
+      }, 500) };
+    });
+    card.addEventListener("pointermove", function (event) {
+      if (touch && Math.hypot(event.clientX - touch.x, event.clientY - touch.y) > 8) cancelPress();
+    });
+    card.addEventListener("pointercancel", cancelPress);
+    card.addEventListener("pointerup", cancelPress);
+    card.addEventListener("click", function (event) {
+      if (!suppressTouchClick || event.detail === 0) return;
+      suppressTouchClick = false;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+    card.addEventListener("contextmenu", function (event) {
+      event.preventDefault();
+      if (suppressTouchClick && (touch || event.pointerType === "touch")) return;
+      if (touch || event.pointerType === "touch") suppressTouchClick = true;
+      cancelPress();
+      openAt(event.clientX, event.clientY);
+    });
+    card.addEventListener("keydown", function (event) {
+      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
+      event.preventDefault();
+      const rect = card.getBoundingClientRect();
+      openAt(rect.left + 16, rect.bottom - 8);
+    });
+  }
+
   function renderNoteCard(note) {
     const card = document.createElement("button");
     const cursor = note.recordName === state.listCursor;
@@ -1995,6 +2129,7 @@
     card.addEventListener("click", function (event) {
       state.listCursor = note.recordName;
       if (noteSelection.snapshot().active) {
+        if (state.noteSelectionBusy) return;
         noteSelection.toggle(note.recordName, event.shiftKey);
         renderNoteSelectionControls(orderedVisibleNotes());
         applyListCursor();
@@ -2002,18 +2137,7 @@
       }
       openNote(note.recordName);
     });
-    card.addEventListener("contextmenu", function (event) {
-      event.preventDefault();
-      state.listCursor = note.recordName;
-      applyListCursor();
-      openNoteContextMenu(note.recordName, event.clientX, event.clientY, card);
-    });
-    card.addEventListener("keydown", function (event) {
-      if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) return;
-      event.preventDefault();
-      const rect = card.getBoundingClientRect();
-      openNoteContextMenu(note.recordName, rect.left + 16, rect.bottom - 8, card);
-    });
+    bindNoteCardMenu(card, note.recordName);
 
     const title = document.createElement("span");
     title.className = "note-card-title note-row-title";
@@ -2072,64 +2196,20 @@
     const before = noteSelection.snapshot();
     const scopeChanged = before.active && before.scopeKey !== scope.key;
     if (!state.noteSelectionBusy || scopeChanged) noteSelection.reconcile(scope);
+    if (scopeChanged && state.actionMenuSelection) closeNoteActions(false);
     const selection = noteSelection.snapshot();
     state.noteSelectionSelectedIDs = new Set(selection.selectedIds);
-    const enter = $("note-selection-enter");
-    const toolbar = $("note-selection-toolbar");
-    const destination = $("note-selection-destination");
-    const selectedCount = selection.selectedIds.length;
-    const archived = state.showingArchive;
-    enter.hidden = Boolean(state.searchPage);
-    enter.disabled = Boolean(state.searchPage || !scope.ids.length || state.noteSelectionBusy);
-    enter.setAttribute("aria-pressed", String(selection.active));
-    enter.textContent = selection.active ? "Selecting" : "Select";
-    toolbar.hidden = !selection.active;
-    if (!selection.active) {
+    const list = $("note-list");
+    const summary = $("note-selection-summary");
+    if (selection.active) list.setAttribute("aria-multiselectable", "true");
+    else {
+      list.removeAttribute("aria-multiselectable");
       state.noteSelectionResult = "";
-      $("note-selection-result").hidden = true;
-      $("note-list").removeAttribute("aria-multiselectable");
-      return;
     }
-
-    $("note-list").setAttribute("aria-multiselectable", "true");
-    $("note-selection-summary").textContent = selectedCount
-      ? selectedCount + " selected · " + scope.ids.length + " notes in " + scope.label
-      : scope.ids.length + " notes in " + scope.label;
-    const selectAll = $("note-selection-select-all");
-    selectAll.textContent = "Select all (" + scope.ids.length + ")";
-    selectAll.setAttribute("aria-label", "Select all " + scope.ids.length + " notes in " + scope.label);
-    selectAll.disabled = !scope.ids.length || selectedCount === scope.ids.length || state.noteSelectionBusy;
-    $("note-selection-clear").disabled = !selectedCount || state.noteSelectionBusy;
-    $("note-selection-done").disabled = state.noteSelectionBusy;
-
-    const previousDestination = destination.value;
-    destination.replaceChildren();
-    const placeholder = document.createElement("option");
-    placeholder.value = "";
-    placeholder.textContent = "Choose destination";
-    destination.appendChild(placeholder);
-    const root = document.createElement("option");
-    root.value = "__all__";
-    root.textContent = "All Notes";
-    destination.appendChild(root);
-    state.folders.forEach(function (folder) {
-      const option = document.createElement("option");
-      option.value = folder.path;
-      option.textContent = folder.path;
-      destination.appendChild(option);
-    });
-    if (Array.from(destination.options).some(function (option) { return option.value === previousDestination; })) destination.value = previousDestination;
-    destination.hidden = archived;
-    destination.disabled = archived || !selectedCount || state.noteSelectionBusy || !state.database;
-    $("note-selection-move").hidden = archived;
-    $("note-selection-move").disabled = archived || !selectedCount || !destination.value || state.noteSelectionBusy || !state.database;
-    $("note-selection-new-folder").hidden = archived;
-    $("note-selection-new-folder").disabled = archived || !selectedCount || state.noteSelectionBusy || !state.database;
-    $("note-selection-delete").hidden = archived;
-    $("note-selection-delete").disabled = archived || !selectedCount || state.noteSelectionBusy || !state.database;
-    const result = $("note-selection-result");
-    result.textContent = state.noteSelectionResult;
-    result.hidden = !state.noteSelectionResult;
+    summary.textContent = selection.active
+      ? selection.selectedIds.length + " selected · " + scope.ids.length + " notes in " + scope.label
+      : "";
+    $("note-selection-result").textContent = state.noteSelectionResult;
   }
 
   function syncListCursor(visible) {
@@ -2144,13 +2224,14 @@
     const list = $("note-list");
     if (!list) return;
     let active = null;
+    const selecting = list.getAttribute("aria-multiselectable") === "true";
     list.querySelectorAll(".note-card").forEach(function (card) {
       const on = card.dataset.recordName === state.listCursor;
       const batchSelected = state.noteSelectionSelectedIDs.has(card.dataset.recordName);
       card.tabIndex = on ? 0 : -1;
       card.classList.toggle("is-cursor", on);
       card.classList.toggle("is-batch-selected", batchSelected);
-      card.setAttribute("aria-selected", noteSelection.snapshot().active
+      card.setAttribute("aria-selected", selecting
         ? (batchSelected ? "true" : "false")
         : (on ? "true" : "false"));
       if (on) active = card;
@@ -7607,13 +7688,6 @@
       rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
       createEditor(note.editorBody);
       revealRecoveredDraft(note);
-      // Cached notes can open offline; defer this proactive fetch until an online save needs it.
-      if (state.nativeSchema && state.bodyCache.has(note.recordName) &&
-          typeof fieldValue(note.record, "text") !== "string" && !fieldValue(note.record, "text_ckAsset") && !browserOffline()) {
-        ensureFullNativeRecord(note).catch(function (error) {
-          showToast("This note is cached, but CloudKit could not prepare it for editing: " + readableError(error), true);
-        });
-      }
     }
     if (window.matchMedia("(max-width: 760px)").matches) frame.classList.add("mobile-note-open", "mobile-editor-open");
     renderNotes();
@@ -7819,6 +7893,11 @@
     if (!accountSessionCurrent(session)) { state.loadingRecords = false; return; }
     state.libraryLoadOperation = ""; state.loadingRecords = false; state.libraryLoadSlow = false; state.libraryLoadSlowMessage = "";
     syncDerivedCollections(); renderAll();
+    if (!state.prepareInitialNotes) selectLoadedLibraryNote();
+    scheduleLibraryCacheWrite();
+  }
+
+  function selectLoadedLibraryNote() {
     const restoredState = restoreOpenTabsForLoadedNotes();
     const first = noteSorting.sortNotes(state.notes.filter(function (note) { return !isArchived(note.record); }), state.preferences.noteSortOrder)[0];
     const current = state.notes.find(function (note) { return note.recordName === state.selectedRecordName && !isArchived(note.record); });
@@ -7826,7 +7905,6 @@
     else if (restoredState.hidden) selectRestoredNote(null);
     else if (!state.preferences.tabsEnabled && currentNoteFromHistory()) selectRestoredNote(currentNoteFromHistory());
     else if (current) selectRestoredNote(current); else if (first) selectRestoredNote(first); else selectRestoredNote(null);
-    scheduleLibraryCacheWrite();
   }
 
   function sameSyncDocument(left, right) {
@@ -7876,7 +7954,7 @@
   }
 
   async function refreshZoneRecords(session) {
-    if (!accountSessionCurrent(session) || !state.nativeZoneID || document.visibilityState === "hidden") return;
+    if (!accountSessionCurrent(session) || state.prepareInitialNotes || !state.nativeZoneID || document.visibilityState === "hidden") return;
     if (state.realtimeSyncPromise) return state.realtimeSyncPromise;
     const database = state.database;
     const zoneID = state.nativeZoneID;
@@ -7978,6 +8056,7 @@
         }
         renderAll();
         enqueueChangedVisiblePreviews(changedNames);
+        queueLibraryTextFill(session);
         scheduleLibraryCacheWrite();
       }
       if (accountSessionCurrent(session)) setConnection("Using your Apple Account.", true);
@@ -8291,6 +8370,146 @@
     }));
   }
 
+  const FIRST_READY_NOTES = 100;
+  const LIBRARY_LOOKUP_BATCH = 25;
+  const LIBRARY_ASSET_CONCURRENCY = 4;
+  const LIBRARY_BATCH_TIMEOUT_MS = 20_000;
+  const LIBRARY_TEXT_RETRY_MS = 30_000;
+
+  function orderedLibraryNotes() {
+    const sorted = noteSorting.sortNotes(state.notes, state.preferences.noteSortOrder);
+    const active = [];
+    const archived = [];
+    for (const note of sorted) (isArchived(note.record) ? archived : active).push(note);
+    return active.concat(archived);
+  }
+
+  function libraryTextContext(session) {
+    const database = state.database;
+    const zoneID = state.nativeZoneID;
+    return {
+      database: database,
+      zoneID: zoneID,
+      nativeSchema: state.nativeSchema,
+      current: function () {
+        return accountSessionCurrent(session) && !state.accountCacheSuspended &&
+          database === state.database && zoneID === state.nativeZoneID;
+      }
+    };
+  }
+
+  async function readLibraryBodyBatch(jobs, context) {
+    const response = await context.database.fetchRecords(jobs.map(function (job) { return job.name; }), { zoneID: context.zoneID });
+    if (!context.current()) return [];
+    const records = new Map((response && response.records || []).map(function (record) { return [record.recordName, record]; }));
+    const texts = [];
+    for (let index = 0; index < jobs.length && context.current(); index += LIBRARY_ASSET_CONCURRENCY) {
+      const group = jobs.slice(index, index + LIBRARY_ASSET_CONCURRENCY);
+      const results = await Promise.allSettled(group.map(async function (job) {
+        const record = records.get(job.name);
+        if (!record || job.revision !== previewRecordRevision(record)) return null;
+        const body = context.nativeSchema
+          ? await loadNativeRecordBody(record, false)
+          : fieldValue(record, "bodyStorageRaw") === "asset"
+            ? await loadAssetBody(record)
+            : String(fieldValue(record, "body") || "");
+        return { name: job.name, revision: job.revision, body: body };
+      }));
+      for (const result of results) {
+        if (result.status === "fulfilled" && result.value) texts.push(result.value);
+      }
+    }
+    return texts;
+  }
+
+  async function fillLibraryBodies(notes, session, progress) {
+    const context = libraryTextContext(session);
+    const names = notes.map(function (note) { return note.recordName; });
+    for (let index = 0; index < names.length; index += LIBRARY_LOOKUP_BATCH) {
+      if (!context.current() || browserOffline() || (!progress && document.visibilityState === "hidden")) break;
+      const jobs = [];
+      let reusedInline = false;
+      for (const name of names.slice(index, index + LIBRARY_LOOKUP_BATCH)) {
+        const record = state.records.get(name);
+        if (!record || state.bodyCache.has(name) || state.pendingNewNoteRecords.has(name)) continue;
+        if (noteBodyLoaded({ recordName: name, record: record })) {
+          const body = fieldValue(record, context.nativeSchema ? "text" : "body");
+          rememberRecordBody(name, body, session, true);
+          updatePreviewRow(name);
+          reusedInline = true;
+        } else jobs.push({ name: name, revision: previewRecordRevision(record) });
+      }
+      if (reusedInline) {
+        scheduleLibraryCacheWrite();
+        if (progress) progress();
+      }
+      if (!jobs.length) continue;
+      let timer;
+      let cancelled = false;
+      const batchContext = { ...context, current: function () { return !cancelled && context.current(); } };
+      try {
+        const results = await Promise.race([
+          readLibraryBodyBatch(jobs, batchContext),
+          new Promise(function (_, reject) {
+            timer = window.setTimeout(function () { reject(new Error("iCloud note download timed out.")); }, LIBRARY_BATCH_TIMEOUT_MS);
+          })
+        ]);
+        if (!context.current()) return false;
+        for (const result of results) {
+          if (state.bodyCache.has(result.name) || result.revision !== previewRecordRevision(state.records.get(result.name))) continue;
+          if (state.selectedRecordName === result.name && noteEditInProgress(result.name)) continue;
+          rememberRecordBody(result.name, result.body, session, true);
+          updatePreviewRow(result.name);
+        }
+        scheduleLibraryCacheWrite();
+        if (progress) progress();
+        else if (state.searchPage || $("search-dialog").open) rerenderActiveSearch();
+      } catch (_) {
+        break;
+      } finally {
+        cancelled = true;
+        window.clearTimeout(timer);
+      }
+    }
+    return context.current() && names.every(function (name) {
+      return !state.records.has(name) || state.bodyCache.has(name);
+    });
+  }
+
+  async function prepareFirstNotes(session) {
+    const notes = orderedLibraryNotes().filter(function (note) { return !isArchived(note.record); }).slice(0, FIRST_READY_NOTES);
+    const showProgress = function () {
+      const ready = notes.filter(function (note) { return state.bodyCache.has(note.recordName); }).length;
+      setWelcomeStatus("Preparing your notes… " + ready + " of " + notes.length + " ready", true);
+    };
+    if (notes.length) showProgress();
+    return fillLibraryBodies(notes, session, showProgress);
+  }
+
+  function queueLibraryTextFill(session) {
+    if (!accountSessionCurrent(session) || state.prepareInitialNotes || !state.previewHydrationReady ||
+        state.loadingRecords || state.libraryTextFill || state.libraryTextRetryTimer || browserOffline() ||
+        document.visibilityState === "hidden") return;
+    const missing = orderedLibraryNotes().filter(function (note) {
+      return !state.bodyCache.has(note.recordName) && !state.pendingNewNoteRecords.has(note.recordName);
+    });
+    if (!missing.length) return;
+    const filling = fillLibraryBodies(missing, session);
+    state.libraryTextFill = filling;
+    filling.then(function (complete) {
+      if (state.libraryTextFill !== filling) return;
+      state.libraryTextFill = null;
+      if (!accountSessionCurrent(session)) return;
+      if (complete) queueLibraryTextFill(session);
+      else {
+        state.libraryTextRetryTimer = window.setTimeout(function () {
+          state.libraryTextRetryTimer = null;
+          queueLibraryTextFill(session);
+        }, LIBRARY_TEXT_RETRY_MS);
+      }
+    });
+  }
+
   async function connectUser(identity) {
     if (!identity) return;
     const signedInDuringWelcome = !$("welcome-screen").hidden && $("welcome-screen").dataset.step === "auth";
@@ -8375,7 +8594,7 @@
     state.loadRecordsErrorMessage = "";
     setConnection("Preparing your private notes…", false);
     updateArborName();
-    showApp();
+    if (keepCachedLibrary) showApp();
     renderAll();
     let preparationSlowTimer = window.setTimeout(function () {
       if (session !== state.accountSession || !state.loadingRecords) return;
@@ -8393,7 +8612,9 @@
     try {
       const restored = await restoreLibraryCache();
       if (session !== state.accountSession) return;
-      if (restored) {
+      if (!restored) state.prepareInitialNotes = !firstRunComplete(userID);
+      if (restored && !state.prepareInitialNotes) {
+        showApp();
         syncDerivedCollections(); renderAll();
         const restoredState = restoreOpenTabsForLoadedNotes();
         const paintedNote = keepCachedLibrary
@@ -8405,36 +8626,21 @@
         else if (paintedNote) selectRestoredNote(paintedNote);
         else selectNote(null);
         setConnection("Connected · refreshing notes…", true);
-      } else setConnection("Loading your notes from iCloud…", false);
+      } else {
+        if (!state.prepareInitialNotes) showApp();
+        setConnection("Loading your notes from iCloud…", false);
+        setWelcomeStatus("Preparing your notes…", true);
+      }
       if (session !== state.accountSession) return;
       window.clearTimeout(preparationSlowTimer);
       preparationSlowTimer = null;
       state.libraryLoadSlow = false;
       state.libraryLoadSlowMessage = "";
-      if (!(await loadZoneRecordsWithFeedback(session))) return;
-      if (session !== state.accountSession) return;
-      state.previewHydrationReady = true;
-      queueNativePreview();
-      flushPendingEdits();
-      startRealtimeSync(session);
-      configureRealtimeNotifications(session);
-      await syncPersonalDictionary(session);
-      if (session === state.accountSession) reconcileDisplayNameDictionary();
-      await syncKeyboardShortcutPreferences(session);
-      if (session !== state.accountSession) return;
-      setConnection("Using your Apple Account.", true);
-      retryVisibleCapture();
-      if (state.notes.length) {
-        markFirstRunComplete(userID);
-        showApp();
-      } else if (firstRunComplete(userID)) {
-        showApp();
-      } else {
-        showWelcomeStep(signedInDuringWelcome ? "note" : "intro");
-      }
+      await loadConnectedLibrary(session, userID, signedInDuringWelcome);
     } catch (error) {
       if (session !== state.accountSession) return;
       window.clearTimeout(preparationSlowTimer);
+      showApp();
       if (state.loadingRecords) {
         state.loadingRecords = false;
         state.libraryLoadSlow = false;
@@ -8444,11 +8650,82 @@
         setListMessage(state.loadRecordsErrorMessage, true, true, true);
       }
       setConnection("Signed in · Sync needs attention", false);
-      if (!state.notes.length && !state.loadingRecords) {
-        setListMessage(readableError(error), true, true, true);
-      }
+      if (!state.notes.length && !state.loadingRecords) setListMessage(readableError(error), true, true, true);
       showToast(readableError(error), true);
     }
+  }
+
+  async function loadConnectedLibrary(session, userID, signedInDuringWelcome) {
+    const available = $("welcome-open-available");
+    const retry = $("welcome-retry");
+    const retryPreparation = function (message) {
+      setWelcomeStatus(message, false);
+      retry.textContent = "Try Again";
+      retry.hidden = false;
+      state.retryInitialNotes = function () {
+        if (!accountSessionCurrent(session)) return;
+        retry.hidden = true;
+        available.hidden = true;
+        setWelcomeStatus("Preparing your notes…", true);
+        return loadConnectedLibrary(session, userID, signedInDuringWelcome);
+      };
+    };
+    if (!(await loadZoneRecordsWithFeedback(session))) {
+      if (!accountSessionCurrent(session)) return;
+      if (state.prepareInitialNotes) {
+        retryPreparation(state.loadRecordsErrorMessage || "Arbor couldn’t load your notes from iCloud.");
+      } else showApp();
+      return;
+    }
+    if (!accountSessionCurrent(session)) return;
+    if (state.prepareInitialNotes) {
+      const ready = await prepareFirstNotes(session);
+      if (!accountSessionCurrent(session)) return;
+      if (!ready) {
+        retryPreparation("Some notes couldn’t download. Try again or open the notes already available.");
+        available.hidden = false;
+        available.onclick = function () {
+          available.hidden = true;
+          if (!accountSessionCurrent(session)) return;
+          state.retryInitialNotes = null;
+          finishLibraryConnection(session, userID, signedInDuringWelcome).catch(function (error) {
+            if (accountSessionCurrent(session)) showToast(readableError(error), true);
+          });
+        };
+        return;
+      }
+    }
+    await finishLibraryConnection(session, userID, signedInDuringWelcome);
+  }
+
+  async function finishLibraryConnection(session, userID, signedInDuringWelcome) {
+    if (state.prepareInitialNotes) {
+      state.prepareInitialNotes = false;
+      if (state.notes.length) showApp();
+      selectLoadedLibraryNote();
+      scheduleLibraryCacheWrite(0);
+    }
+    state.previewHydrationReady = true;
+    queueNativePreview();
+    queueLibraryTextFill(session);
+    flushPendingEdits();
+    startRealtimeSync(session);
+    configureRealtimeNotifications(session);
+    if (state.notes.length) {
+      markFirstRunComplete(userID);
+      showApp();
+    } else if (firstRunComplete(userID)) {
+      showApp();
+    } else {
+      showWelcomeStep(signedInDuringWelcome ? "note" : "intro");
+    }
+    await syncPersonalDictionary(session);
+    if (!accountSessionCurrent(session)) return;
+    reconcileDisplayNameDictionary();
+    await syncKeyboardShortcutPreferences(session);
+    if (!accountSessionCurrent(session)) return;
+    setConnection("Using your Apple Account.", true);
+    retryVisibleCapture();
   }
 
   const NOTE_LOAD_SLOW_NOTICE_MS = 10_000;
@@ -8461,6 +8738,7 @@
         ? "Your loaded notes remain available while Arbor checks iCloud for updates. This is taking longer than usual."
         : "Still loading your notes from iCloud. This is taking longer than usual; Arbor will show them here as soon as they arrive.";
       setConnection(state.notes.length ? "Still checking iCloud for note updates…" : "Still loading your notes from iCloud…", false);
+      if (state.prepareInitialNotes) setWelcomeStatus("Still preparing your notes. Arbor is waiting for iCloud…", true);
       renderAll();
     }, NOTE_LOAD_SLOW_NOTICE_MS);
     try {
@@ -8493,10 +8771,7 @@
     setConnection("Refreshing notes…", false);
     if (!(await loadZoneRecordsWithFeedback(session))) return;
     if (session !== state.accountSession) return;
-    await syncPersonalDictionary(session);
-    if (session === state.accountSession) reconcileDisplayNameDictionary();
-    await syncKeyboardShortcutPreferences(session);
-    if (session === state.accountSession) setConnection("Using your Apple Account.", true);
+    await finishLibraryConnection(session, state.connectionUserID, false);
   }
 
   const AUTH_RESTORE_TIMEOUT_MS = 15_000;
@@ -8671,47 +8946,21 @@
       });
       restoreAppleSession(false);
       state.container.whenUserSignsOut().then(function () {
+        if (state.accountCacheSuspended && !state.connectionUserID) return;
         const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts() || state.editQueue.length > 0;
-        const session = ++state.accountSession;
-        const undoClose = detachUndoHistory();
-        // Wipe unsaved-edit drafts right away. The queued cache delete below also
-        // calls clearDrafts, which is safe to run twice.
         clearDrafts();
-        state.accountCacheSuspended = true;
-        state.cacheKey = null;
-        state.database = null;
-        updateUndoControls();
-        state.connectionUserID = null;
-        state.user = null;
-        state.shortcutStorageKey = "";
-        state.shortcutOperations = [];
-        state.shortcutBindings = window.ArborShortcuts ? window.ArborShortcuts.resolveShortcutBindings([]) : [];
-        state.shortcutRecordingId = "";
-        state.shortcutSyncStatus = "Sign in to sync shortcuts with your Apple Account.";
-        state.shortcutSyncError = null;
-        renderSettingsShortcuts();
-        state.noteHistory = { recordNames: [], index: -1 };
-        state.noteHistoryAccountKey = "";
-        state.noteRevisions = [];
-        state.accountSettings = { name: "", nameDictionary: {} };
+        const session = resetSignedOutAccount();
         persistAccountSettings();
-        state.nativeSchema = false;
-        discardInMemoryLibrary();
-        renderAll();
-        updateArborName();
-        setConnection("Not connected", false);
-        showWelcomeSignedOut();
         if (hadUnsaved) showToast("Signed out. Unsaved edits on this browser were removed.", true);
-        return enqueueAccountPersistence(function () {
+        return enqueueAccountPersistence(async function () {
           if (session !== state.accountSession) return;
-          return Promise.resolve(undoClose).then(function () { return loadAccountCache(); }).then(function (cache) {
-            if (session !== state.accountSession) return;
-            return cache.clearAccountCaches(accountCacheEnvironment());
-          });
+          const cache = await loadAccountCache();
+          if (session === state.accountSession) await cache.clearAccountCaches(accountCacheEnvironment());
         });
       });
       window.addEventListener("online", function () {
-        if (state.database && !state.accountCacheSuspended) {
+        if (state.database && !state.accountCacheSuspended && !state.prepareInitialNotes) {
+          queueLibraryTextFill(state.accountSession);
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
           syncKeyboardShortcutPreferences(state.accountSession);
@@ -8728,7 +8977,8 @@
         }
       });
       document.addEventListener("visibilitychange", function () {
-        if (document.visibilityState === "visible" && state.database && !state.accountCacheSuspended) {
+        if (document.visibilityState === "visible" && state.database && !state.accountCacheSuspended && !state.prepareInitialNotes) {
+          queueLibraryTextFill(state.accountSession);
           refreshZoneRecords(state.accountSession);
           syncPersonalDictionary(state.accountSession);
           syncKeyboardShortcutPreferences(state.accountSession);
@@ -11414,10 +11664,12 @@
     }
   }
 
-  function enterNoteSelection() {
+  function enterNoteSelection(recordName) {
     if (state.searchPage || state.noteSelectionBusy) return;
     const visible = orderedVisibleNotes();
     noteSelection.enter(currentNoteSelectionScope(visible));
+    noteSelection.toggle(recordName, false);
+    state.listCursor = recordName;
     state.noteSelectionResult = "";
     state.noteSelectionSelectedIDs = new Set();
     renderNoteSelectionControls(visible);
@@ -11640,15 +11892,12 @@
     if (operationStillCurrent && summary) showToast(summary, summaryIsError);
   }
 
-  async function confirmMoveSelectedNotes() {
+  async function confirmMoveSelectedNotes(folderPath) {
     const capturedContext = captureSelectedNoteBatch();
     const batch = capturedContext.batch;
     const captured = batch.selection;
     if (!captured.selectedIds.length || state.noteSelectionBusy || !batch.available) return;
-    let folderPath = $("note-selection-destination").value;
-    if (!folderPath) return;
-    const destinationPath = folderPath;
-    const destination = destinationPath === "__all__" ? "All Notes" : destinationPath;
+    const destination = folderPath || "All Notes";
     const dialog = $("note-selection-move-confirm");
     $("note-selection-move-copy").textContent = "Move " + captured.selectedIds.length + " selected notes from " + capturedContext.scope.label + " to " + destination + "?";
     dialog.returnValue = "";
@@ -11661,7 +11910,6 @@
       }
       return;
     }
-    if (folderPath === "__all__") folderPath = "";
     await performSelectedNoteBatch({
       label: "Moving",
       successLabel: "Moved",
@@ -11709,6 +11957,7 @@
         ? "Folder creation was canceled. The selected notes were not moved."
         : "Folder creation failed: " + folderResult.error + " The selected notes were not moved.";
       renderNoteSelectionControls(orderedVisibleNotes());
+      if (!folderResult.canceled) showToast(state.noteSelectionResult, true);
       return;
     }
     const folderPath = folderResult.path;
@@ -11728,7 +11977,7 @@
     const captured = batch.selection;
     if (!captured.selectedIds.length || state.showingArchive || state.noteSelectionBusy || !batch.available) return;
     const dialog = $("note-selection-delete-confirm");
-    $("note-selection-delete-copy").textContent = "Delete " + captured.selectedIds.length + " selected notes from " + capturedContext.scope.label + "? They will move to Archive, where you can restore them. Permanent deletion is not available here.";
+    $("note-selection-delete-copy").textContent = "Move " + captured.selectedIds.length + " selected notes from " + capturedContext.scope.label + " to Archive? You can restore them from Archive.";
     dialog.returnValue = "";
     dialog.showModal();
     await new Promise(function (resolve) { dialog.addEventListener("close", resolve, { once: true }); });
@@ -12690,6 +12939,7 @@
     const invoker = state.actionMenuInvoker;
     state.actionMenuRecordName = null;
     state.actionMenuInvoker = null;
+    state.actionMenuSelection = false;
     if (restoreFocus && invoker && invoker.isConnected && typeof invoker.focus === "function") invoker.focus();
   }
 
@@ -12916,7 +13166,7 @@
     const maxTop = Math.max(8, window.innerHeight / zoom - height - 8);
     menu.style.left = Math.max(8, Math.min(maxLeft, Number(clientX || 8) / zoom)) + "px";
     menu.style.top = Math.max(8, Math.min(maxTop, Number(clientY || 8) / zoom)) + "px";
-    const first = menu.querySelector('[role="menuitem"]:not([hidden])');
+    const first = menu.querySelector('[role="menuitem"]:not([hidden]):not(:disabled)');
     if (first) first.focus({ preventScroll: true });
   }
 
@@ -12930,9 +13180,36 @@
     const archiveButton = $("context-archive-note");
     const openButton = $("context-open-note");
     const archived = isArchived(note.record);
+    const fromRail = Boolean(invoker && invoker.classList.contains("note-card"));
+    const selected = fromRail && state.noteSelectionSelectedIDs.has(recordName);
+    if (fromRail && !selected && noteSelection.snapshot().active) {
+      if (state.noteSelectionBusy) return;
+      exitNoteSelection();
+    }
     state.actionMenuRecordName = recordName;
     state.actionMenuInvoker = invoker || document.activeElement;
+    state.actionMenuSelection = selected;
+    menu.setAttribute("aria-label", selected ? "Selected note actions" : "Note actions");
+    $("note-selection-summary").hidden = !selected;
+    if (selected) menu.setAttribute("aria-describedby", "note-selection-summary");
+    else menu.removeAttribute("aria-describedby");
+    openButton.hidden = selected;
     folderButton.hidden = archived;
+    folderButton.disabled = selected && (state.noteSelectionBusy || !state.database);
+    archiveButton.hidden = selected;
+    $("context-select-note").hidden = selected || !fromRail || state.searchPage;
+    $("context-select-note").disabled = state.noteSelectionBusy;
+    const scope = noteSelection.snapshot();
+    const selectAll = $("note-selection-select-all");
+    selectAll.hidden = !selected || scope.selectedIds.length === scope.scopeIds.length;
+    selectAll.disabled = state.noteSelectionBusy;
+    $("note-selection-done").hidden = !selected;
+    $("note-selection-done").disabled = state.noteSelectionBusy;
+    for (const id of ["note-selection-new-folder", "note-selection-delete"]) {
+      const action = $(id);
+      action.hidden = !selected || archived;
+      action.disabled = state.noteSelectionBusy || !state.database;
+    }
     folderButton.setAttribute("aria-expanded", "false");
     const openLabel = state.preferences.tabsEnabled ? "Open in New Tab" : "Open Note";
     openButton.querySelector("span").textContent = openLabel;
@@ -12945,7 +13222,8 @@
       const name = folder.path.split("/").pop();
       leafNames.set(name, (leafNames.get(name) || 0) + 1);
     });
-    submenu.innerHTML = folders.length ? folders.map(function (folder) {
+    const rootDestination = selected ? '<button class="note-folder-item" type="button" role="menuitem" tabindex="-1" data-folder-path=""><span>All Notes</span></button>' : "";
+    submenu.innerHTML = rootDestination + (folders.length ? folders.map(function (folder) {
       const descendants = folder.path + "/";
       const count = state.notes.filter(function (candidate) {
         return !isArchived(candidate.record) && (candidate.folderPath === folder.path || candidate.folderPath.indexOf(descendants) === 0);
@@ -12953,9 +13231,9 @@
       const leaf = folder.path.split("/").pop();
       const label = leafNames.get(leaf) > 1 ? folder.path : leaf;
       const depth = Math.max(0, folder.path.split("/").length - 1);
-      const current = note.folderPath === folder.path ? ' aria-current="true"' : "";
+      const current = !selected && note.folderPath === folder.path ? ' aria-current="true"' : "";
       return '<button class="note-folder-item" type="button" role="menuitem" tabindex="-1" data-depth="' + depth + '" style="padding-left:calc(var(--space-3) + ' + depth + 'rem)" data-folder-path="' + escapeHTML(folder.path) + '"' + current + '><span>' + escapeHTML(label) + '</span><span class="note-folder-item-count">' + count + '</span></button>';
-    }).join("") : '<div class="note-folder-empty">No folders yet.</div>';
+    }).join("") : selected ? "" : '<div class="note-folder-empty">No folders yet.</div>');
     setMotionVisibility(submenu, false);
     setMotionVisibility(menu, true);
     const zoom = Number.parseFloat(getComputedStyle(document.body).zoom) || 1;
@@ -13196,31 +13474,32 @@
       });
     });
     $("new-folder-button").addEventListener("click", createFolder);
-    $("note-selection-enter").addEventListener("click", enterNoteSelection);
+    $("context-select-note").addEventListener("click", function () {
+      const name = state.actionMenuRecordName;
+      closeNoteActions(true);
+      if (name) enterNoteSelection(name);
+    });
     $("note-selection-select-all").addEventListener("click", function () {
+      closeNoteActions(true);
       if (state.noteSelectionBusy) return;
       noteSelection.selectAll();
       renderNoteSelectionControls(orderedVisibleNotes());
       applyListCursor();
     });
-    $("note-selection-clear").addEventListener("click", function () {
-      if (state.noteSelectionBusy) return;
-      noteSelection.clear();
-      state.noteSelectionResult = "";
-      renderNoteSelectionControls(orderedVisibleNotes());
-      applyListCursor();
+    $("note-selection-done").addEventListener("click", function () {
+      closeNoteActions(true);
+      exitNoteSelection();
     });
-    $("note-selection-done").addEventListener("click", exitNoteSelection);
-    $("note-selection-destination").addEventListener("change", function () {
-      renderNoteSelectionControls(orderedVisibleNotes());
+    $("note-selection-new-folder").addEventListener("click", function () {
+      closeNoteActions(true);
+      createFolderWithSelectedNotes();
     });
-    $("note-selection-move").addEventListener("click", function () {
-      confirmMoveSelectedNotes();
+    $("note-selection-delete").addEventListener("click", function () {
+      closeNoteActions(true);
+      confirmDeleteSelectedNotes();
     });
-    $("note-selection-new-folder").addEventListener("click", createFolderWithSelectedNotes);
-    $("note-selection-delete").addEventListener("click", confirmDeleteSelectedNotes);
     $("note-list").addEventListener("keydown", function (event) {
-      if (!noteSelection.snapshot().active || !event.shiftKey || isTypingTarget(event.target)) return;
+      if (state.noteSelectionBusy || !noteSelection.snapshot().active || !event.shiftKey || isTypingTarget(event.target)) return;
       if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
       event.preventDefault();
       event.stopPropagation();
@@ -13405,7 +13684,7 @@
       if (!event.target.closest("#context-move-folder")) closeFolderSubmenu(false);
     });
     $("note-context-menu").addEventListener("keydown", function (event) {
-      const items = Array.from(this.querySelectorAll('[role="menuitem"]')).filter(function (item) { return !item.hidden && item.getClientRects().length; });
+      const items = Array.from(this.querySelectorAll('[role="menuitem"]')).filter(function (item) { return !item.hidden && !item.disabled && item.getClientRects().length; });
       if (event.key === "ArrowDown" || event.key === "ArrowUp") {
         if (!items.length) return;
         event.preventDefault();
@@ -13429,8 +13708,10 @@
       if (!folder) return;
       const recordName = state.actionMenuRecordName;
       const folderPath = folder.dataset.folderPath;
-      closeNoteActions();
-      if (recordName) moveNote(recordName, folderPath);
+      const selected = state.actionMenuSelection;
+      closeNoteActions(true);
+      if (selected && state.noteSelectionSelectedIDs.has(recordName)) confirmMoveSelectedNotes(folderPath);
+      else if (!selected && recordName) moveNote(recordName, folderPath);
     });
     $("note-folder-submenu").addEventListener("keydown", function (event) {
       const items = Array.from(this.querySelectorAll('[role="menuitem"]')).filter(function (item) { return !item.hidden && item.getClientRects().length; });
@@ -13958,6 +14239,21 @@
     document.addEventListener("keydown", handleShortcut);
   }
 
+  // Another tab can clear or replace the shared Apple account while this
+  // tab is offline or downloading bodies. Drop its in-memory copy too.
+  window.addEventListener("storage", function (event) {
+    const account = state.connectionUserID;
+    if (!account || state.demo || (event.key !== null && event.oldValue !== account)) return;
+    const session = state.accountSession;
+    loadAccountCache().then(function (cache) {
+      if (session !== state.accountSession || state.connectionUserID !== account) return;
+      if (event.key !== cache.ACCOUNT_RECORD_NAME_KEY && event.key !== null) return;
+      if (event.newValue === account) return;
+      resetSignedOutAccount();
+      return enqueueAccountPersistence(releaseAccountCacheConnections);
+    }).catch(function () {});
+  });
+
   const welcomeRetry = $("welcome-retry");
   if (welcomeRetry) welcomeRetry.addEventListener("click", function () {
     if (welcomeRetry.dataset.action === "return-to-cache") {
@@ -13965,6 +14261,16 @@
       welcomeRetry.textContent = "Reload Arbor";
       welcomeRetry.hidden = true;
       showApp();
+      return;
+    }
+    const retryPreparation = state.retryInitialNotes;
+    if (retryPreparation) {
+      state.retryInitialNotes = null;
+      Promise.resolve(retryPreparation()).catch(function (error) {
+        setWelcomeStatus(readableError(error), false);
+        welcomeRetry.textContent = "Reload Arbor";
+        welcomeRetry.hidden = false;
+      });
       return;
     }
     window.location.reload();
@@ -14073,7 +14379,7 @@
       loadEditQueue();
       const restored = await restoreLibraryCache();
       state.loadingRecords = false;
-      if (!restored || state.records.size === 0) return false;
+      if (!restored || state.prepareInitialNotes || state.records.size === 0) return false;
       if (!launchLibrary || !launchLibrary.cachedLibraryIsPaintable({ records: Array.from(state.records.values()) })) return false;
       state.paintedFromCache = true;
       syncDerivedCollections();
@@ -14081,11 +14387,7 @@
       renderAll();
       const restoredState = restoreOpenTabsForLoadedNotes();
       let note = state.preferences.tabsEnabled ? restoredState.note : currentNoteFromHistory();
-      if (!note) {
-        const openedNames = Array.from(state.bodyCache.keys());
-        const lastOpened = openedNames.length ? openedNames[openedNames.length - 1] : "";
-        note = state.notes.find(function (item) { return item.recordName === lastOpened; }) || null;
-      }
+      if (!note) note = orderedLibraryNotes().find(noteBodyReady) || null;
       if (note && !noteBodyReady(note)) note = null;
       selectNote(note || null);
       setConnection("Showing notes saved in this browser…", false);

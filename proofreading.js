@@ -1,8 +1,11 @@
 (function attachArborProofreading(root, factory) {
-  const api = factory();
+  const autocorrect = typeof module === "object" && module.exports
+    ? require("./autocorrect.js")
+    : root.ArborAutocorrect;
+  const api = factory(autocorrect);
   if (typeof module === "object" && module.exports) module.exports = api;
   else root.ArborProofreading = api;
-})(globalThis, function createArborProofreading() {
+})(globalThis, function createArborProofreading(autocorrect) {
   const WORD_RE = /[\p{L}]+(?:['’][\p{L}]+)*/gu;
   const VOWEL_SOUND_EXCEPTIONS = new Set(["hour", "honest", "honor", "heir", "honour"]);
   const CONSONANT_SOUND_EXCEPTIONS = new Set(["unicorn", "university", "universal", "unit", "union", "user", "usual", "useful", "european", "euro", "eulogy", "one", "once"]);
@@ -11,6 +14,46 @@
     if (source === source.toUpperCase()) return value.toUpperCase();
     if (source[0] === source[0].toUpperCase()) return value[0].toUpperCase() + value.slice(1);
     return value;
+  }
+
+  function spellingSentenceContinues(text, previouslyContinues) {
+    const value = String(text || "");
+    const boundaries = /[.!?…\r\n]/gu;
+    let boundary = -1;
+    let match;
+    while ((match = boundaries.exec(value))) boundary = match.index;
+    if (boundary >= 0) {
+      const following = value.slice(boundary + 1).trim().replace(/^["'”’)}\]]+/u, "").trim();
+      return Boolean(following);
+    }
+    return Boolean(previouslyContinues || value.trim());
+  }
+
+  function isDoubledLetterDeletion(originalValue, replacementValue) {
+    const original = String(originalValue || "").toLocaleLowerCase();
+    const replacement = String(replacementValue || "").toLocaleLowerCase();
+    if (original.length !== replacement.length + 1) return false;
+    for (let index = 0; index < original.length - 1; index += 1) {
+      if (original[index] !== original[index + 1]) continue;
+      if (original.slice(0, index) + original.slice(index + 1) === replacement) return true;
+    }
+    return false;
+  }
+
+  function capitalizedSpellingCandidates(word, spell, insideSentence) {
+    if (!insideSentence) {
+      const suggestions = spell.suggest(word);
+      return (suggestions.length ? suggestions : spell.suggest(word.toLocaleLowerCase())).map(function (candidate) {
+        const value = caseLike(word, candidate);
+        return { label: value, replacement: value };
+      });
+    }
+    if (!autocorrect || typeof autocorrect.highConfidenceCorrection !== "function") return [];
+    const correction = autocorrect.highConfidenceCorrection(word.toLocaleLowerCase(), "", spell);
+    if (!correction) return [];
+    if (correction.rule === "unique-single-edit" && !isDoubledLetterDeletion(word, correction.replacement)) return [];
+    const value = caseLike(word, correction.replacement);
+    return [{ label: value, replacement: value }];
   }
 
   function issue(start, end, kind, word, options, message) {
@@ -92,24 +135,34 @@
     return result.filter(Boolean);
   }
 
-  function spellingIssues(text, spell) {
+  function spellingIssues(text, spell, continuesSentence) {
     if (!spell || typeof spell.correct !== "function" || typeof spell.suggest !== "function") return [];
     const result = [];
     let match;
+    let previousEnd = 0;
+    let sentenceContinues = Boolean(continuesSentence);
     WORD_RE.lastIndex = 0;
     while ((match = WORD_RE.exec(text))) {
       const word = match[0];
+      sentenceContinues = spellingSentenceContinues(text.slice(previousEnd, match.index), sentenceContinues);
+      const insideSentence = sentenceContinues;
+      previousEnd = match.index + word.length;
+      sentenceContinues = spellingSentenceContinues(word, sentenceContinues);
       if (word.length < 2 || /\p{Lu}/u.test(word.slice(1)) || word === word.toUpperCase()) continue;
       if (match.index > 0 && (text[match.index - 1] === "@" || text[match.index - 1] === "#")) continue;
       const capital = word[0] !== word[0].toLocaleLowerCase() && word[0] === word[0].toLocaleUpperCase();
-      if (capital && word !== "I" && !spell.correct(word) && !spell.correct(word.toLowerCase())) continue;
       const missingContraction = word.toLocaleLowerCase() === "im";
       if (!missingContraction && (spell.correct(word) || spell.correct(word.toLowerCase()))) continue;
-      const suggestions = missingContraction ? ["I'm"] : spell.suggest(word);
-      const allCandidates = (suggestions.length ? suggestions : spell.suggest(word.toLowerCase())).map(function (candidate) {
-        const value = caseLike(word, candidate);
-        return { label: value, replacement: value };
-      });
+      let allCandidates;
+      if (missingContraction) allCandidates = [{ label: "I'm", replacement: "I'm" }];
+      else if (capital) allCandidates = capitalizedSpellingCandidates(word, spell, insideSentence);
+      else {
+        const suggestions = spell.suggest(word);
+        allCandidates = (suggestions.length ? suggestions : spell.suggest(word.toLowerCase())).map(function (candidate) {
+          const value = caseLike(word, candidate);
+          return { label: value, replacement: value };
+        });
+      }
       const caseOnlyValue = word[0].toLocaleUpperCase() + word.slice(1);
       const caseOnlyCandidate = allCandidates.find(function (candidate) {
         return candidate.replacement === caseOnlyValue && candidate.replacement !== word;
@@ -191,7 +244,7 @@
     const source = String(text || "");
     const grammar = grammarIssues(source, options || {});
     const grammarRanges = grammar.map(function (item) { return [item.start, item.end]; });
-    const spelling = spellingIssues(source, spell).filter(function (item) {
+    const spelling = spellingIssues(source, spell, options && options.continuesSentence).filter(function (item) {
       return !grammarRanges.some(function (range) { return item.start < range[1] && item.end > range[0]; });
     });
     const order = { capitalization: 0, grammar: 1, spelling: 2 };
@@ -202,6 +255,7 @@
 
   return Object.freeze({
     scan: scan,
+    spellingSentenceContinues: spellingSentenceContinues,
     promoteSpellingCandidate: promoteSpellingCandidate,
     initialCapitalizationChanges: initialCapitalizationChanges
   });

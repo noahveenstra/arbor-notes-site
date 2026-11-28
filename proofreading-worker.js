@@ -1,6 +1,6 @@
 "use strict";
 
-importScripts("./proofreading.js?v=arb-proofreading-real-models-20261126-a", "./autocorrect.js?v=arb-109-context-autocorrect-20261123-a", "./vendor/spellcheck/nspell.js");
+importScripts("./autocorrect.js?v=arb-109-context-autocorrect-20261123-a", "./proofreading.js?v=arb-219-capital-hint-20261128-a", "./vendor/spellcheck/nspell.js");
 
 let dictionaryPromise = null;
 let spellChecker = null;
@@ -34,10 +34,11 @@ self.onmessage = async function (event) {
   if (request.type !== "check" || !Number.isInteger(request.requestId) || !Array.isArray(request.blocks)) return;
   try {
     const checker = await loadDictionary();
-    const results = request.blocks.map(function (block) {
+    const results = request.blocks.map(function (block, index) {
       return self.ArborProofreading.scan(String(block || ""), checker, {
         checkGrammarSuggestions: request.checkGrammarSuggestions !== false,
-        checkSentenceCapitalization: request.checkSentenceCapitalization === true
+        checkSentenceCapitalization: request.checkSentenceCapitalization === true,
+        continuesSentence: Boolean(request.spellingContinuations && request.spellingContinuations[index])
       });
     });
     const autocorrection = request.autocorrect

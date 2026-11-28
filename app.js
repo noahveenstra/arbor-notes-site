@@ -1100,21 +1100,12 @@
       if (!record) throw new Error("CloudKit could not find this note.");
     }
     if (!accountSessionCurrent(job.session)) return null;
-    let body;
-    const asset = job.nativeSchema ? fieldValue(record, "text_ckAsset") : fieldValue(record, "bodyAsset");
-    const useAsset = job.nativeSchema
-      ? !(typeof fieldValue(record, "text") === "string" && fieldValue(record, "text").length) && Boolean(asset)
-      : fieldValue(record, "bodyStorageRaw") === "asset";
-    if (useAsset) {
-      const url = asset && (asset.downloadURL || asset.url);
-      if (!url) throw new Error("This note’s attachment could not be opened.");
-      const response = await fetch(url);
-      if (!response.ok) throw new Error("Could not download this note’s text asset.");
-      body = await (await response.blob()).text();
-    } else {
-      const value = fieldValue(record, job.nativeSchema ? "text" : "body");
-      body = typeof value === "string" ? value : "";
-    }
+    const inlineBody = fieldValue(record, "body");
+    const body = job.nativeSchema
+      ? await loadNativeRecordBody(record, false)
+      : fieldValue(record, "bodyStorageRaw") === "asset"
+        ? await loadAssetBody(record)
+        : typeof inlineBody === "string" ? inlineBody : "";
     return accountSessionCurrent(job.session)
       ? { body: body, record: record, requestRevision: job.revision, session: job.session }
       : null;
@@ -1129,6 +1120,14 @@
       }
       const note = state.notes.find(function (item) { return item.recordName === job.recordName; });
       if (!note || !state.previewVisibleNames.has(job.recordName) || !previewNeedsHydration(note, true)) {
+        state.previewQueuedNames.delete(job.key);
+        continue;
+      }
+      // A resize or scroll can move a queued row before IntersectionObserver
+      // delivers the next visibility update.
+      const rowID = "note-row-" + String(job.recordName).replace(/[^A-Za-z0-9_-]/g, "");
+      if (!previewWithinPrefetchRegion(document.getElementById(rowID), $("note-list"))) {
+        state.previewVisibleNames.delete(job.recordName);
         state.previewQueuedNames.delete(job.key);
         continue;
       }
@@ -5020,7 +5019,7 @@
     if (state.proofreadingWorker) return state.proofreadingWorker;
     if (typeof Worker !== "function") return null;
     try {
-      const worker = new Worker("./proofreading-worker.js?v=arb-proofreading-real-models-20261126-a", { name: "arbor-local-proofreading" });
+      const worker = new Worker("./proofreading-worker.js?v=arb-219-capital-hint-20261128-a", { name: "arbor-local-proofreading" });
       worker.addEventListener("message", onProofreadingMessage);
       worker.addEventListener("error", function (event) {
         console.warn("Local writing suggestions could not start.", event.message || "Worker error");
@@ -5038,14 +5037,27 @@
     state.automaticSpellingRequests.clear();
   }
 
-  function proofreadingTextNodes(body) {
-    const walker = document.createTreeWalker(body, NodeFilter.SHOW_TEXT);
+  function proofreadingTextNodes(body, spellingContinuations) {
+    const includeContinuations = Array.isArray(spellingContinuations);
+    const show = includeContinuations ? NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT : NodeFilter.SHOW_TEXT;
+    const walker = document.createTreeWalker(body, show);
     const nodes = [];
+    let continuesSentence = false;
     while (walker.nextNode()) {
       const node = walker.currentNode;
+      if (includeContinuations && node.nodeType === Node.ELEMENT_NODE) {
+        if (node.tagName === "BR" || /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TD|TH|TR|UL)$/.test(node.tagName)) {
+          continuesSentence = false;
+        }
+        continue;
+      }
       const parent = node.parentElement;
       if (!node.nodeValue || !node.nodeValue.trim() || (parent && parent.closest("code, pre, script, style, [data-proofreading-ignore]"))) continue;
       nodes.push(node);
+      if (includeContinuations) {
+        spellingContinuations.push(continuesSentence);
+        continuesSentence = window.ArborProofreading.spellingSentenceContinues(node.nodeValue, continuesSentence);
+      }
     }
     return nodes;
   }
@@ -5809,7 +5821,8 @@
       // Text-offset restoration loses the caret at empty <br>-backed rows (for
       // example, immediately after Return in a list). Let the live DOM Range
       // track the unwrap/normalize mutation instead.
-      const nodes = proofreadingTextNodes(body);
+      const spellingContinuations = [];
+      const nodes = proofreadingTextNodes(body, spellingContinuations);
       const blocks = nodes.map(function (node) { return node.nodeValue || ""; });
       const autoCorrectionTarget = trigger ? resolveAutoCorrectionTarget(body, trigger) : null;
       if (trigger && !autoCorrectionTarget) state.proofreadingHeldTrigger = null;
@@ -5827,6 +5840,7 @@
         requestId: requestId,
         recordName: recordName,
         blocks: blocks,
+        spellingContinuations: spellingContinuations,
         checkGrammarSuggestions: state.preferences.checkGrammarSuggestions,
         checkSentenceCapitalization: state.preferences.checkSentenceCapitalization,
         autocorrect: autoCorrectionTarget ? { word: autoCorrectionTarget.word, before: trigger.before } : null,
@@ -6383,6 +6397,7 @@
     }
     const padding = 10;
     const zoom = Number.parseFloat(getComputedStyle(document.body).zoom) || 1;
+    popover.style.maxWidth = Math.max(0, (window.innerWidth - padding * 2) / zoom) + "px";
     const width = popover.offsetWidth;
     const center = Math.max(padding / zoom + width / 2, Math.min(window.innerWidth / zoom - padding / zoom - width / 2, (bounds.left + bounds.width / 2) / zoom));
     const openBelow = bounds.top / zoom < popover.offsetHeight + 18;
@@ -6395,11 +6410,13 @@
     const marker = entry && entry.marker;
     if (!marker || !marker.isConnected) return null;
     const body = $("note-body");
+    if (!body || !body.contains(marker)) return null;
     let block = marker.closest("p, li, blockquote, h1, h2, h3, h4, h5, h6, [data-block]");
-    if (!block) {
+    if (!block || !body.contains(block)) {
       block = marker.parentElement;
-      while (block && block.parentElement && block.parentElement !== body) block = block.parentElement;
-      if (!block) block = body;
+      while (block && block !== body && block.parentElement && block.parentElement !== body) block = block.parentElement;
+      const blockTags = /^(ADDRESS|ARTICLE|ASIDE|BLOCKQUOTE|DD|DIV|DL|DT|FIELDSET|FIGCAPTION|FIGURE|FOOTER|FORM|H[1-6]|HEADER|LI|MAIN|NAV|OL|P|PRE|SECTION|TABLE|TD|TH|TR|UL)$/;
+      if (!block || block === body || !blockTags.test(block.tagName)) block = body;
     }
     if (!block) return null;
     const paragraph = block.textContent || "";
@@ -7569,8 +7586,11 @@
     return wasActive ? nextName : "";
   }
 
-  async function loadAssetBody(record) {
-    const asset = fieldValue(record, "bodyAsset");
+  function loadAssetBody(record) {
+    return readTextAsset(fieldValue(record, "bodyAsset"));
+  }
+
+  async function readTextAsset(asset) {
     const url = asset && (asset.downloadURL || asset.url);
     if (!url) throw new Error("This note’s attachment could not be opened.");
     const response = await fetch(url);
@@ -7945,16 +7965,19 @@
   async function loadNativeTextAsset(note, session) {
     const record = await ensureFullNativeRecord(note);
     if (session != null && !accountSessionCurrent(session)) return "";
-    const current = fieldValue(record, "text");
-    if (typeof current === "string" && current.length) return current;
+    return loadNativeRecordBody(record, true);
+  }
+
+  async function loadNativeRecordBody(record, cacheAsset) {
+    const text = fieldValue(record, "text");
+    if (typeof text === "string" && text.length) return text;
     const asset = fieldValue(record, "text_ckAsset");
-    const url = asset && (asset.downloadURL || asset.url);
-    if (!url) return typeof current === "string" ? current : "";
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("Could not download this note’s text asset.");
-    const body = await (await response.blob()).text();
-    if (!record.fields) record.fields = {};
-    record.fields.CD_text = field(body);
+    if (!asset) return typeof text === "string" ? text : "";
+    const body = await readTextAsset(asset);
+    if (cacheAsset) {
+      if (!record.fields) record.fields = {};
+      record.fields.CD_text = field(body);
+    }
     return body;
   }
 
@@ -8024,27 +8047,11 @@
     syncDerivedCollections(recordName);
     if (!noteIsStillLoaded(recordName)) return "";
 
-    let body;
-    if (nativeSchema) {
-      const text = fieldValue(fetched, "text");
-      if (typeof text === "string") body = text;
-      else {
-        const asset = fieldValue(fetched, "text_ckAsset");
-        const url = asset && (asset.downloadURL || asset.url);
-        if (!url) body = "";
-        else {
-          const assetResponse = await fetch(url);
-          if (!assetResponse.ok) throw new Error("Could not download this note’s text asset.");
-          body = await (await assetResponse.blob()).text();
-          if (!fetched.fields) fetched.fields = {};
-          fetched.fields.CD_text = field(body);
-        }
-      }
-    } else {
-      body = fieldValue(fetched, "bodyStorageRaw") === "asset"
+    const body = nativeSchema
+      ? await loadNativeRecordBody(fetched, true)
+      : fieldValue(fetched, "bodyStorageRaw") === "asset"
         ? await loadAssetBody(fetched)
         : String(fieldValue(fetched, "body") || "");
-    }
 
     if (!accountSessionCurrent(session) || !noteIsStillLoaded(recordName)) return "";
     const currentRecord = state.records.get(recordName);

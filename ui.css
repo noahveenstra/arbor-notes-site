@@ -220,7 +220,7 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
   border-bottom: 2px solid var(--secondary-label);
 }
 .correction-mark:hover, .correction-mark:focus { background: transparent; outline: none; }
-.correction-popover { position: fixed; z-index: 110; display: flex; width: min(320px, calc(100vw - 20px)); max-width: min(92vw, 520px); flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--secondary-label) 48%, transparent); border-radius: 12px; color: var(--label); background: var(--surface-elevated); box-shadow: 0 10px 28px rgb(0 0 0 / 34%); opacity: 0; pointer-events: none; transform: translate(-50%, -100%) translateY(-3px) scale(.985); transition: opacity 140ms ease-in, transform 140ms cubic-bezier(.4, 0, 1, 1), visibility 0s linear 140ms; }
+.correction-popover { position: fixed; z-index: 110; display: flex; width: 320px; max-width: calc(100% - 20px); flex-direction: column; align-items: stretch; gap: 10px; padding: 12px; border: 1px solid color-mix(in srgb, var(--secondary-label) 48%, transparent); border-radius: 12px; color: var(--label); background: var(--surface-elevated); box-shadow: 0 10px 28px rgb(0 0 0 / 34%); opacity: 0; pointer-events: none; transform: translate(-50%, -100%) translateY(-3px) scale(.985); transition: opacity 140ms ease-in, transform 140ms cubic-bezier(.4, 0, 1, 1), visibility 0s linear 140ms; }
 .correction-popover[data-placement="bottom"] { transform: translateX(-50%) translateY(3px) scale(.985); }
 .correction-popover.is-open { visibility: visible; opacity: 1; pointer-events: auto; transform: translate(-50%, -100%) translateY(0) scale(1); transition: opacity 180ms ease, transform 220ms cubic-bezier(.22, 1, .36, 1), visibility 0s; }
 .correction-popover[data-placement="bottom"].is-open { transform: translateX(-50%) translateY(0) scale(1); }
@@ -232,7 +232,8 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .correction-option, .correction-ignore, .correction-add-dictionary { min-height: 34px; padding: 6px 9px; border: 0; border-radius: 7px; color: var(--label); background: transparent; font: 500 14px/1.25 var(--font-sans); white-space: nowrap; cursor: default; }
 .correction-option:hover, .correction-option:focus-visible, .correction-option[aria-selected="true"], .correction-ignore:hover, .correction-ignore:focus-visible { background: var(--surface-control); outline: none; }
 .correction-option:focus-visible, .correction-ignore:focus-visible { box-shadow: inset 0 0 0 1px var(--focus-ring); }
-.correction-actions { display: flex; align-items: center; gap: 5px; margin: 0 -12px -12px; padding: 7px 9px; border-top: 1px solid var(--separator); }
+.correction-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin: 0 -12px -12px; padding: 7px 9px; border-top: 1px solid var(--separator); }
+.correction-popover[data-kind="spelling"] { width: 370px; }
 .correction-popover[data-kind="spelling"] .correction-copy { display: none; }
 .correction-popover[data-kind="spelling"] .correction-actions { margin: -12px -12px 0; border-top: 0; border-bottom: 1px solid var(--separator); }
 .correction-ignore, .correction-add-dictionary { color: var(--secondary-label); }

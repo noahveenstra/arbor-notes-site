@@ -1053,12 +1053,36 @@
     const note = state.notes.find(function (item) { return item.recordName === recordName; });
     if (!note) return;
     const title = row.querySelector(".note-row-title");
-    if (title) title.textContent = note.title;
+    if (title && title.textContent !== note.title) title.textContent = note.title;
     const preview = row.querySelector(".note-row-excerpt");
-    if (!preview) return;
-    const text = note.preview || (note.previewUnavailable ? "Preview unavailable" : "");
-    preview.textContent = text;
-    preview.hidden = !text;
+    if (preview) renderNotePreview(preview, note);
+  }
+
+  function renderNotePreview(preview, note) {
+    const text = note.preview || (state.previewLoadErrors.has(note.recordName) ? "Preview unavailable" : "");
+    const loading = !text && state.previewVisibleNames.has(note.recordName) && previewCanLoad(note);
+    if (loading) {
+      if (!preview.classList.contains("note-preview-skeleton")) {
+        preview.replaceChildren(...skeletonLines(["94%", "68%"]));
+        preview.setAttribute("aria-hidden", "true");
+      }
+    } else {
+      if (preview.textContent !== text || preview.classList.contains("note-preview-skeleton")) {
+        preview.textContent = text;
+      }
+      preview.removeAttribute("aria-hidden");
+    }
+    preview.classList.toggle("note-preview-skeleton", loading);
+    preview.hidden = !loading && !text;
+  }
+
+  function skeletonLines(widths) {
+    return widths.map(function (width) {
+      const bar = document.createElement("span");
+      bar.className = "note-skeleton-bar";
+      bar.style.width = width;
+      return bar;
+    });
   }
 
   function previewIsCurrent(recordName, record) {
@@ -1082,16 +1106,18 @@
     return right > left && bottom > top && row.bottom >= top - 360 && row.top <= bottom + 360 && row.right >= left && row.left <= right;
   }
 
-  function previewNeedsHydration(note, allowQueued) {
-    if (!note || !state.database || !state.previewHydrationReady || state.accountCacheSuspended) return false;
-    if (typeof navigator !== "undefined" && navigator.onLine === false) return false;
-    if ((!allowQueued && state.previewQueuedNames.has(previewJobKey(state.accountSession, note.recordName))) || state.previewLoadErrors.has(note.recordName)) return false;
+  function previewCanLoad(note) {
+    if (!note || !state.database || !state.previewHydrationReady || state.accountCacheSuspended || browserOffline()) return false;
+    if (state.previewLoadErrors.has(note.recordName)) return false;
     const record = state.records.get(note.recordName) || note.record;
-    if (previewIsCurrent(note.recordName, record)) return false;
-    if (state.previewRetryBlocks.get(note.recordName) === previewRecordRevision(record)) return false;
-    if (note.bodyPromise || note.recordPromise) return false;
-    if (state.bodyCache.has(note.recordName) && !state.previewStaleNames.has(note.recordName)) return false;
-    return true;
+    return !previewIsCurrent(note.recordName, record) &&
+      state.previewRetryBlocks.get(note.recordName) !== previewRecordRevision(record) &&
+      (!noteBodyLoaded(note) || state.previewStaleNames.has(note.recordName));
+  }
+
+  function previewNeedsHydration(note, allowQueued) {
+    return previewCanLoad(note) && !note.bodyPromise && !note.recordPromise &&
+      (allowQueued || !state.previewQueuedNames.has(previewJobKey(state.accountSession, note.recordName)));
   }
 
   function enqueueVisiblePreviews() {
@@ -1165,6 +1191,7 @@
       if (!previewWithinPrefetchRegion(document.getElementById(rowID), $("note-list"))) {
         state.previewVisibleNames.delete(job.recordName);
         state.previewQueuedNames.delete(job.key);
+        updatePreviewRow(job.recordName);
         continue;
       }
       state.previewActiveCount += 1;
@@ -1199,7 +1226,6 @@
         state.previewLoadErrors.delete(job.recordName);
         current.preview = text;
         current.previewUnavailable = false;
-        updatePreviewRow(job.recordName);
       }).catch(function () {
         if (!accountSessionCurrent(job.session)) return;
         if (typeof navigator !== "undefined" && navigator.onLine === false) return;
@@ -1208,11 +1234,11 @@
         state.previewLoadErrors.add(job.recordName);
         const current = state.notes.find(function (item) { return item.recordName === job.recordName; });
         if (current) current.previewUnavailable = true;
-        updatePreviewRow(job.recordName);
       }).finally(function () {
         if (note.previewPromise === request) note.previewPromise = null;
         state.previewActiveCount = Math.max(0, state.previewActiveCount - 1);
         state.previewQueuedNames.delete(job.key);
+        if (accountSessionCurrent(job.session)) updatePreviewRow(job.recordName);
         enqueueVisiblePreviews();
       });
     }
@@ -1237,9 +1263,10 @@
       state.previewObserver = new IntersectionObserver(function (entries) {
         entries.forEach(function (entry) {
           const recordName = entry.target.dataset.recordName;
-          if (!recordName) return;
+          if (!recordName || !entry.target.isConnected || state.previewVisibleNames.has(recordName) === entry.isIntersecting) return;
           if (entry.isIntersecting) state.previewVisibleNames.add(recordName);
           else state.previewVisibleNames.delete(recordName);
+          updatePreviewRow(recordName);
         });
         enqueueVisiblePreviews();
       }, { root: list, rootMargin: "360px 0px", threshold: 0 });
@@ -1996,8 +2023,7 @@
     detail.className = "note-card-detail";
     const preview = document.createElement("span");
     preview.className = "note-card-preview note-row-excerpt";
-    preview.textContent = note.preview || (note.previewUnavailable ? "Preview unavailable" : "");
-    preview.hidden = !preview.textContent;
+    renderNotePreview(preview, note);
     detail.appendChild(preview);
     card.appendChild(detail);
 
@@ -2234,6 +2260,7 @@
       observeNativePreview(card, note);
       if (previouslyVisiblePreviews.has(note.recordName) && previewWithinPrefetchRegion(card, list)) {
         state.previewVisibleNames.add(note.recordName);
+        renderNotePreview(card.querySelector(".note-row-excerpt"), note);
       }
     }
     if (!dateField) {
@@ -7424,35 +7451,58 @@
     selectNote(note);
   }
 
+  function renderNoteBodySkeleton(message, note) {
+    const loading = document.createElement("div");
+    loading.className = "editor-load-state editor-note-loading";
+    const status = document.createElement("span");
+    status.setAttribute("role", "status");
+    status.textContent = message;
+    loading.append(status);
+    if (note && note.preview && !note.previewUnavailable) {
+      const excerpt = document.createElement("p");
+      excerpt.className = "editor-loading-excerpt";
+      excerpt.textContent = note.preview;
+      loading.append(excerpt);
+    }
+    const bars = document.createElement("div");
+    bars.className = "editor-note-skeleton";
+    bars.setAttribute("aria-hidden", "true");
+    bars.append(...skeletonLines(["95%", "87%", "67%", "92%", "81%", "53%"]));
+    loading.append(bars);
+    $("rich-editor").replaceChildren(loading);
+    return loading;
+  }
+
   function renderUnavailableNoteBody(recordName) {
     const offline = browserOffline();
     const disconnected = !state.database;
-    const waiting = disconnected && !offline && !state.loadRecordsErrorMessage;
+    if (disconnected && !offline && !state.loadRecordsErrorMessage) {
+      renderNoteBodySkeleton("Waiting for iCloud to open this note…",
+        state.notes.find(function (note) { return note.recordName === recordName; }));
+      return;
+    }
     const message = document.createElement("div");
-    message.className = waiting ? "editor-load-state" : "editor-load-state is-error";
+    message.className = "editor-load-state is-error";
     const label = document.createElement("p");
     label.setAttribute("role", "status");
     if (offline) label.textContent = "Reconnect to the internet to open this note from iCloud.";
-    else if (waiting) label.textContent = "Waiting for iCloud to open this note…";
     else if (disconnected) label.textContent = "This note’s text is stored in iCloud. Reconnect to open it.";
     else label.textContent = "This note’s text could not load.";
     message.append(label);
-    if (!waiting) {
-      const retry = document.createElement("button");
-      retry.type = "button";
-      retry.className = "editor-retry-button";
-      retry.textContent = disconnected ? "Reconnect to iCloud" : "Try again";
-      retry.addEventListener("click", function () {
-        if (browserOffline()) return;
-        if (!state.database) {
-          openCachedSignInRecovery();
-          return;
-        }
-        const note = state.notes.find(function (item) { return item.recordName === recordName; });
-        if (note && state.selectedRecordName === recordName) selectNote(note);
-      });
-      message.append(retry);
-    }
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.className = "editor-retry-button";
+    retry.textContent = disconnected ? "Reconnect to iCloud" : "Try again";
+    retry.addEventListener("click", function () {
+      if (browserOffline()) return;
+      if (!state.database) {
+        openCachedSignInRecovery();
+        return;
+      }
+      const note = state.notes.find(function (item) { return item.recordName === recordName; });
+      if (note && state.selectedRecordName === recordName) selectNote(note);
+    });
+    message.append(retry);
     $("rich-editor").replaceChildren(message);
   }
 
@@ -7533,19 +7583,7 @@
     } else if (needsBody) {
       const recordName = note.recordName;
       const session = state.accountSession;
-      const loading = document.createElement("div");
-      loading.className = "editor-load-state";
-      const status = document.createElement("span");
-      status.setAttribute("role", "status");
-      status.textContent = "Opening note…";
-      if (note.preview && !note.previewUnavailable) {
-        const excerpt = document.createElement("p");
-        excerpt.className = "editor-loading-excerpt";
-        excerpt.textContent = note.preview;
-        loading.append(excerpt);
-      }
-      loading.append(status);
-      $("rich-editor").replaceChildren(loading);
+      const loading = renderNoteBodySkeleton("Opening note…", note);
       const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : ensureWebTextBody(note);
       bodyPromise.then(function () {
         if (session !== state.accountSession || state.selectedRecordName !== recordName || !loading.isConnected) return;
@@ -8679,7 +8717,14 @@
           syncKeyboardShortcutPreferences(state.accountSession);
           state.previewLoadErrors.clear();
           state.previewRetryBlocks.clear();
+          state.previewVisibleNames.forEach(updatePreviewRow);
           queueNativePreview();
+        }
+      });
+      window.addEventListener("offline", function () {
+        state.previewVisibleNames.forEach(updatePreviewRow);
+        if (state.selectedRecordName && $("rich-editor").querySelector(".editor-note-loading")) {
+          renderUnavailableNoteBody(state.selectedRecordName);
         }
       });
       document.addEventListener("visibilitychange", function () {

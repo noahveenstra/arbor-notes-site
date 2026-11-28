@@ -142,6 +142,8 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 .note-skeleton-title-bar { height: 1em; }
 .note-skeleton-preview { display: block; }
 .note-skeleton-preview-bar { height: .78em; }
+#note-list .note-card-preview.note-preview-skeleton { display: flex; flex-direction: column; justify-content: space-around; height: 2.7em; }
+.note-preview-skeleton .note-skeleton-bar { flex: 0 0 .65em; }
 .note-skeleton-date { display: flex; align-items: center; }
 .note-skeleton-date-bar { height: .65em; }
 @keyframes arbor-note-skeleton-shimmer { to { background-position: -220% 0; } }
@@ -442,6 +444,10 @@ body.is-resizing-pane, body.is-resizing-pane * { cursor: col-resize !important; 
 #note-page { width: 100%; margin: 0 auto; }
 #note-title { width: min(var(--note-body-width), 100%); margin: 0 auto 28px; }
 #rich-editor { position: relative; min-height: 300px; }
+#rich-editor .editor-note-loading { width: min(var(--note-body-width), 100%); margin-inline: auto; }
+#rich-editor .editor-note-loading::before { display: none; }
+#rich-editor .editor-note-skeleton { display: grid; align-content: start; gap: .85em; width: 100%; font-size: 16px; }
+#rich-editor .editor-note-skeleton .note-skeleton-bar:nth-child(4) { margin-top: .9em; }
 #rich-editor .editor-loading-excerpt { margin: 0; color: var(--label); font-size: 15px; overflow-wrap: anywhere; }
 #rich-editor .note-body { width: min(var(--note-body-width), 100%); margin: 0 auto; }
 #empty-state { min-height: 0; border: 0; border-radius: 0; background: transparent; }

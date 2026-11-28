@@ -7361,6 +7361,38 @@
     selectNote(note);
   }
 
+  function renderUnavailableNoteBody(recordName) {
+    const offline = browserOffline();
+    const disconnected = !state.database;
+    const waiting = disconnected && !offline && !state.loadRecordsErrorMessage;
+    const message = document.createElement("div");
+    message.className = waiting ? "editor-load-state" : "editor-load-state is-error";
+    const label = document.createElement("p");
+    label.setAttribute("role", "status");
+    if (offline) label.textContent = "Reconnect to the internet to open this note from iCloud.";
+    else if (waiting) label.textContent = "Waiting for iCloud to open this note…";
+    else if (disconnected) label.textContent = "This note’s text is stored in iCloud. Reconnect to open it.";
+    else label.textContent = "This note’s text could not load.";
+    message.append(label);
+    if (!waiting) {
+      const retry = document.createElement("button");
+      retry.type = "button";
+      retry.className = "editor-retry-button";
+      retry.textContent = disconnected ? "Reconnect to iCloud" : "Try again";
+      retry.addEventListener("click", function () {
+        if (browserOffline()) return;
+        if (!state.database) {
+          openCachedSignInRecovery();
+          return;
+        }
+        const note = state.notes.find(function (item) { return item.recordName === recordName; });
+        if (note && state.selectedRecordName === recordName) selectNote(note);
+      });
+      message.append(retry);
+    }
+    $("rich-editor").replaceChildren(message);
+  }
+
   function selectNote(note) {
     window.clearTimeout(state.proofreadingTimer);
     window.clearTimeout(state.capitalizationContextTimer);
@@ -7430,8 +7462,11 @@
       !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "text") !== "string";
     const legacyNeedsBody = !state.nativeSchema && note.record.recordType === "ArborNote" &&
       !state.bodyCache.has(note.recordName) && typeof fieldValue(note.record, "body") !== "string";
-    $("note-title").readOnly = nativeNeedsBody || legacyNeedsBody;
-    if (nativeNeedsBody || legacyNeedsBody) {
+    const needsBody = nativeNeedsBody || legacyNeedsBody;
+    $("note-title").readOnly = needsBody;
+    if (needsBody && (!state.database || browserOffline())) {
+      renderUnavailableNoteBody(note.recordName);
+    } else if (needsBody) {
       const recordName = note.recordName;
       const session = state.accountSession;
       const loading = document.createElement("div");
@@ -7439,7 +7474,7 @@
       $("rich-editor").replaceChildren(loading);
       const bodyPromise = nativeNeedsBody ? ensureNativeTextBody(note) : ensureWebTextBody(note);
       bodyPromise.then(function () {
-        if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
+        if (session !== state.accountSession || state.selectedRecordName !== recordName || !loading.isConnected) return;
         if (!noteIsStillLoaded(recordName)) {
           selectNote(null);
           renderNotes();
@@ -7453,14 +7488,8 @@
         revealRecoveredDraft(note);
         renderNotes();
       }).catch(function () {
-        if (session !== state.accountSession || state.selectedRecordName !== recordName) return;
-        const message = document.createElement("div"); message.className = "editor-load-state is-error";
-        const label = document.createElement("p"); label.textContent = "This note’s text could not load.";
-        const retry = document.createElement("button"); retry.type = "button";
-        retry.className = "editor-retry-button"; retry.textContent = "Try again";
-        retry.addEventListener("click", function () { selectNote(note); });
-        message.append(label, retry); $("rich-editor").replaceChildren(message);
-        showSaveProblem("Load failed. This note’s text could not load.", recordName);
+        if (session !== state.accountSession || state.selectedRecordName !== recordName || !loading.isConnected) return;
+        renderUnavailableNoteBody(recordName);
       });
     } else {
       rememberSyncBaseline(note.recordName, { title: note.title, body: note.editorBody || "" });
@@ -8350,16 +8379,20 @@
 
   const AUTH_RESTORE_TIMEOUT_MS = 15_000;
   const AUTH_RESTORE_SLOW_NOTICE_MS = 10_000;
+  let authRestoreAttempt = 0;
 
   function showCachedSignInFailure(message) {
+    state.loadRecordsErrorMessage = message;
     setConnection("Couldn’t reach iCloud. Showing notes saved in this browser.", false);
     setListMessage(message, true, true, true);
-    const retry = $("list-message-retry");
-    if (retry) retry.textContent = "Try again";
+    if (state.selectedRecordName && !state.editor && $("note-title").readOnly) {
+      renderUnavailableNoteBody(state.selectedRecordName);
+    }
     showApp();
   }
 
   function openCachedSignInRecovery() {
+    if (browserOffline()) return;
     if (!state.container) {
       window.location.reload();
       return;
@@ -8367,11 +8400,53 @@
     showWelcomeStep("auth");
     $("welcome-auth-title").textContent = "Reconnect to iCloud.";
     $("welcome-auth-description").textContent = "Sign in with the Apple Account used for these notes. Signing in with a different account clears this browser’s saved copy to keep accounts separate.";
-    setWelcomeStatus("Your saved browser copy is still available. You can return to it below.", false);
     const returnButton = $("welcome-retry");
     returnButton.dataset.action = "return-to-cache";
     returnButton.textContent = "Back to saved notes";
     returnButton.hidden = false;
+    restoreAppleSession(true);
+  }
+
+  function restoreAppleSession(reconnecting) {
+    const attempt = ++authRestoreAttempt;
+    const session = state.accountSession;
+    const isCurrent = function () {
+      return attempt === authRestoreAttempt && session === state.accountSession;
+    };
+    const showFailure = function () {
+      setConnection("Sign-in needs attention", false);
+      if (state.paintedFromCache) {
+        showCachedSignInFailure("Arbor couldn’t restore its iCloud session. These notes are the unencrypted copy saved in this browser. Try again to reconnect.");
+      } else showWelcomeCheckError();
+    };
+    if (reconnecting) setWelcomeStatus("Checking your Apple Account session…", true);
+    const slowTimer = window.setTimeout(function () {
+      if (!isCurrent() || $("welcome-screen").hidden) return;
+      setWelcomeStatus("Still checking your Apple Account session. This is taking longer than usual; keep this page open.", true);
+    }, AUTH_RESTORE_SLOW_NOTICE_MS);
+    const timeout = window.setTimeout(function () {
+      if (isCurrent()) showFailure();
+    }, AUTH_RESTORE_TIMEOUT_MS);
+
+    return Promise.resolve().then(function () {
+      return state.container.setUpAuth();
+    }).then(function (identity) {
+      if (!isCurrent()) return;
+      if (identity) connectUser(identity);
+      else if (reconnecting && !$("welcome-screen").hidden) {
+        setWelcomeStatus("Sign in to open notes stored in iCloud. Your saved browser copy is still available below.", false);
+      } else if (state.paintedFromCache) {
+        showCachedSignInFailure("This browser is not signed in to iCloud. These notes are the unencrypted copy saved in this browser. Sign in again to reconnect.");
+      } else {
+        setConnection("Not connected", false);
+        showWelcomeSignedOut();
+      }
+    }, function () {
+      if (isCurrent()) showFailure();
+    }).finally(function () {
+      window.clearTimeout(slowTimer);
+      window.clearTimeout(timeout);
+    });
   }
 
   // CloudKit JS opens a new window synchronously from its sign-in control.
@@ -8464,47 +8539,15 @@
       });
       state.container = CloudKit.getDefaultContainer();
       if (state.arborCloudKitTransport) enableApplePopupReturn(state.arborCloudKitTransport.authTokenStore);
-      const cachedFailure = "Arbor couldn’t restore its iCloud session. Your browser may still be signed in to Apple. These notes are the unencrypted copy saved in this browser. Reload to try again.";
       if (state.paintedFromCache) setConnection("Checking your Apple Account…", false);
       else {
         setConnection("Checking your Apple Account session…", false);
         showWelcomeChecking();
       }
-      let authRestoreSettled = false;
-      const authRestoreSlowTimer = window.setTimeout(function () {
-        if (authRestoreSettled || state.paintedFromCache) return;
-        setWelcomeStatus("Still checking your Apple Account session. This is taking longer than usual; keep this page open.", true);
-      }, AUTH_RESTORE_SLOW_NOTICE_MS);
-      const authRestoreTimer = window.setTimeout(function () {
-        if (authRestoreSettled) return;
-        window.clearTimeout(authRestoreSlowTimer);
-        setConnection("Sign-in needs attention", false);
-        if (state.paintedFromCache) showCachedSignInFailure(cachedFailure);
-        else showWelcomeCheckError();
-      }, AUTH_RESTORE_TIMEOUT_MS);
-      const finishAuthRestore = function () {
-        authRestoreSettled = true;
-        window.clearTimeout(authRestoreSlowTimer);
-        window.clearTimeout(authRestoreTimer);
-      };
-      state.container.setUpAuth().then(function (identity) {
-        finishAuthRestore();
-        if (identity) connectUser(identity);
-        else if (state.paintedFromCache) showCachedSignInFailure("This browser is not signed in to iCloud. These notes are the unencrypted copy saved in this browser. Sign in again below to reconnect.");
-        else {
-          setConnection("Not connected", false);
-          showWelcomeSignedOut();
-        }
-      }).catch(function () {
-        finishAuthRestore();
-        setConnection("Sign-in needs attention", false);
-        if (state.paintedFromCache) showCachedSignInFailure(cachedFailure);
-        else showWelcomeCheckError();
-      });
       state.container.whenUserSignsIn().then(function (identity) {
-        finishAuthRestore();
         connectUser(identity);
       });
+      restoreAppleSession(false);
       state.container.whenUserSignsOut().then(function () {
         const hadUnsaved = state.dirty || state.saveFlightCount > 0 || hasStoredDrafts() || state.editQueue.length > 0;
         const session = ++state.accountSession;
